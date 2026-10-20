@@ -94,7 +94,7 @@ class MainActivity : Activity() {
         // নেভিগেশন বার হাইড করা
         hideSystemNavigationBar()
 
-        // Soft Keyboard State Listener to restore Fullscreen Immersive layout
+        // Soft Keyboard State Listener (Fixes the stuck layout issue instantly)
         setupKeyboardListener(mainLayout)
 
         // WebView Settings & Acceleration
@@ -156,9 +156,10 @@ class MainActivity : Activity() {
             val screenHeight = rootView.rootView.height
             val keypadHeight = screenHeight - r.bottom
 
+            // কিবোর্ড বন্ধ হলে WebView-কে রিলোড বা রি-মেজার করার জন্য রিকোয়েস্ট পাঠানো হয় যাতে পেছনের মার্জিন শতভাগ ঠিক হয়ে যায়
             if (keypadHeight < screenHeight * 0.15) {
-                // Keyboard is closed -> Restore Immersive full screen
                 hideSystemNavigationBar()
+                webView.evaluateJavascript("window.scrollTo(0, 0); document.body.classList.remove('keyboard-active');", null)
             }
         }
     }
