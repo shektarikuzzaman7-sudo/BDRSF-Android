@@ -31,8 +31,8 @@ jobs:
       - name: Check Gradle version
         run: gradle --version
 
-      - name: Build debug APK
-        run: gradle --no-daemon assembleDebug
+      - name: Build debug APK with stacktrace
+        run: gradle --no-daemon assembleDebug --stacktrace --info
 
       - name: Upload APK if success
         if: success()
