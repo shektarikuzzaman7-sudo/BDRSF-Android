@@ -1,6 +1,10 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <style name="Theme.AppCompat.Light.NoActionBar" parent="Theme.AppCompat.Light.NoActionBar">
-        <!-- Customize your theme here -->
+    <!-- Base application theme -->
+    <style name="Theme.BDRSF" parent="android:Theme.Material.Light.NoActionBar">
+        <!-- অ্যাপ চালুর সময় ব্যাকগ্রাউন্ড কালার সরাসরি লোগোর সাথে মিলিয়ে সেট করা হলো -->
+        <item name="android:windowBackground">#0A2F1D</item>
+        <item name="android:statusBarColor">#0A2F1D</item>
+        <item name="android:navigationBarColor">#0A2F1D</item>
     </style>
 </resources>
