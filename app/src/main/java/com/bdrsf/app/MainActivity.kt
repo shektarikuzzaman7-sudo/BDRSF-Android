@@ -36,6 +36,9 @@ class MainActivity : Activity() {
             WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS
         )
 
+        // [IMPORTANT FIX]: কিবোর্ড আসা-যাওয়ার সময় পেজ যেন রিসাইজ হয়ে নিখুঁতভাবে সেট হয়
+        window.setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE)
+
         // Main Layout Setup (RelativeLayout)
         val mainLayout = RelativeLayout(this)
         mainLayout.layoutParams = RelativeLayout.LayoutParams(
@@ -112,8 +115,7 @@ class MainActivity : Activity() {
         cookieManager.setAcceptCookie(true)
         cookieManager.setAcceptThirdPartyCookies(webView, true)
 
-        // [SESSION CLEAR ON LAUNCH / RE-OPEN LOGIC]
-        // অ্যাপ যখন একদম নতুন করে চালু হবে, তখন সেশন কুকিগুলো সরিয়ে দেওয়া হবে কিন্তু verified_login_id কুকিটি থেকে যাবে
+        // অ্যাপ চালু হলে সেশন ক্লিয়ার করে স্মার্ট আইডি বা অ্যাকাউন্ট নাম্বার ঠিক রাখা
         clearAppSessionKeepSmartId()
 
         webView.webViewClient = object : WebViewClient() {
@@ -147,9 +149,6 @@ class MainActivity : Activity() {
         webView.loadUrl("https://bdrsf.com/")
     }
 
-    /**
-     * অ্যাপ কেটে দিলে সেশন এক্সপায়ার করার জন্য সেশন কুকি ক্লিয়ার করার ফাংশন
-     */
     private fun clearAppSessionKeepSmartId() {
         val cookieManager = CookieManager.getInstance()
         val cookies = cookieManager.getCookie("https://bdrsf.com/")
@@ -158,7 +157,6 @@ class MainActivity : Activity() {
             val cookieArray = cookies.split(";")
             var smartIdValue = ""
             
-            // verified_login_id কুকি আছে কিনা তা ব্যাকআপ রাখা
             for (cookie in cookieArray) {
                 val trimmedCookie = cookie.trim()
                 if (trimmedCookie.startsWith("verified_login_id=")) {
@@ -167,10 +165,8 @@ class MainActivity : Activity() {
                 }
             }
 
-            // আগের সব সেশন কুকি মুছে ফেলা
             cookieManager.removeSessionCookies(null)
 
-            // অ্যাকাউন্ট নাম্বার মনে রাখার কুকিটি পুনরায় সেট করা
             if (smartIdValue.isNotEmpty()) {
                 cookieManager.setCookie("https://bdrsf.com/", smartIdValue)
             }
@@ -202,6 +198,6 @@ class MainActivity : Activity() {
 
     @Deprecated("Deprecated in Java")
     override fun onBackPressed() {
-        // Ignored - ব্যাক বাটন কাজ করবে না
+        // Ignored
     }
 }
