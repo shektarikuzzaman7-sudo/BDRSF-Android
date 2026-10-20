@@ -1,9 +1,12 @@
 package com.bdrsf.app
 
 import android.app.Activity
+import android.os.Build
 import android.os.Bundle
 import android.view.View
 import android.view.Window
+import android.view.WindowInsets
+import android.view.WindowInsetsController
 import android.view.WindowManager
 import android.webkit.CookieManager
 import android.webkit.WebSettings
@@ -27,6 +30,9 @@ class MainActivity : Activity() {
         // Initialize WebView
         webView = WebView(this)
         setContentView(webView)
+
+        // Hide Bottom Navigation Bar with Immersive Swipe Behavior
+        hideSystemNavigationBar()
 
         // Hardware Acceleration for Speed
         webView.setLayerType(View.LAYER_TYPE_HARDWARE, null)
@@ -71,11 +77,33 @@ class MainActivity : Activity() {
         webView.loadUrl("https://bdrsf.com/")
     }
 
-    override fun onBackPressed() {
-        if (::webView.isInitialized && webView.canGoBack()) {
-            webView.goBack()
-        } else {
-            super.onBackPressed()
+    override fun onWindowFocusChanged(hasFocus: Boolean) {
+        super.onWindowFocusChanged(hasFocus)
+        if (hasFocus) {
+            hideSystemNavigationBar()
         }
+    }
+
+    private fun hideSystemNavigationBar() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            window.insetsController?.let { controller ->
+                // Hide only navigation bars (bottom buttons), leave status bar visible
+                controller.hide(WindowInsets.Type.navigationBars())
+                // Allows bars to temporarily appear on swipe and auto-hide again
+                controller.systemBarsBehavior = WindowInsetsController.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
+            }
+        } else {
+            @Suppress("DEPRECATION")
+            window.decorView.systemUiVisibility = (
+                View.SYSTEM_UI_FLAG_HIDE_NAVIGATION
+                or View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY
+            )
+        }
+    }
+
+    // Disable Phone Back Button Completely for this Web App
+    @Deprecated("Deprecated in Java")
+    override fun onBackPressed() {
+        // Left empty intentionally so the back button won't trigger anything
     }
 }
