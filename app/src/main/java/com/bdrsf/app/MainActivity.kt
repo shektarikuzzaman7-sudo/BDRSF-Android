@@ -4,6 +4,7 @@ import android.app.Activity
 import android.graphics.Bitmap
 import android.graphics.Color
 import android.graphics.PorterDuff
+import android.graphics.Rect
 import android.os.Build
 import android.os.Bundle
 import android.view.Gravity
@@ -29,11 +30,10 @@ class MainActivity : Activity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
-        // Title bar সরানো
+        // Title bar সরিয়ে Full screen করা
         requestWindowFeature(Window.FEATURE_NO_TITLE)
-
-        // [FIX]: FLAG_LAYOUT_NO_LIMITS রিমুভ করে নেটিভ স্ট্যান্ডার্ড রি-সাইজিং এনাবল করা হয়েছে
-        @Suppress("DEPRECATION")
+        
+        // Soft Keyboard Adjust Resize Enabled
         window.setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE)
 
         // Main Layout Setup (RelativeLayout)
@@ -64,13 +64,12 @@ class MainActivity : Activity() {
         val logoSizePx = (130 * resources.displayMetrics.density).toInt()
         val loaderSizePx = (155 * resources.displayMetrics.density).toInt()
 
-        // ৩. প্রোগ্রেস বার
+        // ৩. লোগোর গা ঘেঁষে ঘুরার জন্য কাস্টম গোল্ডেন প্রোগ্রেস সার্কেল
         val circularProgressBar = ProgressBar(this, null, android.R.attr.progressBarStyleLarge)
         val progressParams = FrameLayout.LayoutParams(loaderSizePx, loaderSizePx)
         progressParams.gravity = Gravity.CENTER
         circularProgressBar.layoutParams = progressParams
         
-        @Suppress("DEPRECATION")
         circularProgressBar.indeterminateDrawable.setColorFilter(
             Color.parseColor("#FFD700"),
             PorterDuff.Mode.SRC_IN
@@ -95,7 +94,10 @@ class MainActivity : Activity() {
         // নেভিগেশন বার হাইড করা
         hideSystemNavigationBar()
 
-        // WebView Settings & Hardware Acceleration
+        // Soft Keyboard State Listener to restore Fullscreen Immersive layout
+        setupKeyboardListener(mainLayout)
+
+        // WebView Settings & Acceleration
         webView.setLayerType(View.LAYER_TYPE_HARDWARE, null)
         val webSettings: WebSettings = webView.settings
         webSettings.javaScriptEnabled = true
@@ -106,15 +108,14 @@ class MainActivity : Activity() {
         webSettings.useWideViewPort = true
         webSettings.allowFileAccess = true
         webSettings.allowContentAccess = true
-        
-        @Suppress("DEPRECATION")
-        webSettings.renderPriority = WebSettings.RenderPriority.HIGH
+        webSettings.setRenderPriority(WebSettings.RenderPriority.HIGH)
 
         // Cookie & Session Handling
         val cookieManager = CookieManager.getInstance()
         cookieManager.setAcceptCookie(true)
         cookieManager.setAcceptThirdPartyCookies(webView, true)
 
+        // অ্যাপ চালু হলে সেশন ক্লিয়ার করে স্মার্ট আইডি বা অ্যাকাউন্ট নাম্বার ঠিক রাখা
         clearAppSessionKeepSmartId()
 
         webView.webViewClient = object : WebViewClient() {
@@ -144,7 +145,22 @@ class MainActivity : Activity() {
             }
         }
 
+        // ওয়েবসাইট লোড করা
         webView.loadUrl("https://bdrsf.com/")
+    }
+
+    private fun setupKeyboardListener(rootView: View) {
+        rootView.viewTreeObserver.addOnGlobalLayoutListener {
+            val r = Rect()
+            rootView.getWindowVisibleDisplayFrame(r)
+            val screenHeight = rootView.rootView.height
+            val keypadHeight = screenHeight - r.bottom
+
+            if (keypadHeight < screenHeight * 0.15) {
+                // Keyboard is closed -> Restore Immersive full screen
+                hideSystemNavigationBar()
+            }
+        }
     }
 
     private fun clearAppSessionKeepSmartId() {
