@@ -3,7 +3,7 @@ package com.bdrsf.app
 import android.app.Activity
 import android.graphics.Bitmap
 import android.graphics.Color
-import android.graphics.Typeface
+import android.graphics.PorterDuff
 import android.os.Build
 import android.os.Bundle
 import android.view.Gravity
@@ -12,23 +12,19 @@ import android.view.Window
 import android.view.WindowInsets
 import android.view.WindowInsetsController
 import android.view.WindowManager
-import android.view.animation.Animation
-import android.view.animation.ScaleAnimation
 import android.webkit.CookieManager
 import android.webkit.WebSettings
 import android.webkit.WebView
 import android.webkit.WebViewClient
+import android.widget.FrameLayout
 import android.widget.ImageView
-import android.widget.LinearLayout
 import android.widget.ProgressBar
 import android.widget.RelativeLayout
-import android.widget.TextView
 
 class MainActivity : Activity() {
 
     private lateinit var webView: WebView
-    private lateinit var splashLayout: LinearLayout
-    private lateinit var progressBar: ProgressBar
+    private lateinit var splashLayout: FrameLayout
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -56,60 +52,46 @@ class MainActivity : Activity() {
         webView.layoutParams = webViewParams
         mainLayout.addView(webView)
 
-        // ২. Custom Green Loading / Splash Screen Layout
-        splashLayout = LinearLayout(this)
+        // ২. Custom Green Splash Overlay (FrameLayout ব্যবহার করা হয়েছে যেন ঠিক লোগোর চারপাশে ঘূর্ণায়মান সার্কেল বসে)
+        splashLayout = FrameLayout(this)
         val splashParams = RelativeLayout.LayoutParams(
             RelativeLayout.LayoutParams.MATCH_PARENT,
             RelativeLayout.LayoutParams.MATCH_PARENT
         )
         splashLayout.layoutParams = splashParams
-        splashLayout.orientation = LinearLayout.VERTICAL
-        splashLayout.gravity = Gravity.CENTER
-        // Logo-র সাথে মিলিয়ে ডিপ এমারেল্ড গ্রীন ব্যাকগ্রাউন্ড (#0B3B17)
-        splashLayout.setBackgroundColor(Color.parseColor("#0B3B17"))
+        // ডিপ রিচ গ্রীন ব্যাকগ্রাউন্ড (#0A2F1D)
+        splashLayout.setBackgroundColor(Color.parseColor("#0A2F1D"))
 
-        // ব্র্যান্ড লোগো ImageView
+        // লোগো সাইজ ৭০% ছোট (১৩০dp x ১৩০dp)
+        val logoSizePx = (130 * resources.displayMetrics.density).toInt()
+        // স্পিনারের সাইজ লোগোর চেয়ে সামান্য বড় যেন ঠিক গা ঘেঁষে ঘুরতে পারে (১৫৫dp x ১৫৫dp)
+        val loaderSizePx = (155 * resources.displayMetrics.density).toInt()
+
+        // ৩. লোগোর গা ঘেঁষে ঘুরার জন্য কাস্টম গোল্ডেন প্রোগ্রেস সার্কেল
+        val circularProgressBar = ProgressBar(this, null, android.R.attr.progressBarStyleLarge)
+        val progressParams = FrameLayout.LayoutParams(loaderSizePx, loaderSizePx)
+        progressParams.gravity = Gravity.CENTER
+        circularProgressBar.layoutParams = progressParams
+        
+        // লোগোর সাথে মিলিয়ে গোল্ডেন কালার ফিল্টার (#FFD700)
+        circularProgressBar.indeterminateDrawable.setColorFilter(
+            Color.parseColor("#FFD700"),
+            PorterDuff.Mode.SRC_IN
+        )
+        splashLayout.addView(circularProgressBar)
+
+        // ৪. ব্র্যান্ড লোগো ImageView (সম্পূর্ণ স্থির থাকবে, কোনো নড়াচড়া করবে না)
         val logoImageView = ImageView(this)
-        val logoParams = LinearLayout.LayoutParams(400, 400) // লোগোর সাইজ
-        logoParams.setMargins(0, 0, 0, 40)
+        val logoParams = FrameLayout.LayoutParams(logoSizePx, logoSizePx)
+        logoParams.gravity = Gravity.CENTER
         logoImageView.layoutParams = logoParams
         
-        // res/drawable/ic_logo ফোল্ডার থেকে লোগো লোড করা
+        // res/drawable/ic_logo থেকে ব্যাকগ্রাউন্ড রিমুভ করা লোগো লোড করা
         val logoResId = resources.getIdentifier("ic_logo", "drawable", packageName)
         if (logoResId != 0) {
             logoImageView.setImageResource(logoResId)
         }
         splashLayout.addView(logoImageView)
-
-        // লোগোর জন্য হালকা Pulsing Animation (বোরিং না লাগার জন্য)
-        val pulseAnimation = ScaleAnimation(
-            0.95f, 1.05f, 0.95f, 1.05f,
-            Animation.RELATIVE_TO_SELF, 0.5f,
-            Animation.RELATIVE_TO_SELF, 0.5f
-        ).apply {
-            duration = 1000
-            repeatCount = Animation.INFINITE
-            repeatMode = Animation.REVERSE
-        }
-        logoImageView.startAnimation(pulseAnimation)
-
-        // সুন্দর প্রোগ্রেস বার (Loading Spinner)
-        progressBar = ProgressBar(this)
-        val progressParams = LinearLayout.LayoutParams(
-            LinearLayout.LayoutParams.WRAP_CONTENT,
-            LinearLayout.LayoutParams.WRAP_CONTENT
-        )
-        progressParams.setMargins(0, 20, 0, 20)
-        progressBar.layoutParams = progressParams
-        splashLayout.addView(progressBar)
-
-        // লোডিং টেক্সট (Optional)
-        val loadingTextView = TextView(this)
-        loadingTextView.text = "Loading BDRSF..."
-        loadingTextView.setTextColor(Color.parseColor("#FFD700")) // Gold color
-        loadingTextView.textSize = 16f
-        loadingTextView.setTypeface(null, Typeface.BOLD)
-        splashLayout.addView(loadingTextView)
 
         // Splash Layout টি WebView-এর ওপর যুক্ত করা
         mainLayout.addView(splashLayout)
@@ -141,7 +123,6 @@ class MainActivity : Activity() {
         webView.webViewClient = object : WebViewClient() {
             override fun onPageStarted(view: WebView?, url: String?, favicon: Bitmap?) {
                 super.onPageStarted(view, url, favicon)
-                // পেজ লোড হওয়া শুরু হলে স্প্ল্যাশ স্ক্রিন দৃশ্যমান থাকবে
                 splashLayout.visibility = View.VISIBLE
             }
 
@@ -155,10 +136,9 @@ class MainActivity : Activity() {
 
             override fun onPageFinished(view: WebView?, url: String?) {
                 super.onPageFinished(view, url)
-                // কুকি সিঙ্ক করা
                 CookieManager.getInstance().flush()
 
-                // ওয়েবসাইট লোড সম্পন্ন হলে স্মুথভাবে স্প্ল্যাশ স্ক্রিন গায়েব হয়ে যাবে
+                // ওয়েবসাইট লোড সম্পন্ন হলে স্মুথভাবে লোডিং স্ক্রিন ফেড-আউট হয়ে যাবে
                 splashLayout.animate()
                     .alpha(0f)
                     .setDuration(400)
@@ -194,9 +174,8 @@ class MainActivity : Activity() {
         }
     }
 
-    // ব্যাক বাটন সম্পূর্ণ ডিসেবল রাখা
     @Deprecated("Deprecated in Java")
     override fun onBackPressed() {
-        // Ignored
+        // Ignored - ব্যাক বাটন কাজ করবে না
     }
 }
