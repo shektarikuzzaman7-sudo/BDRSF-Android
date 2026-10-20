@@ -23,6 +23,10 @@ class MainActivity : AppCompatActivity() {
         webSettings.domStorageEnabled = true
         webSettings.loadWithOverviewMode = true
         webSettings.useWideViewPort = true
+        webSettings.allowFileAccess = true
+        webSettings.allowContentAccess = true
+        
+        // Mixed content settings for secure browsing
         webSettings.mixedContentMode = WebSettings.MIXED_CONTENT_NEVER_ALLOW
 
         // Cookie and Session management
@@ -30,13 +34,22 @@ class MainActivity : AppCompatActivity() {
         cookieManager.setAcceptCookie(true)
         cookieManager.setAcceptThirdPartyCookies(webView, true)
 
-        webView.webViewClient = WebViewClient()
+        webView.webViewClient = object : WebViewClient() {
+            override fun shouldOverrideUrlLoading(view: WebView?, url: String?): Boolean {
+                if (url != null) {
+                    view?.loadUrl(url)
+                }
+                return true
+            }
+        }
+
+        // Load your website
         webView.loadUrl("https://bdrsf.com/")
 
-        // Back Button handling
+        // Handle Back Button safely
         onBackPressedDispatcher.addCallback(this, object : OnBackPressedCallback(true) {
             override fun handleOnBackPressed() {
-                if (webView.canGoBack()) {
+                if (::webView.isInitialized && webView.canGoBack()) {
                     webView.goBack()
                 } else {
                     finish()
