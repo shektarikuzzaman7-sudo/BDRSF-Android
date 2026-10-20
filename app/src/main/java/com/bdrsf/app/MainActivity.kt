@@ -29,14 +29,11 @@ class MainActivity : Activity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
-        // Title bar সরিয়ে Full screen করা
+        // Title bar সরানো
         requestWindowFeature(Window.FEATURE_NO_TITLE)
-        window.setFlags(
-            WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS,
-            WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS
-        )
 
-        // [IMPORTANT FIX]: কিবোর্ড আসা-যাওয়ার সময় পেজ যেন রিসাইজ হয়ে নিখুঁতভাবে সেট হয়
+        // [FIX]: FLAG_LAYOUT_NO_LIMITS রিমুভ করে নেটিভ স্ট্যান্ডার্ড রি-সাইজিং এনাবল করা হয়েছে
+        @Suppress("DEPRECATION")
         window.setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE)
 
         // Main Layout Setup (RelativeLayout)
@@ -67,12 +64,13 @@ class MainActivity : Activity() {
         val logoSizePx = (130 * resources.displayMetrics.density).toInt()
         val loaderSizePx = (155 * resources.displayMetrics.density).toInt()
 
-        // ৩. লোগোর গা ঘেঁষে ঘুরার জন্য কাস্টম গোল্ডেন প্রোগ্রেস সার্কেল
+        // ৩. প্রোগ্রেস বার
         val circularProgressBar = ProgressBar(this, null, android.R.attr.progressBarStyleLarge)
         val progressParams = FrameLayout.LayoutParams(loaderSizePx, loaderSizePx)
         progressParams.gravity = Gravity.CENTER
         circularProgressBar.layoutParams = progressParams
         
+        @Suppress("DEPRECATION")
         circularProgressBar.indeterminateDrawable.setColorFilter(
             Color.parseColor("#FFD700"),
             PorterDuff.Mode.SRC_IN
@@ -97,7 +95,7 @@ class MainActivity : Activity() {
         // নেভিগেশন বার হাইড করা
         hideSystemNavigationBar()
 
-        // WebView Settings & Acceleration
+        // WebView Settings & Hardware Acceleration
         webView.setLayerType(View.LAYER_TYPE_HARDWARE, null)
         val webSettings: WebSettings = webView.settings
         webSettings.javaScriptEnabled = true
@@ -108,14 +106,15 @@ class MainActivity : Activity() {
         webSettings.useWideViewPort = true
         webSettings.allowFileAccess = true
         webSettings.allowContentAccess = true
-        webSettings.setRenderPriority(WebSettings.RenderPriority.HIGH)
+        
+        @Suppress("DEPRECATION")
+        webSettings.renderPriority = WebSettings.RenderPriority.HIGH
 
         // Cookie & Session Handling
         val cookieManager = CookieManager.getInstance()
         cookieManager.setAcceptCookie(true)
         cookieManager.setAcceptThirdPartyCookies(webView, true)
 
-        // অ্যাপ চালু হলে সেশন ক্লিয়ার করে স্মার্ট আইডি বা অ্যাকাউন্ট নাম্বার ঠিক রাখা
         clearAppSessionKeepSmartId()
 
         webView.webViewClient = object : WebViewClient() {
@@ -145,7 +144,6 @@ class MainActivity : Activity() {
             }
         }
 
-        // ওয়েবসাইট লোড করা
         webView.loadUrl("https://bdrsf.com/")
     }
 
