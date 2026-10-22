@@ -4,20 +4,18 @@
     <!-- ইন্টারনেট ও নেটওয়ার্ক পারমিশন -->
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
-
-    <!-- ক্যামেরা ও ফাইল/গ্যালারি এক্সেস পারমিশন -->
+    
+    <!-- ক্যামেরা পারমিশন (ডিপোজিট স্লিপ, কিউআর কোড স্ক্যান ও প্রোফাইল ছবির জন্য) -->
     <uses-permission android:name="android.permission.CAMERA" />
     <uses-feature android:name="android.hardware.camera" android:required="false" />
     <uses-feature android:name="android.hardware.camera.autofocus" android:required="false" />
 
-    <!-- Android 13+ (API 33+) এর জন্য মিডিয়া পারমিশন -->
-    <uses-permission android:name="android.permission.READ_MEDIA_IMAGES" />
-    <uses-permission android:name="android.permission.READ_MEDIA_VIDEO" />
-    <uses-permission android:name="android.permission.READ_MEDIA_AUDIO" />
+    <!-- ফাইল ম্যানেজার, গ্যালারি ও ডকুমেন্ট (পিডিএফ, ছবি) এক্সেস পারমিশন -->
+    <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE" />
+    <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE" android:maxSdkVersion="32" />
 
-    <!-- Android 12 এবং তার নিচের ভার্সনের জন্য এক্সটার্নাল স্টোরেজ পারমিশন -->
-    <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE" android:maxSdkVersion="32" />
-    <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE" android:maxSdkVersion="29" />
+    <!-- Android 13+ (API 33+) এর জন্য লেটেস্ট মিডিয়া পারমিশন -->
+    <uses-permission android:name="android.permission.READ_MEDIA_IMAGES" />
 
     <application
         android:allowBackup="true"
