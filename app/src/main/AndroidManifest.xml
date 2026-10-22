@@ -5,17 +5,21 @@
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
     
-    <!-- ক্যামেরা পারমিশন (ডিপোজিট স্লিপ, কিউআর কোড স্ক্যান ও প্রোফাইল ছবির জন্য) -->
+    <!-- ক্যামেরা পারমিশন (কিউআর স্ক্যান, প্রোফাইল ছবি ও কেওয়াইসি ডকুমেন্ট আপলোড) -->
     <uses-permission android:name="android.permission.CAMERA" />
     <uses-feature android:name="android.hardware.camera" android:required="false" />
     <uses-feature android:name="android.hardware.camera.autofocus" android:required="false" />
 
-    <!-- ফাইল ম্যানেজার, গ্যালারি ও ডকুমেন্ট (পিডিএফ, ছবি) এক্সেস পারমিশন -->
+    <!-- ফাইল ম্যানেজার, গ্যালারি ও ডকুমেন্ট (পিডিএফ, ছবি, ডাউনলোড ও শেয়ার) এক্সেস পারমিশন -->
     <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE" />
     <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE" android:maxSdkVersion="32" />
-
+    
     <!-- Android 13+ (API 33+) এর জন্য লেটেস্ট মিডিয়া পারমিশন -->
     <uses-permission android:name="android.permission.READ_MEDIA_IMAGES" />
+
+    <!-- লোকেশন পারমিশন (প্রয়োজনীয় কেওয়াইসি বা লোকেশন ভেরিফিকেশনের জন্য) -->
+    <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />
+    <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" />
 
     <application
         android:allowBackup="true"
