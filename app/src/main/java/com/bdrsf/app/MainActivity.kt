@@ -46,7 +46,6 @@ class MainActivity : Activity() {
     private lateinit var webView: WebView
     private lateinit var splashLayout: FrameLayout
 
-    // File Chooser variables for Camera, Gallery & File Manager / Documents
     private var filePathCallback: ValueCallback<Array<Uri>>? = null
     private var cameraImageUri: Uri? = null
     private val FILE_CHOOSER_REQUEST_CODE = 1001
@@ -234,7 +233,6 @@ class MainActivity : Activity() {
     @Throws(IOException::class)
     private fun createImageFile(): File {
         val timeStamp: String = SimpleDateFormat("yyyyMMdd_HHmmss", Locale.getDefault()).format(Date())
-        // ক্যাশ ফোল্ডার ব্যবহার করা হয়েছে যাতে গ্যালারিতে সেভ না হয়ে সম্পূর্ণ সিকিউর ও টেম্পোরারি থাকে
         val storageDir: File = cacheDir 
         return File.createTempFile(
             "KYC_${timeStamp}_",
