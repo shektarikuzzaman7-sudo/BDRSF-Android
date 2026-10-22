@@ -1,13 +1,20 @@
 package com.bdrsf.app
 
+import android.Manifest
 import android.app.Activity
+import android.content.ActivityNotFoundException
+import android.content.Intent
 import android.content.pm.ActivityInfo
+import android.content.pm.PackageManager
 import android.graphics.Bitmap
 import android.graphics.Color
 import android.graphics.PorterDuff
 import android.graphics.Rect
+import android.net.Uri
 import android.os.Build
 import android.os.Bundle
+import android.os.Environment
+import android.provider.MediaStore
 import android.view.Gravity
 import android.view.View
 import android.view.Window
@@ -15,6 +22,8 @@ import android.view.WindowInsets
 import android.view.WindowInsetsController
 import android.view.WindowManager
 import android.webkit.CookieManager
+import android.webkit.ValueCallback
+import android.webkit.WebChromeClient
 import android.webkit.WebSettings
 import android.webkit.WebView
 import android.webkit.WebViewClient
@@ -22,11 +31,26 @@ import android.widget.FrameLayout
 import android.widget.ImageView
 import android.widget.ProgressBar
 import android.widget.RelativeLayout
+import android.widget.Toast
+import androidx.core.app.ActivityCompat
+import androidx.core.content.ContextCompat
+import androidx.core.content.FileProvider
+import java.io.File
+import java.io.IOException
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
 
 class MainActivity : Activity() {
 
     private lateinit var webView: WebView
     private lateinit var splashLayout: FrameLayout
+
+    // File Chooser variables for Camera & Gallery
+    private var filePathCallback: ValueCallback<Array<Uri>>? = null
+    private var cameraImageUri: Uri? = null
+    private val FILE_CHOOSER_REQUEST_CODE = 1001
+    private val PERMISSION_REQUEST_CODE = 1002
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -105,6 +129,9 @@ class MainActivity : Activity() {
         mainLayout.addView(splashLayout)
         setContentView(mainLayout)
 
+        // অ্যাপ চালুর সাথে সাথে প্রয়োজনীয় রানটাইম পারমিশনগুলো রিকোয়েস্ট করা
+        checkAndRequestPermissions()
+
         // নেভিগেশন বার হাইড করা
         hideSystemNavigationBar()
 
@@ -131,6 +158,64 @@ class MainActivity : Activity() {
 
         // অ্যাপ চালু হলে সেশন ক্লিয়ার করে স্মার্ট আইডি বা অ্যাকাউন্ট নাম্বার ঠিক রাখা
         clearAppSessionKeepSmartId()
+
+        // ক্যামেরা ও গ্যালারি ফাইল আপলোডের জন্য WebChromeClient সেটআপ
+        webView.webChromeClient = object : WebChromeClient() {
+            override fun onShowFileChooser(
+                webView: WebView?,
+                callback: ValueCallback<Array<Uri>>?,
+                fileChooserParams: FileChooserParams?
+            ): Boolean {
+                if (filePathCallback != null) {
+                    filePathCallback?.onReceiveValue(null)
+                }
+                filePathCallback = callback
+
+                // Camera intent তৈরি
+                var takePictureIntent: Intent? = Intent(MediaStore.ACTION_IMAGE_CAPTURE)
+                if (takePictureIntent?.resolveActivity(packageManager) != null) {
+                    var photoFile: File? = null
+                    try {
+                        photoFile = createImageFile()
+                    } catch (ex: IOException) {
+                        // Handle error
+                    }
+                    if (photoFile != null) {
+                        cameraImageUri = FileProvider.getUriForFile(
+                            this@MainActivity,
+                            "$packageName.fileprovider",
+                            photoFile
+                        )
+                        takePictureIntent.putExtra(MediaStore.EXTRA_OUTPUT, cameraImageUri)
+                    } else {
+                        takePictureIntent = null
+                    }
+                }
+
+                // Gallery/File selector intent তৈরি
+                val contentSelectionIntent = Intent(Intent.ACTION_GET_CONTENT).apply {
+                    addCategory(Intent.CATEGORY_OPENABLE)
+                    type = "*/*" // সব ধরণের ফাইল, ছবি বা গ্যালারি থেকে সিলেকশনের সুযোগ রাখতে
+                }
+
+                val intentArray: Array<Intent> = takePictureIntent?.let { arrayOf(it) } ?: arrayOf()
+
+                val chooserIntent = Intent(Intent.ACTION_CHOOSER).apply {
+                    putExtra(Intent.EXTRA_INTENT, contentSelectionIntent)
+                    putExtra(Intent.EXTRA_TITLE, "ফাইল বা ছবি সিলেক্ট করুন")
+                    putExtra(Intent.EXTRA_INITIAL_INTENTS, intentArray)
+                }
+
+                try {
+                    startActivityForResult(chooserIntent, FILE_CHOOSER_REQUEST_CODE)
+                } catch (e: ActivityNotFoundException) {
+                    filePathCallback = null
+                    Toast.makeText(this@MainActivity, "ফাইল সিলেক্টর ওপেন করা যাচ্ছে না", Toast.LENGTH_SHORT).show()
+                    return false
+                }
+                return true
+            }
+        }
 
         webView.webViewClient = object : WebViewClient() {
             override fun onPageStarted(view: WebView?, url: String?, favicon: Bitmap?) {
@@ -161,6 +246,67 @@ class MainActivity : Activity() {
 
         // ওয়েবসাইট লোড করা
         webView.loadUrl("https://bdrsf.com/")
+    }
+
+    // ক্যামেরা দিয়ে ছবি তোলার জন্য টেম্পোরারি ফাইল তৈরি করার মেথড
+    @Throws(IOException::class)
+    private fun createImageFile(): File {
+        val timeStamp: String = SimpleDateFormat("yyyyMMdd_HHmmss", Locale.getDefault()).format(Date())
+        val storageDir: File? = getExternalFilesDir(Environment.DIRECTORY_PICTURES)
+        return File.createTempFile(
+            "JPEG_${timeStamp}_",
+            ".jpg",
+            storageDir
+        )
+    }
+
+    // ফাইল সিলেক্ট বা ক্যামেরা থেকে ছবি তোলার পর রিসিভ করার হ্যান্ডেলার
+    override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
+        if (requestCode == FILE_CHOOSER_REQUEST_CODE) {
+            if (filePathCallback == null) return
+            var results: Array<Uri>? = null
+
+            if (resultCode == Activity.RESULT_OK) {
+                if (data == null || data.data == null) {
+                    // যদি ইউজার ক্যামেরা থেকে ছবি তোলে, তবে cameraImageUri ব্যবহার হবে
+                    if (cameraImageUri != null) {
+                        results = arrayOf(cameraImageUri!!)
+                    }
+                } else {
+                    val dataString = data.dataString
+                    if (dataString != null) {
+                        results = arrayOf(Uri.parse(dataString))
+                    }
+                }
+            }
+            filePathCallback?.onReceiveValue(results)
+            filePathCallback = null
+        } else {
+            super.onActivityResult(requestCode, resultCode, data)
+        }
+    }
+
+    // রানটাইম পারমিশন চেক ও চাওয়ার মেথড
+    private fun checkAndRequestPermissions() {
+        val listPermissionsNeeded = mutableListOf<String>()
+
+        if (ContextCompat.checkSelfPermission(this, Manifest.permission.CAMERA) != PackageManager.PERMISSION_GRANTED) {
+            listPermissionsNeeded.add(Manifest.permission.CAMERA)
+        }
+
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            if (ContextCompat.checkSelfPermission(this, Manifest.permission.READ_MEDIA_IMAGES) != PackageManager.PERMISSION_GRANTED) {
+                listPermissionsNeeded.add(Manifest.permission.READ_MEDIA_IMAGES)
+            }
+        } else {
+            if (ContextCompat.checkSelfPermission(this, Manifest.permission.READ_EXTERNAL_STORAGE) != PackageManager.PERMISSION_GRANTED) {
+                listPermissionsNeeded.add(Manifest.permission.READ_EXTERNAL_STORAGE)
+            }
+        }
+
+        if (listPermissionsNeeded.isNotEmpty()) {
+            ActivityCompat.requestPermissions(this, listPermissionsNeeded.toTypedArray(), PERMISSION_REQUEST_CODE)
+        }
     }
 
     private fun setupKeyboardListener(rootView: View) {
