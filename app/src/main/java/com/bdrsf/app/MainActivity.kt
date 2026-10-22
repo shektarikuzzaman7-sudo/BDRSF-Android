@@ -1,9 +1,11 @@
 package com.bdrsf.app
 
+import android.Manifest
 import android.app.Activity
 import android.content.ActivityNotFoundException
 import android.content.Intent
 import android.content.pm.ActivityInfo
+import android.content.pm.PackageManager
 import android.graphics.Bitmap
 import android.graphics.Color
 import android.graphics.PorterDuff
@@ -29,6 +31,8 @@ import android.widget.ImageView
 import android.widget.ProgressBar
 import android.widget.RelativeLayout
 import android.widget.Toast
+import androidx.core.app.ActivityCompat
+import androidx.core.content.ContextCompat
 
 class MainActivity : Activity() {
 
@@ -38,6 +42,7 @@ class MainActivity : Activity() {
     // File Chooser variables for Camera, Gallery & File Manager / Documents
     private var filePathCallback: ValueCallback<Array<Uri>>? = null
     private val FILE_CHOOSER_REQUEST_CODE = 1001
+    private val PERMISSION_REQUEST_CODE = 1002
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -116,6 +121,9 @@ class MainActivity : Activity() {
         mainLayout.addView(splashLayout)
         setContentView(mainLayout)
 
+        // অ্যাপ রান করার সাথে সাথেই প্রয়োজনীয় পারমিশনগুলোর জন্য প্রথমবার রিকোয়েস্ট করা
+        requestAllRequiredPermissions()
+
         // নেভিগেশন বার হাইড করা
         hideSystemNavigationBar()
 
@@ -143,31 +151,37 @@ class MainActivity : Activity() {
         // অ্যাপ চালু হলে সেশন ক্লিয়ার করে স্মার্ট আইডি বা অ্যাকাউন্ট নাম্বার ঠিক রাখা
         clearAppSessionKeepSmartId()
 
-        // ক্যামেরা, গ্যালারি, ফাইল ম্যানেজার ও পিডিএফ ডকুমেন্ট আপলোডের জন্য শক্তিশালী WebChromeClient সেটআপ
+        // ক্যামেরা, গ্যালারি, ফাইল ম্যানেজার ও কেওয়াইসি ডকুমেন্ট আপলোডের জন্য ফোর্সেবল পারমিশন চেকার WebChromeClient
         webView.webChromeClient = object : WebChromeClient() {
             override fun onShowFileChooser(
                 webView: WebView?,
                 callback: ValueCallback<Array<Uri>>?,
                 fileChooserParams: FileChooserParams?
             ): Boolean {
+                // ফাইল বা ক্যামেরা ওপেন করার আগে পারমিশনগুলো আবার চেক করা হবে। না দেওয়া থাকলে ফোর্সেবল পপ-আপ আসবে।
+                if (!hasAllPermissions()) {
+                    requestAllRequiredPermissions()
+                    Toast.makeText(this@MainActivity, "ফাইল বা ক্যামেরা ব্যবহারের জন্য পারমিশন প্রয়োজন। অনুগ্রহ করে পারমিশন দিন।", Toast.LENGTH_LONG).show()
+                    callback?.onReceiveValue(null)
+                    return false
+                }
+
                 if (filePathCallback != null) {
                     filePathCallback?.onReceiveValue(null)
                 }
                 filePathCallback = callback
 
                 try {
-                    // গ্যালারি, ফাইল ম্যানেজার ও ডকুমেন্ট (যেমন: PDF) থেকে ফাইল নেওয়ার ইনটেন্ট
                     val contentSelectionIntent = Intent(Intent.ACTION_GET_CONTENT).apply {
                         addCategory(Intent.CATEGORY_OPENABLE)
-                        type = "*/*" // সব ধরণের ফাইল, ছবি ও পিডিএফের জন্য উন্মুক্ত
+                        type = "*/*" 
                     }
 
-                    // ক্যামেরা থেকে ডাইরেক্ট ছবি তোলার অপশন যুক্ত করা
                     val captureIntent = Intent(MediaStore.ACTION_IMAGE_CAPTURE)
 
                     val chooserIntent = Intent(Intent.ACTION_CHOOSER).apply {
                         putExtra(Intent.EXTRA_INTENT, contentSelectionIntent)
-                        putExtra(Intent.EXTRA_TITLE, "ফাইল, ছবি বা স্ক্যান কপি সিলেক্ট করুন")
+                        putExtra(Intent.EXTRA_TITLE, "ফাইল, ছবি বা কেওয়াইসি ডকুমেন্ট সিলেক্ট করুন")
                         putExtra(Intent.EXTRA_INITIAL_INTENTS, arrayOf(captureIntent))
                     }
 
@@ -212,24 +226,55 @@ class MainActivity : Activity() {
         webView.loadUrl("https://bdrsf.com/")
     }
 
-    // ক্যামেরা অথবা ফাইল ম্যানেজার থেকে সিলেক্ট করা ফাইল বা ছবি রিসিভ করার হ্যান্ডেলার
+    // প্রয়োজনীয় সকল পারমিশন একসঙ্গে চেক করার ফাংশন
+    private fun hasAllPermissions(): Boolean {
+        val cameraPerm = ContextCompat.checkSelfPermission(this, Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED
+        val locationPerm = ContextCompat.checkSelfPermission(this, Manifest.permission.ACCESS_FINE_LOCATION) == PackageManager.PERMISSION_GRANTED
+        
+        val storagePerm = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            ContextCompat.checkSelfPermission(this, Manifest.permission.READ_MEDIA_IMAGES) == PackageManager.PERMISSION_GRANTED
+        } else {
+            ContextCompat.checkSelfPermission(this, Manifest.permission.READ_EXTERNAL_STORAGE) == PackageManager.PERMISSION_GRANTED
+        }
+
+        return cameraPerm && storagePerm && locationPerm
+    }
+
+    // পারমিশন না দেওয়া থাকলে বারবার ফোর্স করে পপ-আপ দেখানোর ফাংশন
+    private fun requestAllRequiredPermissions() {
+        val permissionsList = mutableListOf<String>()
+
+        if (ContextCompat.checkSelfPermission(this, Manifest.permission.CAMERA) != PackageManager.PERMISSION_GRANTED) {
+            permissionsList.add(Manifest.permission.CAMERA)
+        }
+
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            if (ContextCompat.checkSelfPermission(this, Manifest.permission.READ_MEDIA_IMAGES) != PackageManager.PERMISSION_GRANTED) {
+                permissionsList.add(Manifest.permission.READ_MEDIA_IMAGES)
+            }
+        } else {
+            if (ContextCompat.checkSelfPermission(this, Manifest.permission.READ_EXTERNAL_STORAGE) != PackageManager.PERMISSION_GRANTED) {
+                permissionsList.add(Manifest.permission.READ_EXTERNAL_STORAGE)
+            }
+        }
+
+        if (ContextCompat.checkSelfPermission(this, Manifest.permission.ACCESS_FINE_LOCATION) != PackageManager.PERMISSION_GRANTED) {
+            permissionsList.add(Manifest.permission.ACCESS_FINE_LOCATION)
+        }
+
+        if (permissionsList.isNotEmpty()) {
+            ActivityCompat.requestPermissions(this, permissionsList.toTypedArray(), PERMISSION_REQUEST_CODE)
+        }
+    }
+
     override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
         if (requestCode == FILE_CHOOSER_REQUEST_CODE) {
             if (filePathCallback == null) return
             var results: Array<Uri>? = null
 
             if (resultCode == Activity.RESULT_OK) {
-                if (data == null || data.dataString == null) {
-                    // ক্যামেরা থেকে ছবি তুললে যদি সরাসরি ডাটা না আসে
-                    if (data != null && data.extras != null) {
-                        val imageBitmap = data.extras?.get("data") as? Bitmap
-                        // প্রয়োজনে বিটম্যাপ হ্যান্ডেল করা যেতে পারে, তবে সাধারণ ক্ষেত্রে Chooser নিজে URI হ্যান্ডেল করে
-                    }
-                } else {
-                    val dataString = data.dataString
-                    if (dataString != null) {
-                        results = arrayOf(Uri.parse(dataString))
-                    }
+                if (data != null && data.dataString != null) {
+                    results = arrayOf(Uri.parse(data.dataString))
                 }
             }
             filePathCallback?.onReceiveValue(results)
@@ -246,7 +291,6 @@ class MainActivity : Activity() {
             val screenHeight = rootView.rootView.height
             val keypadHeight = screenHeight - r.bottom
 
-            // কিবোর্ড বন্ধ হলে সিস্টেম নেভিগেশন বার নিখুঁতভাবে রি-হাইড করা নিশ্চিত করা হয়
             if (keypadHeight < screenHeight * 0.15) {
                 hideSystemNavigationBar()
             }
