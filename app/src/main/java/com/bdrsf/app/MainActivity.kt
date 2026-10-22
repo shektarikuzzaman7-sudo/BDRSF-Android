@@ -13,6 +13,7 @@ import android.graphics.Rect
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
+import android.os.Environment
 import android.provider.MediaStore
 import android.view.Gravity
 import android.view.View
@@ -33,6 +34,12 @@ import android.widget.RelativeLayout
 import android.widget.Toast
 import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
+import androidx.core.content.FileProvider
+import java.io.File
+import java.io.IOException
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
 
 class MainActivity : Activity() {
 
@@ -41,16 +48,15 @@ class MainActivity : Activity() {
 
     // File Chooser variables for Camera, Gallery & File Manager / Documents
     private var filePathCallback: ValueCallback<Array<Uri>>? = null
+    private var cameraImageUri: Uri? = null
     private val FILE_CHOOSER_REQUEST_CODE = 1001
     private val PERMISSION_REQUEST_CODE = 1002
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
-        // চিরতরে স্ক্রিন রোটেট বন্ধ করে পোর্ট্রেট মোডে লক করা
         requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_PORTRAIT
 
-        // Title bar সরিয়ে Full screen এবং ট্রান্সপারেন্ট স্ট্যাটাস বার নিশ্চিত করা
         requestWindowFeature(Window.FEATURE_NO_TITLE)
         
         window.setFlags(
@@ -63,17 +69,14 @@ class MainActivity : Activity() {
                 WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_SHORT_EDGES
         }
 
-        // Soft Keyboard Adjust Resize Enabled
         window.setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE)
 
-        // Main Layout Setup (RelativeLayout)
         val mainLayout = RelativeLayout(this)
         mainLayout.layoutParams = RelativeLayout.LayoutParams(
             RelativeLayout.LayoutParams.MATCH_PARENT,
             RelativeLayout.LayoutParams.MATCH_PARENT
         )
 
-        // ১. WebView Setup
         webView = WebView(this)
         val webViewParams = RelativeLayout.LayoutParams(
             RelativeLayout.LayoutParams.MATCH_PARENT,
@@ -82,7 +85,6 @@ class MainActivity : Activity() {
         webView.layoutParams = webViewParams
         mainLayout.addView(webView)
 
-        // ২. Custom Green Splash Overlay
         splashLayout = FrameLayout(this)
         val splashParams = RelativeLayout.LayoutParams(
             RelativeLayout.LayoutParams.MATCH_PARENT,
@@ -94,7 +96,6 @@ class MainActivity : Activity() {
         val logoSizePx = (130 * resources.displayMetrics.density).toInt()
         val loaderSizePx = (155 * resources.displayMetrics.density).toInt()
 
-        // ৩. লোগোর গা ঘেঁষে ঘুরার জন্য কাস্টম গোল্ডেন প্রোগ্রেস সার্কেল
         val circularProgressBar = ProgressBar(this, null, android.R.attr.progressBarStyleLarge)
         val progressParams = FrameLayout.LayoutParams(loaderSizePx, loaderSizePx)
         progressParams.gravity = Gravity.CENTER
@@ -106,7 +107,6 @@ class MainActivity : Activity() {
         )
         splashLayout.addView(circularProgressBar)
 
-        // ৪. ব্র্যান্ড লোগো ImageView
         val logoImageView = ImageView(this)
         val logoParams = FrameLayout.LayoutParams(logoSizePx, logoSizePx)
         logoParams.gravity = Gravity.CENTER
@@ -121,16 +121,10 @@ class MainActivity : Activity() {
         mainLayout.addView(splashLayout)
         setContentView(mainLayout)
 
-        // অ্যাপ রান করার সাথে সাথেই প্রয়োজনীয় পারমিশনগুলোর জন্য প্রথমবার রিকোয়েস্ট করা
         requestAllRequiredPermissions()
-
-        // নেভিগেশন বার হাইড করা
         hideSystemNavigationBar()
-
-        // Clean & Smooth Navigation / System Bar State Handler
         setupKeyboardListener(mainLayout)
 
-        // WebView Settings & Acceleration
         webView.setLayerType(View.LAYER_TYPE_HARDWARE, null)
         val webSettings: WebSettings = webView.settings
         webSettings.javaScriptEnabled = true
@@ -143,22 +137,18 @@ class MainActivity : Activity() {
         webSettings.allowContentAccess = true
         webSettings.setRenderPriority(WebSettings.RenderPriority.HIGH)
 
-        // Cookie & Session Handling
         val cookieManager = CookieManager.getInstance()
         cookieManager.setAcceptCookie(true)
         cookieManager.setAcceptThirdPartyCookies(webView, true)
 
-        // অ্যাপ চালু হলে সেশন ক্লিয়ার করে স্মার্ট আইডি বা অ্যাকাউন্ট নাম্বার ঠিক রাখা
         clearAppSessionKeepSmartId()
 
-        // ক্যামেরা, গ্যালারি, ফাইল ম্যানেজার ও কেওয়াইসি ডকুমেন্ট আপলোডের জন্য ফোর্সেবল পারমিশন চেকার WebChromeClient
         webView.webChromeClient = object : WebChromeClient() {
             override fun onShowFileChooser(
                 webView: WebView?,
                 callback: ValueCallback<Array<Uri>>?,
                 fileChooserParams: FileChooserParams?
             ): Boolean {
-                // ফাইল বা ক্যামেরা ওপেন করার আগে পারমিশনগুলো আবার চেক করা হবে। না দেওয়া থাকলে ফোর্সেবল পপ-আপ আসবে।
                 if (!hasAllPermissions()) {
                     requestAllRequiredPermissions()
                     Toast.makeText(this@MainActivity, "ফাইল বা ক্যামেরা ব্যবহারের জন্য পারমিশন প্রয়োজন। অনুগ্রহ করে পারমিশন দিন।", Toast.LENGTH_LONG).show()
@@ -178,6 +168,22 @@ class MainActivity : Activity() {
                     }
 
                     val captureIntent = Intent(MediaStore.ACTION_IMAGE_CAPTURE)
+                    val photoFile: File? = try {
+                        createImageFile()
+                    } catch (ex: IOException) {
+                        null
+                    }
+
+                    if (photoFile != null) {
+                        cameraImageUri = FileProvider.getUriForFile(
+                            this@MainActivity,
+                            "${packageName}.fileprovider",
+                            photoFile
+                        )
+                        captureIntent.putExtra(MediaStore.EXTRA_OUTPUT, cameraImageUri)
+                    } else {
+                        cameraImageUri = null
+                    }
 
                     val chooserIntent = Intent(Intent.ACTION_CHOOSER).apply {
                         putExtra(Intent.EXTRA_INTENT, contentSelectionIntent)
@@ -222,11 +228,21 @@ class MainActivity : Activity() {
             }
         }
 
-        // ওয়েবসাইট লোড করা
         webView.loadUrl("https://bdrsf.com/")
     }
 
-    // প্রয়োজনীয় সকল পারমিশন একসঙ্গে চেক করার ফাংশন
+    @Throws(IOException::class)
+    private fun createImageFile(): File {
+        val timeStamp: String = SimpleDateFormat("yyyyMMdd_HHmmss", Locale.getDefault()).format(Date())
+        // ক্যাশ ফোল্ডার ব্যবহার করা হয়েছে যাতে গ্যালারিতে সেভ না হয়ে সম্পূর্ণ সিকিউর ও টেম্পোরারি থাকে
+        val storageDir: File = cacheDir 
+        return File.createTempFile(
+            "KYC_${timeStamp}_",
+            ".jpg",
+            storageDir
+        )
+    }
+
     private fun hasAllPermissions(): Boolean {
         val cameraPerm = ContextCompat.checkSelfPermission(this, Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED
         val locationPerm = ContextCompat.checkSelfPermission(this, Manifest.permission.ACCESS_FINE_LOCATION) == PackageManager.PERMISSION_GRANTED
@@ -240,7 +256,6 @@ class MainActivity : Activity() {
         return cameraPerm && storagePerm && locationPerm
     }
 
-    // পারমিশন না দেওয়া থাকলে বারবার ফোর্স করে পপ-আপ দেখানোর ফাংশন
     private fun requestAllRequiredPermissions() {
         val permissionsList = mutableListOf<String>()
 
@@ -273,12 +288,19 @@ class MainActivity : Activity() {
             var results: Array<Uri>? = null
 
             if (resultCode == Activity.RESULT_OK) {
-                if (data != null && data.dataString != null) {
-                    results = arrayOf(Uri.parse(data.dataString))
+                if (data == null || data.dataString == null) {
+                    if (cameraImageUri != null) {
+                        results = arrayOf(cameraImageUri!!)
+                    }
+                } else {
+                    data.dataString?.let {
+                        results = arrayOf(Uri.parse(it))
+                    }
                 }
             }
             filePathCallback?.onReceiveValue(results)
             filePathCallback = null
+            cameraImageUri = null
         } else {
             super.onActivityResult(requestCode, resultCode, data)
         }
