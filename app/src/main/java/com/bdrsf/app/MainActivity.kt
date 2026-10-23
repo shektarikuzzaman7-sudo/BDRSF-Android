@@ -21,7 +21,6 @@ import android.provider.MediaStore
 import android.util.Base64
 import android.view.Gravity
 import android.view.View
-import android.view.Window
 import android.view.WindowInsets
 import android.view.WindowInsetsController
 import android.view.WindowManager
@@ -40,6 +39,7 @@ import android.widget.FrameLayout
 import android.widget.ImageView
 import android.widget.ProgressBar
 import android.widget.RelativeLayout
+import android.widget.TextView
 import android.widget.Toast
 import androidx.appcompat.app.AppCompatActivity
 import androidx.camera.core.CameraSelector
@@ -74,7 +74,7 @@ class MainActivity : AppCompatActivity() {
     private var cameraProvider: ProcessCameraProvider? = null
     private lateinit var cameraExecutor: ExecutorService
     private var isScanningActive = false
-    private var currentScanDocType = "passport" // 'passport' or 'nid'
+    private var currentScanDocType = "passport"
 
     private var filePathCallback: ValueCallback<Array<Uri>>? = null
     private var cameraImageUri: Uri? = null
@@ -318,7 +318,6 @@ class MainActivity : AppCompatActivity() {
             }
         }
 
-        // নতুন যুক্ত করা হলো: পাসপোর্ট বা NID রিয়েল-টাইম স্ক্যান করার জন্য PHP থেকে কল রিসিভ করবে
         @JavascriptInterface
         fun startNativeDocumentScan(docType: String) {
             activity.runOnUiThread {
@@ -480,7 +479,6 @@ class MainActivity : AppCompatActivity() {
         }, ContextCompat.getMainExecutor(this))
     }
 
-    // গুগল এমএল কিট টেক্সট রিকগনিশন (OCR) ব্যবহার করে পাসপোর্ট বা NID স্ক্যান করার মেথড
     private fun startLiveDocumentOCRScanner() {
         if (!hasCameraPermission()) {
             requestAllRequiredPermissions()
@@ -507,8 +505,8 @@ class MainActivity : AppCompatActivity() {
         }
         scannerLayout?.addView(previewView)
 
-        val infoTextView = android.widget.TextView(this).apply {
-            text = if (currentScanDocType == "passport") "পাসপোর্ট পেজ ফ্রেমে রাখুন..." else "এনআইডি কার্ড ফ্রেমে রাখুন..."
+        val infoTextView = TextView(this).apply {
+            text = "পাসপোর্ট পেজ ফ্রেমে রাখুন..."
             setTextColor(Color.WHITE)
             textSize = 16f
             gravity = Gravity.CENTER
@@ -578,31 +576,20 @@ class MainActivity : AppCompatActivity() {
                 recognizer.process(image)
                     .addOnSuccessListener { visionText ->
                         val fullText = visionText.text
-                        if (fullText.isNotEmpty()) {
+                        if (!fullText.isNullOrEmpty()) {
                             var extractedDocNo = ""
                             var extractedName = ""
 
-                            if (currentScanDocType == "passport") {
-                                // পাসপোর্ট নম্বর প্যাটার্ন (যেমন: A09876543 বা অনুরূপ)
-                                val passportRegex = Regex("[A-Z][0-9]{7,8}")
-                                val match = passportRegex.find(fullText)
-                                if (match != null) {
-                                    extractedDocNo = match.value
-                                }
-                            } else {
-                                // NID নম্বর প্যাটার্ন (১০, ১৩ বা ১৭ ডিজিট)
-                                val nidRegex = Regex("\\b[0-9]{10,17}\\b")
-                                val match = nidRegex.find(fullText)
-                                if (match != null) {
-                                    extractedDocNo = match.value
-                                }
+                            val passportRegex = Regex("[A-Z][0-9]{7,8}")
+                            val match = passportRegex.find(fullText)
+                            if (match != null) {
+                                extractedDocNo = match.value
                             }
 
-                            // নাম এক্সট্রাকশনের জন্য প্রথম লাইনগুলোর মধ্য থেকে বড় হাতের শব্দ বাছাই করা যেতে পারে
                             for (block in visionText.textBlocks) {
                                 for (line in block.lines) {
                                     val textLine = line.text.trim()
-                                    if (textLine.length > 3 && !textLine.any { it.isDigit() } && !textLine.contains("REPUBLIC", true) && !textLine.contains("BANGLADESH", true) && !textLine.contains("PASSPORT", true) && !textLine.contains("NATIONAL", true)) {
+                                    if (textLine.length > 3 && !textLine.any { it.isDigit() } && !textLine.contains("REPUBLIC", true) && !textLine.contains("BANGLADESH", true) && !textLine.contains("PASSPORT", true)) {
                                         if (extractedName.isEmpty()) {
                                             extractedName = textLine
                                         }
@@ -615,14 +602,13 @@ class MainActivity : AppCompatActivity() {
                                     stopLiveCameraScanner()
                                     val safeName = extractedName.replace("'", "\\'")
                                     val safeDocNo = extractedDocNo.replace("'", "\\'")
-                                    // জাভাস্ক্রিপ্ট ফাংশনে ডেটা পাস করা
                                     webView.evaluateJavascript("javascript:window.onScanCompleted('$safeName', '$safeDocNo');", null)
                                 }
                             }
                         }
                     }
                     .addOnFailureListener {
-                        // স্ক্যান ফেইল করলে নিরব থাকবে অথবা চাইলে টোস্ট দেখাতে পারেন
+                        // Ignore failure during live frames
                     }
                     .addOnCompleteListener {
                         imageProxy.close()
