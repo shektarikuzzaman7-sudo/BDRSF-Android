@@ -36,12 +36,13 @@ dependencies {
     implementation("androidx.appcompat:appcompat:1.6.1")
     implementation("com.google.android.material:material:1.11.0")
 
-    // --- Google ML Kit QR Code Scanner ---
+    // --- Google ML Kit QR Code Scanner (লাইভ এবং গ্যালারি কিউআর স্ক্যানের জন্য) ---
     implementation("com.google.mlkit:barcode-scanning:17.3.0")
     
-    // --- Google ML Kit Text Recognition (OCR) পাসপোর্ট স্ক্যান করার জন্য আবশ্যিক ---
+    // --- Google ML Kit Text Recognition (OCR) - আপলোড করা NID ও পাসপোর্ট ছবি থেকে তথ্য পড়ার জন্য ---
     implementation("com.google.mlkit:text-recognition:16.0.0")
     
+    // --- CameraX (শুধুমাত্র লাইভ কিউআর স্ক্যানারের ক্যামেরা প্রিভিউ ও অ্যানালাইসিসের জন্য) ---
     val cameraxVersion = "1.3.1"
     implementation("androidx.camera:camera-core:$cameraxVersion")
     implementation("androidx.camera:camera-camera2:$cameraxVersion")
