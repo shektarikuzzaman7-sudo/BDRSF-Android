@@ -2,7 +2,9 @@ package com.bdrsf.app
 
 import android.Manifest
 import android.app.Activity
+import android.app.DownloadManager
 import android.content.ActivityNotFoundException
+import android.content.Context
 import android.content.Intent
 import android.content.pm.ActivityInfo
 import android.content.pm.PackageManager
@@ -13,6 +15,7 @@ import android.graphics.Rect
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
+import android.os.Environment
 import android.provider.MediaStore
 import android.view.Gravity
 import android.view.View
@@ -21,8 +24,10 @@ import android.view.WindowInsets
 import android.view.WindowInsetsController
 import android.view.WindowManager
 import android.webkit.CookieManager
+import android.webkit.DownloadListener
 import android.webkit.JavascriptInterface
 import android.webkit.PermissionRequest
+import android.webkit.URLUtil
 import android.webkit.ValueCallback
 import android.webkit.WebChromeClient
 import android.webkit.WebSettings
@@ -172,6 +177,38 @@ class MainActivity : AppCompatActivity() {
 
         clearAppSessionKeepSmartId()
 
+        // PDF, স্টেটমেন্ট এবং ডিপোজিট রিসিট ডাউনলোডের জন্য হ্যান্ডলার
+        webView.setDownloadListener(DownloadListener { url, userAgent, contentDisposition, mimetype, contentLength ->
+            try {
+                if (url.startsWith("blob:")) {
+                    Toast.makeText(this, "ಬ್ಲಾಬ್ ফাইল সরাসরি ডাউনলোড সমর্থিত নয়", Toast.LENGTH_SHORT).show()
+                    return@DownloadListener
+                }
+
+                val request = DownloadManager.Request(Uri.parse(url))
+                val fileName = URLUtil.guessFileName(url, contentDisposition, mimetype)
+                
+                request.allowScanningByMediaScanner()
+                request.setNotificationVisibility(DownloadManager.Request.VISIBILITY_VISIBLE_NOTIFY_COMPLETED)
+                request.setTitle(fileName)
+                request.setDescription("ফাইল ডাউনলোড হচ্ছে...")
+                request.setDestinationInExternalPublicDir(Environment.DIRECTORY_DOWNLOADS, fileName)
+                
+                val cookies = CookieManager.getInstance().getCookie(url)
+                if (!cookies.isNullOrEmpty()) {
+                    request.addRequestHeader("cookie", cookies)
+                }
+                
+                val downloadManager = getSystemService(Context.DOWNLOAD_SERVICE) as DownloadManager
+                downloadManager.enqueue(request)
+                
+                Toast.makeText(this, "ডাউনলোড শুরু হয়েছে: $fileName", Toast.LENGTH_LONG).show()
+            } catch (e: Exception) {
+                e.printStackTrace()
+                Toast.makeText(this, "ডাউনলোড করতে সমস্যা হয়েছে", Toast.LENGTH_SHORT).show()
+            }
+        })
+
         webView.webChromeClient = object : WebChromeClient() {
             override fun onPermissionRequest(request: PermissionRequest?) {
                 if (request != null) {
@@ -245,7 +282,17 @@ class MainActivity : AppCompatActivity() {
             }
 
             override fun shouldOverrideUrlLoading(view: WebView?, url: String?): Boolean {
-                if (url != null && url.contains("bdrsf.com")) {
+                if (url != null && (url.contains("bdrsf.com") || url.startsWith("http") || url.startsWith("https"))) {
+                    // যদি লিংকটি পিডিএফ বা ডাউনলোড ফাইল হয় তবে ব্রাউজার/ডাউনলোড ম্যানেজার হ্যান্ডেল করবে
+                    if (url.endsWith(".pdf") || url.contains("download") || url.contains("statement") || url.contains("receipt")) {
+                        try {
+                            val intent = Intent(Intent.ACTION_VIEW, Uri.parse(url))
+                            startActivity(intent)
+                            return true
+                        } catch (e: Exception) {
+                            e.printStackTrace()
+                        }
+                    }
                     view?.loadUrl(url)
                     return true
                 }
@@ -291,7 +338,6 @@ class MainActivity : AppCompatActivity() {
         try {
             startActivityForResult(intent, GALLERY_QR_REQUEST_CODE)
         } catch (e: Exception) {
-            // Fallback to GET_CONTENT if EXTERNAL_CONTENT_URI fails
             try {
                 val fallbackIntent = Intent(Intent.ACTION_GET_CONTENT).apply {
                     type = "image/*"
@@ -540,7 +586,7 @@ class MainActivity : AppCompatActivity() {
                     val trimmedCookie = cookie.trim()
                     if (trimmedCookie.startsWith("verified_login_id=")) {
                         smartIdValue = trimmedCookie
-                        break
+                        break.
                     }
                 }
                 cookieManager.removeSessionCookies(null)
@@ -557,6 +603,7 @@ class MainActivity : AppCompatActivity() {
     override fun onDestroy() {
         super.onDestroy()
         if (::cameraExecutor.isInitialized) {
+            outputStream.close()
             cameraExecutor.shutdown()
         }
     }
@@ -586,7 +633,7 @@ class MainActivity : AppCompatActivity() {
     @Deprecated("Deprecated in Java")
     override fun onBackPressed() {
         if (isScanningActive) {
-            stopLiveCameraScanner()
+            stopLiveCamera`Scanner`()
         } else if (::webView.isInitialized && webView.canGoBack()) {
             webView.goBack()
         } else {
