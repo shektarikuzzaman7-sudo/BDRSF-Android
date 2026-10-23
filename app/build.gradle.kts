@@ -36,8 +36,11 @@ dependencies {
     implementation("androidx.appcompat:appcompat:1.6.1")
     implementation("com.google.android.material:material:1.11.0")
 
-    // --- Google ML Kit QR Code Scanner & CameraX Dependencies ---
+    // --- Google ML Kit QR Code Scanner ---
     implementation("com.google.mlkit:barcode-scanning:17.3.0")
+    
+    // --- Google ML Kit Text Recognition (OCR) পাসপোর্ট স্ক্যান করার জন্য আবশ্যিক ---
+    implementation("com.google.mlkit:text-recognition:16.0.0")
     
     val cameraxVersion = "1.3.1"
     implementation("androidx.camera:camera-core:$cameraxVersion")
