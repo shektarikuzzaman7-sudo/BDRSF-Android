@@ -177,26 +177,24 @@ class MainActivity : AppCompatActivity() {
         hideSystemNavigationBar()
         setupKeyboardListener(mainLayout)
 
-        // আধুনিক Back Button হ্যান্ডলিং (যেকোনো জায়গা থেকে হোম পেজে ফেরা এবং হিস্ট্রি ক্লিন করা, অ্যাপ থেকে না বের হওয়া)
+        // নিখুঁত ব্যাক বাটন হ্যান্ডলিং: সাব-পেজে থাকলে হোমপেজে নিয়ে যাবে ও হিস্ট্রি ক্লিন করবে, আর হোমপেজে থাকলে পেজ রিফ্রেশ করবে (অ্যাপ থেকে কখনো বের হবে না)
         onBackPressedDispatcher.addCallback(this, object : OnBackPressedCallback(true) {
             override fun handleOnBackPressed() {
                 if (isScanningActive) {
                     stopLiveCameraScanner()
                 } else if (::webView.isInitialized) {
                     val currentUrl = webView.url ?: ""
-                    val homeUrl = "https://bdrsf.com/"
-                    val homeUrlAlt = "https://bdrsf.com"
+                    val normalizedUrl = currentUrl.trimEnd('/')
+                    val homeBase = "https://bdrsf.com"
 
-                    // যদি বর্তমান পেজ হোমপেজ না হয়, তবে হোমপেজে নিয়ে যাবে এবং সব হিস্ট্রি ক্লিয়ার করবে
-                    if (!currentUrl.startsWith(homeUrl) && !currentUrl.startsWith(homeUrlAlt)) {
-                        webView.loadUrl(homeUrl)
+                    if (normalizedUrl != homeBase) {
+                        // অন্য কোনো পেজে থাকলে সরাসরি হোমপেজে নিয়ে যাবে এবং সমস্ত হিস্ট্রি ক্লিন করবে
+                        webView.loadUrl("https://bdrsf.com/")
                         webView.clearHistory()
                     } else {
-                        // যদি ইতিমধ্যে হোমপেজে থাকে, তবে অ্যাপ বন্ধ না করে ব্যাকগ্রাউন্ডে পাঠিয়ে দিবে
-                        moveTaskToBack(true)
+                        // ইতিমধ্যে হোমপেজে থাকলে অ্যাপ থেকে বের না হয়ে পেজটি রিফ্রেশ হবে
+                        webView.reload()
                     }
-                } else {
-                    moveTaskToBack(true)
                 }
             }
         })
