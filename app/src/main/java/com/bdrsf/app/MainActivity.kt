@@ -22,6 +22,7 @@ import android.view.WindowInsets
 import android.view.WindowInsetsController
 import android.view.WindowManager
 import android.webkit.CookieManager
+import android.webkit.PermissionRequest
 import android.webkit.ValueCallback
 import android.webkit.WebChromeClient
 import android.webkit.WebSettings
@@ -120,7 +121,6 @@ class MainActivity : Activity() {
         mainLayout.addView(splashLayout)
         setContentView(mainLayout)
 
-        // অ্যাপ চালু হওয়ার সাথে সাথেই পারমিশন রিকোয়েস্ট করবে
         requestAllRequiredPermissions()
         hideSystemNavigationBar()
         setupKeyboardListener(mainLayout)
@@ -135,6 +135,7 @@ class MainActivity : Activity() {
         webSettings.useWideViewPort = true
         webSettings.allowFileAccess = true
         webSettings.allowContentAccess = true
+        webSettings.mediaPlaybackRequiresUserGesture = false
         webSettings.setRenderPriority(WebSettings.RenderPriority.HIGH)
 
         val cookieManager = CookieManager.getInstance()
@@ -144,13 +145,24 @@ class MainActivity : Activity() {
         clearAppSessionKeepSmartId()
 
         webView.webChromeClient = object : WebChromeClient() {
+            
+            // HTML5 (getUserMedia) ক্যামেরা পারমিশন প্রসেস করার জন্য এটি অত্যন্ত জরুরি
+            override fun onPermissionRequest(request: PermissionRequest?) {
+                if (request != null) {
+                    if (!hasAllPermissions()) {
+                        requestAllRequiredPermissions()
+                    }
+                    runOnUiThread {
+                        request.grant(request.resources)
+                    }
+                }
+            }
+
             override fun onShowFileChooser(
                 webView: WebView?,
                 callback: ValueCallback<Array<Uri>>?,
                 fileChooserParams: FileChooserParams?
             ): Boolean {
-                // প্রতিবার স্ক্যান বা ফাইল আপলোড অপশনে যাওয়ার সময় পারমিশন চেক করা হবে।
-                // যদি পারমিশন না থাকে, তবে অটোমেটিক পারমিশন পপ-আপ রিকোয়েস্ট পাঠানো হবে।
                 if (!hasAllPermissions()) {
                     requestAllRequiredPermissions()
                     Toast.makeText(this@MainActivity, "ক্যামেরা বা ফাইলের পারমিশন দেওয়া প্রয়োজন। অনুগ্রহ করে পারমিশন দিন।", Toast.LENGTH_LONG).show()
