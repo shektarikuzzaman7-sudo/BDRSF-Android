@@ -505,8 +505,9 @@ class MainActivity : AppCompatActivity() {
         }
         scannerLayout?.addView(previewView)
 
+        val scanTitleText = if (currentScanDocType == "passport") "পাসপোর্ট পেজ ফ্রেমে রাখুন..." else "এনআইডি কার্ড ফ্রেমে রাখুন..."
         val infoTextView = TextView(this).apply {
-            text = "পাসপোর্ট পেজ ফ্রেমে রাখুন..."
+            text = scanTitleText
             setTextColor(Color.WHITE)
             textSize = 16f
             gravity = Gravity.CENTER
@@ -547,7 +548,7 @@ class MainActivity : AppCompatActivity() {
         cameraProviderFuture.addListener({
             try {
                 cameraProvider = cameraProviderFuture.get()
-                bindDocumentOCRUseCases()
+                bindSmartOCRUseCases()
             } catch (e: Exception) {
                 e.printStackTrace()
                 stopLiveCameraScanner()
@@ -556,7 +557,7 @@ class MainActivity : AppCompatActivity() {
         }, ContextCompat.getMainExecutor(this))
     }
 
-    private fun bindDocumentOCRUseCases() {
+    private fun bindSmartOCRUseCases() {
         val cameraProvider = cameraProvider ?: return
 
         val preview = Preview.Builder().build().also {
@@ -577,38 +578,72 @@ class MainActivity : AppCompatActivity() {
                     .addOnSuccessListener { visionText ->
                         val fullText = visionText.text
                         if (!fullText.isNullOrEmpty()) {
-                            var extractedDocNo = ""
-                            var extractedName = ""
+                            if (currentScanDocType == "passport") {
+                                val passportRegex = Regex("[A-Z][0-9]{7,8}")
+                                val match = passportRegex.find(fullText)
+                                val passportNo = match?.value ?: ""
 
-                            val passportRegex = Regex("[A-Z][0-9]{7,8}")
-                            val match = passportRegex.find(fullText)
-                            if (match != null) {
-                                extractedDocNo = match.value
-                            }
-
-                            for (block in visionText.textBlocks) {
-                                for (line in block.lines) {
-                                    val textLine = line.text.trim()
-                                    if (textLine.length > 3 && !textLine.any { it.isDigit() } && !textLine.contains("REPUBLIC", true) && !textLine.contains("BANGLADESH", true) && !textLine.contains("PASSPORT", true)) {
-                                        if (extractedName.isEmpty()) {
-                                            extractedName = textLine
+                                var extractedName = ""
+                                for (block in visionText.textBlocks) {
+                                    for (line in block.lines) {
+                                        val textLine = line.text.trim()
+                                        if (textLine.length > 3 && !textLine.any { it.isDigit() } && !textLine.contains("REPUBLIC", true) && !textLine.contains("BANGLADESH", true) && !textLine.contains("PASSPORT", true)) {
+                                            if (extractedName.isEmpty()) {
+                                                extractedName = textLine
+                                            }
                                         }
                                     }
                                 }
-                            }
 
-                            if (extractedDocNo.isNotEmpty() || extractedName.isNotEmpty()) {
-                                runOnUiThread {
-                                    stopLiveCameraScanner()
-                                    val safeName = extractedName.replace("'", "\\'")
-                                    val safeDocNo = extractedDocNo.replace("'", "\\'")
-                                    webView.evaluateJavascript("javascript:window.onScanCompleted('$safeName', '$safeDocNo');", null)
+                                if (passportNo.isNotEmpty() || extractedName.isNotEmpty()) {
+                                    runOnUiThread {
+                                        stopLiveCameraScanner()
+                                        val safeName = extractedName.replace("'", "\\'")
+                                        val safeDocNo = passportNo.replace("'", "\\'")
+                                        webView.evaluateJavascript("javascript:window.onScanCompleted('$safeName', '$safeDocNo');", null)
+                                    }
+                                }
+                            } else {
+                                val nidRegex = Regex("\\b[0-9]{10,17}\\b")
+                                val nidMatch = nidRegex.find(fullText)
+                                val nidNo = nidMatch?.value ?: ""
+
+                                val dobRegex = Regex("(?:DOB|Date of Birth|জন্ম তারিখ)[:\\s]*([0-9]{2}[-/\\s][0-9]{2}[-/\\s][0-9]{4})", RegexOption.IGNORE_CASE)
+                                val dobMatch = dobRegex.find(fullText)
+                                val dobEn = dobMatch?.groupValues?.get(1) ?: ""
+
+                                var nameEn = ""
+                                var fatherBn = ""
+                                var motherBn = ""
+                                var addressBn = ""
+
+                                for (block in visionText.textBlocks) {
+                                    for (line in block.lines) {
+                                        val t = line.text.trim()
+                                        if (t.matches(Regex("^[A-Z\\s]{4,}$")) && nameEn.isEmpty() && !t.contains("BANGLADESH") && !t.contains("NID")) {
+                                            nameEn = t
+                                        } else if (t.contains("পিতা", true) || t.contains("Father", true)) {
+                                            fatherBn = t
+                                        } else if (t.contains("মাতা", true) || t.contains("Mother", true)) {
+                                            motherBn = t
+                                        } else if (t.contains("বাসা", true) || t.contains("গ্রাম", true) || t.contains("ডাকঘর", true)) {
+                                            addressBn = t
+                                        }
+                                    }
+                                }
+
+                                if (nidNo.isNotEmpty() || nameEn.isNotEmpty()) {
+                                    runOnUiThread {
+                                        stopLiveCameraScanner()
+                                        val jsCall = "window.onNIDScanCompleted('$nameEn', '$fatherBn', '$motherBn', '$dobEn', '$nidNo', '$addressBn');"
+                                        webView.evaluateJavascript("javascript:$jsCall", null)
+                                    }
                                 }
                             }
                         }
                     }
                     .addOnFailureListener {
-                        // Ignore failure during live frames
+                        // Silent catch
                     }
                     .addOnCompleteListener {
                         imageProxy.close()
