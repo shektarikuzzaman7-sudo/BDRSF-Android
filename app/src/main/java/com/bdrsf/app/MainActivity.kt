@@ -28,11 +28,17 @@ import android.webkit.WebChromeClient
 import android.webkit.WebSettings
 import android.webkit.WebView
 import android.webkit.WebViewClient
+import android.widget.Button
 import android.widget.FrameLayout
 import android.widget.ImageView
 import android.widget.ProgressBar
 import android.widget.RelativeLayout
 import android.widget.Toast
+import androidx.camera.core.CameraSelector
+import androidx.camera.core.ImageAnalysis
+import androidx.camera.core.Preview
+import androidx.camera.lifecycle.ProcessCameraProvider
+import androidx.camera.view.PreviewView
 import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
 import androidx.core.content.FileProvider
@@ -43,17 +49,26 @@ import java.io.IOException
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
+import java.util.concurrent.ExecutorService
+import java.util.concurrent.Executors
 
 class MainActivity : Activity() {
 
     private lateinit var webView: WebView
     private lateinit var splashLayout: FrameLayout
+    private lateinit var mainLayout: RelativeLayout
+    
+    // Live CameraX Scanner UI components
+    private var scannerLayout: FrameLayout? = null
+    private var previewView: PreviewView? = null
+    private var cameraProvider: ProcessCameraProvider? = null
+    private lateinit var cameraExecutor: ExecutorService
+    private var isScanningActive = false
 
     private var filePathCallback: ValueCallback<Array<Uri>>? = null
     private var cameraImageUri: Uri? = null
     private val FILE_CHOOSER_REQUEST_CODE = 1001
     private val PERMISSION_REQUEST_CODE = 1002
-    private val ML_KIT_QR_REQUEST_CODE = 1003
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -73,7 +88,7 @@ class MainActivity : Activity() {
 
         window.setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE)
 
-        val mainLayout = RelativeLayout(this)
+        mainLayout = RelativeLayout(this)
         mainLayout.layoutParams = RelativeLayout.LayoutParams(
             RelativeLayout.LayoutParams.MATCH_PARENT,
             RelativeLayout.LayoutParams.MATCH_PARENT
@@ -123,6 +138,8 @@ class MainActivity : Activity() {
         mainLayout.addView(splashLayout)
         setContentView(mainLayout)
 
+        cameraExecutor = Executors.newSingleThreadExecutor()
+
         requestAllRequiredPermissions()
         hideSystemNavigationBar()
         setupKeyboardListener(mainLayout)
@@ -140,7 +157,7 @@ class MainActivity : Activity() {
         webSettings.mediaPlaybackRequiresUserGesture = false
         webSettings.setRenderPriority(WebSettings.RenderPriority.HIGH)
 
-        // ওয়েব থেকে নেটিভ এমএল কিট স্ক্যানার ট্রিগার করার জন্য ব্রিজ
+        // ওয়েব থেকে নেটিভ লাইভ এমএল কিট স্ক্যানার ট্রিগার করার জন্য ব্রিজ
         webView.addJavascriptInterface(WebAppInterface(this), "AndroidBridge")
 
         val cookieManager = CookieManager.getInstance()
@@ -248,25 +265,136 @@ class MainActivity : Activity() {
     class WebAppInterface(private val activity: MainActivity) {
         @JavascriptInterface
         fun startNativeMLKitScanner() {
-            if (ContextCompat.checkSelfPermission(activity, Manifest.permission.CAMERA) != PackageManager.PERMISSION_GRANTED) {
-                ActivityCompat.requestPermissions(activity, arrayOf(Manifest.permission.CAMERA), activity.PERMISSION_REQUEST_CODE)
-                return
-            }
-            // নেটিভ ক্যামেরা ইনটেন্ট চালু করা হচ্ছে যা ছবি তুলে সরাসরি ML Kit দিয়ে স্ক্যান করবে
-            val takePictureIntent = Intent(MediaStore.ACTION_IMAGE_CAPTURE)
-            try {
-                val photoFile: File = activity.createImageFile()
-                activity.cameraImageUri = FileProvider.getUriForFile(
-                    activity,
-                    "${activity.packageName}.fileprovider",
-                    photoFile
-                )
-                takePictureIntent.putExtra(MediaStore.EXTRA_OUTPUT, activity.cameraImageUri)
-                activity.startActivityForResult(takePictureIntent, activity.ML_KIT_QR_REQUEST_CODE)
-            } catch (e: Exception) {
-                Toast.makeText(activity, "ক্যামেরা ওপেন করতে সমস্যা হয়েছে", Toast.LENGTH_SHORT).show()
+            activity.runOnUiThread {
+                activity.startLiveCameraScanner()
             }
         }
+    }
+
+    // লাইভ ক্যামেরাএক্স স্ক্যানার চালু করার পদ্ধতি
+    private fun startLiveCameraScanner() {
+        if (!hasCameraPermission()) {
+            requestAllRequiredPermissions()
+            Toast.makeText(this, "ক্যামেরা পারমিশন প্রয়োজন", Toast.LENGTH_SHORT).show()
+            return
+        }
+
+        if (isScanningActive) return
+        isScanningActive = true
+
+        // ফুলস্ক্রিন স্ক্যানার লেআউট তৈরি
+        scannerLayout = FrameLayout(this).apply {
+            layoutParams = RelativeLayout.LayoutParams(
+                RelativeLayout.LayoutParams.MATCH_PARENT,
+                RelativeLayout.LayoutParams.MATCH_PARENT
+            )
+            setBackgroundColor(Color.BLACK)
+        }
+
+        previewView = PreviewView(this).apply {
+            layoutParams = FrameLayout.LayoutParams(
+                FrameLayout.LayoutParams.MATCH_PARENT,
+                FrameLayout.LayoutParams.MATCH_PARENT
+            )
+        }
+        scannerLayout?.addView(previewView)
+
+        // ক্লোজ বা ব্যাক বাটন
+        val closeButton = Button(this).apply {
+            text = "বন্ধ করুন (Close)"
+            setTextColor(Color.WHITE)
+            setBackgroundColor(Color.parseColor("#AA000000"))
+            val params = FrameLayout.LayoutParams(
+                FrameLayout.LayoutParams.WRAP_CONTENT,
+                FrameLayout.LayoutParams.WRAP_CONTENT
+            ).apply {
+                gravity = Gravity.TOP or Gravity.END
+                topMargin = 100
+                rightMargin = 50
+            }
+            layoutParams = params
+            setOnClickListener {
+                stopLiveCameraScanner()
+            }
+        }
+        scannerLayout?.addView(closeButton)
+
+        mainLayout.addView(scannerLayout)
+
+        // CameraX বাইন্ড করা
+        val cameraProviderFuture = ProcessCameraProvider.getInstance(this)
+        cameraProviderFuture.addListener({
+            cameraProvider = cameraProviderFuture.get()
+            bindCameraUseCases()
+        }, ContextCompat.getMainExecutor(this))
+    }
+
+    private fun bindCameraUseCases() {
+        val cameraProvider = cameraProvider ?: return
+
+        val preview = Preview.Builder().build().also {
+            it.setSurfaceProvider(previewView?.surfaceProvider)
+        }
+
+        val imageAnalysis = ImageAnalysis.Builder()
+            .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
+            .build()
+
+        imageAnalysis.setAnalyzer(cameraExecutor) { imageProxy ->
+            val mediaImage = imageProxy.image
+            if (mediaImage != null) {
+                val image = InputImage.fromMediaImage(mediaImage, imageProxy.imageInfo.rotationDegrees)
+                val scanner = BarcodeScanning.getClient()
+                scanner.process(image)
+                    .addOnSuccessListener { barcodes ->
+                        for (barcode in barcodes) {
+                            val scannedValue = barcode.rawValue
+                            if (!scannedValue.isNullOrEmpty()) {
+                                runOnUiThread {
+                                    stopLiveCameraScanner()
+                                    webView.evaluateJavascript("javascript:processScannedData('$scannedValue');", null)
+                                }
+                                break
+                            }
+                        }
+                    }
+                    .addOnFailureListener {
+                        // স্ক্যানিং ফেইল করলে ব্যাকগ্রাউন্ডে চলতে থাকবে
+                    }
+                    .addOnCompleteListener {
+                        imageProxy.close()
+                    }
+            } else {
+                imageProxy.close()
+            }
+        }
+
+        val cameraSelector = CameraSelector.DEFAULT_BACK_CAMERA
+
+        try {
+            cameraProvider.unbindAll()
+            cameraProvider.bindToLifecycle(
+                this, cameraSelector, preview, imageAnalysis
+            )
+        } catch (exc: Exception) {
+            Toast.makeText(this, "ক্যামেরা চালু করতে সমস্যা হয়েছে", Toast.LENGTH_SHORT).show()
+            stopLiveCameraScanner()
+        }
+    }
+
+    private fun stopLiveCameraScanner() {
+        if (!isScanningActive) return
+        isScanningActive = false
+        try {
+            cameraProvider?.unbindAll()
+        } catch (e: Exception) {
+            // ignore
+        }
+        scannerLayout?.let {
+            mainLayout.removeView(it)
+            scannerLayout = null
+        }
+        previewView = null
     }
 
     @Throws(IOException::class)
@@ -303,35 +431,7 @@ class MainActivity : Activity() {
     }
 
     override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
-        if (requestCode == ML_KIT_QR_REQUEST_CODE) {
-            if (resultCode == Activity.RESULT_OK && cameraImageUri != null) {
-                try {
-                    val image = InputImage.fromFilePath(this, cameraImageUri!!)
-                    val scanner = BarcodeScanning.getClient()
-                    scanner.process(image)
-                        .addOnSuccessListener { barcodes ->
-                            var scannedValue = ""
-                            for (barcode in barcodes) {
-                                scannedValue = barcode.rawValue ?: ""
-                                if (scannedValue.isNotEmpty()) break
-                            }
-                            if (scannedValue.isNotEmpty()) {
-                                webView.post {
-                                    webView.evaluateJavascript("javascript:processScannedData('$scannedValue');", null)
-                                }
-                            } else {
-                                Toast.makeText(this, "কিউআর কোড পাওয়া যায়নি, আবার চেষ্টা করুন", Toast.LENGTH_LONG).show()
-                            }
-                        }
-                        .addOnFailureListener {
-                            Toast.makeText(this, "স্ক্যানিং ব্যর্থ হয়েছে", Toast.LENGTH_SHORT).show()
-                        }
-                } catch (e: Exception) {
-                    Toast.makeText(this, "ইমেজ প্রসেস করতে সমস্যা হয়েছে", Toast.LENGTH_SHORT).show()
-                }
-            }
-            cameraImageUri = null
-        } else if (requestCode == FILE_CHOOSER_REQUEST_CODE) {
+        if (requestCode == FILE_CHOOSER_REQUEST_CODE) {
             if (filePathCallback == null) return
             var results: Array<Uri>? = null
 
@@ -388,6 +488,11 @@ class MainActivity : Activity() {
         }
     }
 
+    override fun onDestroy() {
+        super.onDestroy()
+        cameraExecutor.shutdown()
+    }
+
     override fun onWindowFocusChanged(hasFocus: Boolean) {}
 
     private fun hideSystemNavigationBar() {
@@ -409,5 +514,13 @@ class MainActivity : Activity() {
     }
 
     @Deprecated("Deprecated in Java")
-    override fun onBackPressed() {}
+    override fun onBackPressed() {
+        if (isScanningActive) {
+            stopLiveCameraScanner()
+        } else if (webView.canGoBack()) {
+            webView.goBack()
+        } else {
+            // সুপার ব্যাক হ্যান্ডলিং
+        }
+    }
 }
