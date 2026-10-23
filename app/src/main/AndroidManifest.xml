@@ -41,7 +41,7 @@
             </intent-filter>
         </activity>
 
-        <!-- ক্যামেরা থেকে ফাইল নিরাপদে শেয়ার করার জন্য FileProvider -->
+        <!-- ক্যামেরা থেকে ফাইল নিরাপده শেয়ার করার জন্য FileProvider -->
         <provider
             android:name="androidx.core.content.FileProvider"
             android:authorities="${applicationId}.fileprovider"
