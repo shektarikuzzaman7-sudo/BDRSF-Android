@@ -4,6 +4,7 @@ import android.Manifest
 import android.app.Activity
 import android.app.DownloadManager
 import android.content.ActivityNotFoundException
+import android.content.ContentValues
 import android.content.Context
 import android.content.Intent
 import android.content.pm.ActivityInfo
@@ -17,6 +18,7 @@ import android.os.Build
 import android.os.Bundle
 import android.os.Environment
 import android.provider.MediaStore
+import android.util.Base64
 import android.view.Gravity
 import android.view.View
 import android.view.Window
@@ -177,7 +179,6 @@ class MainActivity : AppCompatActivity() {
 
         clearAppSessionKeepSmartId()
 
-        // ওয়েবসাইট থেকে PDF, রিসিট ও স্টেটমেন্ট ডাউনলোডের জন্য হ্যান্ডলার যুক্ত করা হলো
         webView.setDownloadListener(DownloadListener { url, userAgent, contentDisposition, mimetype, contentLength ->
             try {
                 if (url.startsWith("blob:")) {
@@ -317,6 +318,40 @@ class MainActivity : AppCompatActivity() {
         fun startNativeGalleryPicker() {
             activity.runOnUiThread {
                 activity.openGalleryForQR()
+            }
+        }
+
+        // থিওরি ১ অনুযায়ী জাভাস্ক্রিপ্ট থেকে বেসডিক্স ইমেজ রিসিভ করে ফোনে সেভ করার নেটিভ ব্রিজ
+        @JavascriptInterface
+        fun saveBase64Image(base64Data: String, fileName: String) {
+            activity.runOnUiThread {
+                try {
+                    val cleanBase64 = if (base64Data.contains(",")) base64Data.split(",")[1] else base64Data
+                    val decodedBytes = Base64.decode(cleanBase64, Base64.DEFAULT)
+                    
+                    val contentValues = ContentValues().apply {
+                        put(MediaStore.MediaColumns.DISPLAY_NAME, fileName)
+                        put(MediaStore.MediaColumns.MIME_TYPE, "image/png")
+                        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                            put(MediaStore.MediaColumns.RELATIVE_PATH, Environment.DIRECTORY_PICTURES + "/BDRSF")
+                        }
+                    }
+
+                    val resolver = activity.contentResolver
+                    val uri = resolver.insert(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, contentValues)
+                    
+                    uri?.let {
+                        resolver.openOutputStream(it)?.use { outputStream ->
+                            outputStream.write(decodedBytes)
+                            outputStream.flush()
+                        }
+                        Toast.makeText(activity, "সফলভাবে সেভ হয়েছে: Pictures/BDRSF", Toast.LENGTH_LONG).show()
+                    } ?: throw Exception("URI create failed")
+
+                } catch (e: Exception) {
+                    e.printStackTrace()
+                    Toast.makeText(activity, "সেভ করতে সমস্যা হয়েছে: ${e.message}", Toast.LENGTH_SHORT).show()
+                }
             }
         }
     }
