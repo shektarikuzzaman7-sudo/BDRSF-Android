@@ -177,11 +177,11 @@ class MainActivity : AppCompatActivity() {
 
         clearAppSessionKeepSmartId()
 
-        // PDF, স্টেটমেন্ট এবং ডিপোজিট রিসিট ডাউনলোডের জন্য হ্যান্ডলার
+        // ওয়েবসাইট থেকে PDF, রিসিট ও স্টেটমেন্ট ডাউনলোডের জন্য হ্যান্ডলার যুক্ত করা হলো
         webView.setDownloadListener(DownloadListener { url, userAgent, contentDisposition, mimetype, contentLength ->
             try {
                 if (url.startsWith("blob:")) {
-                    Toast.makeText(this, "ಬ್ಲಾಬ್ ফাইল সরাসরি ডাউনলোড সমর্থিত নয়", Toast.LENGTH_SHORT).show()
+                    Toast.makeText(this, "ব্লব ফাইল সরাসরি ডাউনলোড করা যায় না", Toast.LENGTH_SHORT).show()
                     return@DownloadListener
                 }
 
@@ -282,17 +282,7 @@ class MainActivity : AppCompatActivity() {
             }
 
             override fun shouldOverrideUrlLoading(view: WebView?, url: String?): Boolean {
-                if (url != null && (url.contains("bdrsf.com") || url.startsWith("http") || url.startsWith("https"))) {
-                    // যদি লিংকটি পিডিএফ বা ডাউনলোড ফাইল হয় তবে ব্রাউজার/ডাউনলোড ম্যানেজার হ্যান্ডেল করবে
-                    if (url.endsWith(".pdf") || url.contains("download") || url.contains("statement") || url.contains("receipt")) {
-                        try {
-                            val intent = Intent(Intent.ACTION_VIEW, Uri.parse(url))
-                            startActivity(intent)
-                            return true
-                        } catch (e: Exception) {
-                            e.printStackTrace()
-                        }
-                    }
+                if (url != null && url.contains("bdrsf.com")) {
                     view?.loadUrl(url)
                     return true
                 }
@@ -586,7 +576,7 @@ class MainActivity : AppCompatActivity() {
                     val trimmedCookie = cookie.trim()
                     if (trimmedCookie.startsWith("verified_login_id=")) {
                         smartIdValue = trimmedCookie
-                        break.
+                        break
                     }
                 }
                 cookieManager.removeSessionCookies(null)
@@ -603,7 +593,6 @@ class MainActivity : AppCompatActivity() {
     override fun onDestroy() {
         super.onDestroy()
         if (::cameraExecutor.isInitialized) {
-            outputStream.close()
             cameraExecutor.shutdown()
         }
     }
@@ -633,7 +622,7 @@ class MainActivity : AppCompatActivity() {
     @Deprecated("Deprecated in Java")
     override fun onBackPressed() {
         if (isScanningActive) {
-            stopLiveCamera`Scanner`()
+            stopLiveCameraScanner()
         } else if (::webView.isInitialized && webView.canGoBack()) {
             webView.goBack()
         } else {
