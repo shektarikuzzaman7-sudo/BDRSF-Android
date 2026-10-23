@@ -59,7 +59,6 @@ class MainActivity : AppCompatActivity() {
     private lateinit var splashLayout: FrameLayout
     private lateinit var mainLayout: RelativeLayout
     
-    // Live CameraX Scanner UI components
     private var scannerLayout: FrameLayout? = null
     private var previewView: PreviewView? = null
     private var cameraProvider: ProcessCameraProvider? = null
@@ -75,19 +74,22 @@ class MainActivity : AppCompatActivity() {
         super.onCreate(savedInstanceState)
 
         requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_PORTRAIT
-        requestWindowFeature(Window.FEATURE_NO_TITLE)
         
-        window.setFlags(
-            WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS,
-            WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS
-        )
+        try {
+            window.setFlags(
+                WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS,
+                WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS
+            )
 
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
-            window.attributes.layoutInDisplayCutoutMode =
-                WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_SHORT_EDGES
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+                window.attributes.layoutInDisplayCutoutMode =
+                    WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_SHORT_EDGES
+            }
+
+            window.setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE)
+        } catch (e: Exception) {
+            e.printStackTrace()
         }
-
-        window.setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE)
 
         mainLayout = RelativeLayout(this)
         mainLayout.layoutParams = RelativeLayout.LayoutParams(
@@ -119,10 +121,14 @@ class MainActivity : AppCompatActivity() {
         progressParams.gravity = Gravity.CENTER
         circularProgressBar.layoutParams = progressParams
         
-        circularProgressBar.indeterminateDrawable.setColorFilter(
-            Color.parseColor("#FFD700"),
-            PorterDuff.Mode.SRC_IN
-        )
+        try {
+            circularProgressBar.indeterminateDrawable.setColorFilter(
+                Color.parseColor("#FFD700"),
+                PorterDuff.Mode.SRC_IN
+            )
+        } catch (e: Exception) {
+            e.printStackTrace()
+        }
         splashLayout.addView(circularProgressBar)
 
         val logoImageView = ImageView(this)
@@ -156,9 +162,7 @@ class MainActivity : AppCompatActivity() {
         webSettings.allowFileAccess = true
         webSettings.allowContentAccess = true
         webSettings.mediaPlaybackRequiresUserGesture = false
-        webSettings.setRenderPriority(WebSettings.RenderPriority.HIGH)
 
-        // ওয়েব থেকে নেটিভ লাইভ এমএল কিট স্ক্যানার ট্রিগার করার জন্য ব্রিজ
         webView.addJavascriptInterface(WebAppInterface(this), "AndroidBridge")
 
         val cookieManager = CookieManager.getInstance()
@@ -183,7 +187,7 @@ class MainActivity : AppCompatActivity() {
             ): Boolean {
                 if (!hasCameraPermission()) {
                     requestAllRequiredPermissions()
-                    Toast.makeText(this@MainActivity, "ক্যামেরা পারমিশন প্রয়োজন। অনুগ্রহ করে পারমিশন দিন।", Toast.LENGTH_LONG).show()
+                    Toast.makeText(this@MainActivity, "ক্যামেরা পারমিশন প্রয়োজন।", Toast.LENGTH_LONG).show()
                     callback?.onReceiveValue(null)
                     return false
                 }
@@ -272,7 +276,6 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    // লাইভ ক্যামেরাএক্স স্ক্যানার চালু করার পদ্ধতি
     private fun startLiveCameraScanner() {
         if (!hasCameraPermission()) {
             requestAllRequiredPermissions()
@@ -283,7 +286,6 @@ class MainActivity : AppCompatActivity() {
         if (isScanningActive) return
         isScanningActive = true
 
-        // ফুলস্ক্রিন স্ক্যানার লেআউট তৈরি
         scannerLayout = FrameLayout(this).apply {
             layoutParams = RelativeLayout.LayoutParams(
                 RelativeLayout.LayoutParams.MATCH_PARENT,
@@ -300,7 +302,6 @@ class MainActivity : AppCompatActivity() {
         }
         scannerLayout?.addView(previewView)
 
-        // ক্লোজ বা ব্যাক বাটন
         val closeButton = Button(this).apply {
             text = "বন্ধ করুন (Close)"
             setTextColor(Color.WHITE)
@@ -322,11 +323,15 @@ class MainActivity : AppCompatActivity() {
 
         mainLayout.addView(scannerLayout)
 
-        // CameraX বাইন্ড করা
         val cameraProviderFuture = ProcessCameraProvider.getInstance(this)
         cameraProviderFuture.addListener({
-            cameraProvider = cameraProviderFuture.get()
-            bindCameraUseCases()
+            try {
+                cameraProvider = cameraProviderFuture.get()
+                bindCameraUseCases()
+            } catch (e: Exception) {
+                e.printStackTrace()
+                stopLiveCameraScanner()
+            }
         }, ContextCompat.getMainExecutor(this))
     }
 
@@ -359,9 +364,6 @@ class MainActivity : AppCompatActivity() {
                             }
                         }
                     }
-                    .addOnFailureListener {
-                        // স্ক্যানিং ফেইল করলে ব্যাকগ্রাউন্ডে চলতে থাকবে
-                    }
                     .addOnCompleteListener {
                         imageProxy.close()
                     }
@@ -389,7 +391,7 @@ class MainActivity : AppCompatActivity() {
         try {
             cameraProvider?.unbindAll()
         } catch (e: Exception) {
-            // ignore
+            e.printStackTrace()
         }
         scannerLayout?.let {
             mainLayout.removeView(it)
@@ -457,60 +459,72 @@ class MainActivity : AppCompatActivity() {
 
     private fun setupKeyboardListener(rootView: View) {
         rootView.viewTreeObserver.addOnGlobalLayoutListener {
-            val r = Rect()
-            rootView.getWindowVisibleDisplayFrame(r)
-            val screenHeight = rootView.rootView.height
-            val keypadHeight = screenHeight - r.bottom
-            if (keypadHeight < screenHeight * 0.15) {
-                hideSystemNavigationBar()
+            try {
+                val r = Rect()
+                rootView.getWindowVisibleDisplayFrame(r)
+                val screenHeight = rootView.rootView.height
+                val keypadHeight = screenHeight - r.bottom
+                if (keypadHeight < screenHeight * 0.15) {
+                    hideSystemNavigationBar()
+                }
+            } catch (e: Exception) {
+                e.printStackTrace()
             }
         }
     }
 
     @Suppress("DEPRECATION")
     private fun clearAppSessionKeepSmartId() {
-        val cookieManager = CookieManager.getInstance()
-        val cookies = cookieManager.getCookie("https://bdrsf.com/")
-        if (!cookies.isNullOrEmpty()) {
-            val cookieArray = cookies.split(";")
-            var smartIdValue = ""
-            for (cookie in cookieArray) {
-                val trimmedCookie = cookie.trim()
-                if (trimmedCookie.startsWith("verified_login_id=")) {
-                    smartIdValue = trimmedCookie
-                    break
+        try {
+            val cookieManager = CookieManager.getInstance()
+            val cookies = cookieManager.getCookie("https://bdrsf.com/")
+            if (!cookies.isNullOrEmpty()) {
+                val cookieArray = cookies.split(";")
+                var smartIdValue = ""
+                for (cookie in cookieArray) {
+                    val trimmedCookie = cookie.trim()
+                    if (trimmedCookie.startsWith("verified_login_id=")) {
+                        smartIdValue = trimmedCookie
+                        break
+                    }
                 }
+                cookieManager.removeSessionCookies(null)
+                if (smartIdValue.isNotEmpty()) {
+                    cookieManager.setCookie("https://bdrsf.com/", smartIdValue)
+                }
+                cookieManager.flush()
             }
-            cookieManager.removeSessionCookies(null)
-            if (smartIdValue.isNotEmpty()) {
-                cookieManager.setCookie("https://bdrsf.com/", smartIdValue)
-            }
-            cookieManager.flush()
+        } catch (e: Exception) {
+            e.printStackTrace()
         }
     }
 
     override fun onDestroy() {
         super.onDestroy()
-        cameraExecutor.shutdown()
+        if (::cameraExecutor.isInitialized) {
+            cameraExecutor.shutdown()
+        }
     }
 
-    override fun onWindowFocusChanged(hasFocus: Boolean) {}
-
     private fun hideSystemNavigationBar() {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
-            window.insetsController?.let { controller ->
-                controller.hide(WindowInsets.Type.navigationBars())
-                controller.systemBarsBehavior = WindowInsetsController.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
+        try {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                window.insetsController?.let { controller ->
+                    controller.hide(WindowInsets.Type.navigationBars())
+                    controller.systemBarsBehavior = WindowInsetsController.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
+                }
+            } else {
+                @Suppress("DEPRECATION")
+                window.decorView.systemUiVisibility = (
+                    View.SYSTEM_UI_FLAG_HIDE_NAVIGATION
+                    or View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY
+                    or View.SYSTEM_UI_FLAG_LAYOUT_STABLE
+                    or View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN
+                    or View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION
+                )
             }
-        } else {
-            @Suppress("DEPRECATION")
-            window.decorView.systemUiVisibility = (
-                View.SYSTEM_UI_FLAG_HIDE_NAVIGATION
-                or View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY
-                or View.SYSTEM_UI_FLAG_LAYOUT_STABLE
-                or View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN
-                or View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION
-            )
+        } catch (e: Exception) {
+            e.printStackTrace()
         }
     }
 
@@ -518,10 +532,10 @@ class MainActivity : AppCompatActivity() {
     override fun onBackPressed() {
         if (isScanningActive) {
             stopLiveCameraScanner()
-        } else if (webView.canGoBack()) {
+        } else if (::webView.isInitialized && webView.canGoBack()) {
             webView.goBack()
         } else {
-            // সুপার ব্যাক হ্যান্ডলিং
+            super.onBackPressed()
         }
     }
 }
