@@ -68,6 +68,7 @@ class MainActivity : AppCompatActivity() {
     private var filePathCallback: ValueCallback<Array<Uri>>? = null
     private var cameraImageUri: Uri? = null
     private val FILE_CHOOSER_REQUEST_CODE = 1001
+    private val GALLERY_QR_REQUEST_CODE = 1004
     private val PERMISSION_REQUEST_CODE = 1002
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -274,6 +275,32 @@ class MainActivity : AppCompatActivity() {
                 activity.startLiveCameraScanner()
             }
         }
+
+        @JavascriptInterface
+        fun startNativeGalleryPicker() {
+            activity.runOnUiThread {
+                activity.openGalleryForQR()
+            }
+        }
+    }
+
+    private fun openGalleryForQR() {
+        val intent = Intent(Intent.ACTION_PICK, MediaStore.Images.Media.EXTERNAL_CONTENT_URI).apply {
+            type = "image/*"
+        }
+        try {
+            startActivityForResult(intent, GALLERY_QR_REQUEST_CODE)
+        } catch (e: Exception) {
+            // Fallback to GET_CONTENT if EXTERNAL_CONTENT_URI fails
+            try {
+                val fallbackIntent = Intent(Intent.ACTION_GET_CONTENT).apply {
+                    type = "image/*"
+                }
+                startActivityForResult(fallbackIntent, GALLERY_QR_REQUEST_CODE)
+            } catch (ex: Exception) {
+                Toast.makeText(this, "গ্যালারি ওপেন করা যাচ্ছে না", Toast.LENGTH_SHORT).show()
+            }
+        }
     }
 
     private fun startLiveCameraScanner() {
@@ -434,7 +461,35 @@ class MainActivity : AppCompatActivity() {
     }
 
     override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
-        if (requestCode == FILE_CHOOSER_REQUEST_CODE) {
+        if (requestCode == GALLERY_QR_REQUEST_CODE) {
+            if (resultCode == Activity.RESULT_OK && data != null && data.data != null) {
+                val imageUri = data.data!!
+                try {
+                    val image = InputImage.fromFilePath(this, imageUri)
+                    val scanner = BarcodeScanning.getClient()
+                    scanner.process(image)
+                        .addOnSuccessListener { barcodes ->
+                            var scannedValue = ""
+                            for (barcode in barcodes) {
+                                scannedValue = barcode.rawValue ?: ""
+                                if (scannedValue.isNotEmpty()) break
+                            }
+                            if (scannedValue.isNotEmpty()) {
+                                webView.post {
+                                    webView.evaluateJavascript("javascript:processScannedData('$scannedValue');", null)
+                                }
+                            } else {
+                                Toast.makeText(this, "নির্বাচিত ছবিতে কোনো কিউআর কোড পাওয়া যায়নি", Toast.LENGTH_LONG).show()
+                            }
+                        }
+                        .addOnFailureListener {
+                            Toast.makeText(this, "কিউআর স্ক্যান ব্যর্থ হয়েছে", Toast.LENGTH_SHORT).show()
+                        }
+                } catch (e: Exception) {
+                    Toast.makeText(this, "গ্যালারি ইমেজ প্রসেস করতে সমস্যা হয়েছে", Toast.LENGTH_SHORT).show()
+                }
+            }
+        } else if (requestCode == FILE_CHOOSER_REQUEST_CODE) {
             if (filePathCallback == null) return
             var results: Array<Uri>? = null
 
