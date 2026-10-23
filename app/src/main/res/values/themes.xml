@@ -1,7 +1,7 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <!-- Base application theme -->
-    <style name="Theme.BDRSF" parent="android:Theme.Material.Light.NoActionBar">
+    <style name="Theme.BDRSF" parent="Theme.AppCompat.DayNight.NoActionBar">
         <!-- অ্যাপ চালুর সময় ব্যাকগ্রাউন্ড কালার সরাসরি লোগোর সাথে মিলিয়ে সেট করা হলো -->
         <item name="android:windowBackground">#0A2F1D</item>
         <item name="android:statusBarColor">#0A2F1D</item>
