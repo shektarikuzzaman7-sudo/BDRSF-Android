@@ -120,6 +120,7 @@ class MainActivity : Activity() {
         mainLayout.addView(splashLayout)
         setContentView(mainLayout)
 
+        // অ্যাপ চালু হওয়ার সাথে সাথেই পারমিশন রিকোয়েস্ট করবে
         requestAllRequiredPermissions()
         hideSystemNavigationBar()
         setupKeyboardListener(mainLayout)
@@ -148,9 +149,11 @@ class MainActivity : Activity() {
                 callback: ValueCallback<Array<Uri>>?,
                 fileChooserParams: FileChooserParams?
             ): Boolean {
+                // প্রতিবার স্ক্যান বা ফাইল আপলোড অপশনে যাওয়ার সময় পারমিশন চেক করা হবে।
+                // যদি পারমিশন না থাকে, তবে অটোমেটিক পারমিশন পপ-আপ রিকোয়েস্ট পাঠানো হবে।
                 if (!hasAllPermissions()) {
                     requestAllRequiredPermissions()
-                    Toast.makeText(this@MainActivity, "ফাইল বা ক্যামেরা ব্যবহারের জন্য পারমিশন প্রয়োজন। অনুগ্রহ করে পারমিশন দিন।", Toast.LENGTH_LONG).show()
+                    Toast.makeText(this@MainActivity, "ক্যামেরা বা ফাইলের পারমিশন দেওয়া প্রয়োজন। অনুগ্রহ করে পারমিশন দিন।", Toast.LENGTH_LONG).show()
                     callback?.onReceiveValue(null)
                     return false
                 }
@@ -186,7 +189,7 @@ class MainActivity : Activity() {
 
                     val chooserIntent = Intent(Intent.ACTION_CHOOSER).apply {
                         putExtra(Intent.EXTRA_INTENT, contentSelectionIntent)
-                        putExtra(Intent.EXTRA_TITLE, "ফাইল, ছবি বা কেওয়াইসি ডকুমেন্ট সিলেক্ট করুন")
+                        putExtra(Intent.EXTRA_TITLE, "ফাইল, ছবি বা কিউআর কোড স্ক্যান করুন")
                         putExtra(Intent.EXTRA_INITIAL_INTENTS, arrayOf(captureIntent))
                     }
 
