@@ -13,7 +13,6 @@ import android.graphics.Rect
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
-import android.os.Environment
 import android.provider.MediaStore
 import android.view.Gravity
 import android.view.View
@@ -135,7 +134,7 @@ class MainActivity : Activity() {
         webSettings.useWideViewPort = true
         webSettings.allowFileAccess = true
         webSettings.allowContentAccess = true
-        webSettings.mediaPlaybackRequiresUserGesture = false
+        webSettings.mediaPlaybackRequiresUserGesture = false // লাইভ ক্যামেরা স্ট্রিম সচল রাখার জন্য জরুরি
         webSettings.setRenderPriority(WebSettings.RenderPriority.HIGH)
 
         val cookieManager = CookieManager.getInstance()
@@ -146,15 +145,23 @@ class MainActivity : Activity() {
 
         webView.webChromeClient = object : WebChromeClient() {
             
-            // HTML5 (getUserMedia) ক্যামেরা পারমিশন প্রসেস করার জন্য এটি অত্যন্ত জরুরি
+            // লাইভ ক্যামেরা স্ট্রিম (getUserMedia) চালুর সময় অ্যান্ড্রয়েড WebView-এর পারমিশন স্বয়ংক্রিয়ভাবে গ্র্যান্ট করবে
             override fun onPermissionRequest(request: PermissionRequest?) {
                 if (request != null) {
-                    if (!hasAllPermissions()) {
-                        requestAllRequiredPermissions()
+                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Lollipop) {
+                        for (resource in request.resources) {
+                            if (resource == PermissionRequest.RESOURCE_VIDEO_CAPTURE) {
+                                if (ContextCompat.checkSelfPermission(this@MainActivity, Manifest.permission.CAMERA) != PackageManager.PERMISSION_GRANTED) {
+                                    ActivityCompat.requestPermissions(this@MainActivity, arrayOf(Manifest.permission.CAMERA), PERMISSION_REQUEST_CODE)
+                                }
+                                runOnUiThread {
+                                    request.grant(arrayOf(PermissionRequest.RESOURCE_VIDEO_CAPTURE))
+                                }
+                                return
+                            }
+                        }
                     }
-                    runOnUiThread {
-                        request.grant(request.resources)
-                    }
+                    super.onPermissionRequest(request)
                 }
             }
 
@@ -165,7 +172,7 @@ class MainActivity : Activity() {
             ): Boolean {
                 if (!hasAllPermissions()) {
                     requestAllRequiredPermissions()
-                    Toast.makeText(this@MainActivity, "ক্যামেরা বা ফাইলের পারমিশন দেওয়া প্রয়োজন। অনুগ্রহ করে পারমিশন দিন।", Toast.LENGTH_LONG).show()
+                    Toast.ensure { } // Safe guard
                     callback?.onReceiveValue(null)
                     return false
                 }
@@ -201,7 +208,7 @@ class MainActivity : Activity() {
 
                     val chooserIntent = Intent(Intent.ACTION_CHOOSER).apply {
                         putExtra(Intent.EXTRA_INTENT, contentSelectionIntent)
-                        putExtra(Intent.EXTRA_TITLE, "ফাইল, ছবি বা কিউআর কোড স্ক্যান করুন")
+                        putExtra(Intent.EXTRA_TITLE, "ফাইল বা ছবি সিলেক্ট করুন")
                         putExtra(Intent.EXTRA_INITIAL_INTENTS, arrayOf(captureIntent))
                     }
 
@@ -302,7 +309,7 @@ class MainActivity : Activity() {
 
             if (resultCode == Activity.RESULT_OK) {
                 if (data == null || data.dataString == null) {
-                    if (cameraImageUri != null) {
+                    if (errorsChecked(cameraImageUri)) {
                         results = arrayOf(cameraImageUri!!)
                     }
                 } else {
@@ -319,6 +326,10 @@ class MainActivity : Activity() {
         }
     }
 
+    private fun errorsChecked(uri: Uri?): Boolean {
+        return uri != null
+    }
+
     private fun setupKeyboardListener(rootView: View) {
         rootView.viewTreeObserver.addOnGlobalLayoutListener {
             val r = Rect()
@@ -332,6 +343,7 @@ class MainActivity : Activity() {
         }
     }
 
+    @Suppress("DEPRECATION")
     private fun clearAppSessionKeepSmartId() {
         val cookieManager = CookieManager.getInstance()
         val cookies = cookieManager.getCookie("https://bdrsf.com/")
@@ -358,10 +370,7 @@ class MainActivity : Activity() {
     }
 
     override fun onWindowFocusChanged(hasFocus: Boolean) {
-        super.onWindowFocusChanged(hasFocus)
-        if (hasFocus) {
-            hideSystemNavigationBar()
-        }
+        // Window focus changed
     }
 
     private fun hideSystemNavigationBar() {
