@@ -39,7 +39,6 @@ import android.widget.FrameLayout
 import android.widget.ImageView
 import android.widget.ProgressBar
 import android.widget.RelativeLayout
-import android.widget.TextView
 import android.widget.Toast
 import androidx.appcompat.app.AppCompatActivity
 import androidx.camera.core.CameraSelector
@@ -69,17 +68,23 @@ class MainActivity : AppCompatActivity() {
     private lateinit var splashLayout: FrameLayout
     private lateinit var mainLayout: RelativeLayout
     
+    // লাইভ কিউআর কোড স্ক্যানারের জন্য ভেরিয়েবল
     private var scannerLayout: FrameLayout? = null
     private var previewView: PreviewView? = null
     private var cameraProvider: ProcessCameraProvider? = null
     private lateinit var cameraExecutor: ExecutorService
     private var isScanningActive = false
-    private var currentScanDocType = "passport"
+
+    // ডকুমেন্ট স্ক্যান (NID/Passport) এর জন্য টাইপ
+    private var currentScanDocType = "nid"
 
     private var filePathCallback: ValueCallback<Array<Uri>>? = null
     private var cameraImageUri: Uri? = null
+    private var documentScanImageUri: Uri? = null
+
     private val FILE_CHOOSER_REQUEST_CODE = 1001
     private val GALLERY_QR_REQUEST_CODE = 1004
+    private val DOCUMENT_SCAN_REQUEST_CODE = 1005
     private val PERMISSION_REQUEST_CODE = 1002
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -311,6 +316,7 @@ class MainActivity : AppCompatActivity() {
     }
 
     class WebAppInterface(private val activity: MainActivity) {
+        // ১. লাইভ কিউআর কোড স্ক্যানার (আগের মতো বহাল আছে)
         @JavascriptInterface
         fun startNativeMLKitScanner() {
             activity.runOnUiThread {
@@ -318,11 +324,12 @@ class MainActivity : AppCompatActivity() {
             }
         }
 
+        // ২. এনআইডি বা পাসপোর্ট স্ক্যান করার জন্য ছবি তোলা বা গ্যালারি থেকে নেওয়ার অপশন
         @JavascriptInterface
         fun startNativeDocumentScan(docType: String) {
             activity.runOnUiThread {
                 activity.currentScanDocType = docType
-                activity.startLiveDocumentOCRScanner()
+                activity.openImagePickerForDocumentScan()
             }
         }
 
@@ -420,6 +427,52 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
+    // এনআইডি বা পাসপোর্ট স্ক্যানের জন্য ক্যামেরা বা গ্যালারি থেকে ছবি নেওয়ার ইনটেন্ট
+    private fun openImagePickerForDocumentScan() {
+        if (!hasCameraPermission()) {
+            requestAllRequiredPermissions()
+            Toast.makeText(this, "ক্যামেরা পারমিশন প্রয়োজন", Toast.LENGTH_SHORT).show()
+            return
+        }
+
+        try {
+            val contentSelectionIntent = Intent(Intent.ACTION_GET_CONTENT).apply {
+                addCategory(Intent.CATEGORY_OPENABLE)
+                type = "image/*"
+            }
+
+            val captureIntent = Intent(MediaStore.ACTION_IMAGE_CAPTURE)
+            val photoFile: File? = try {
+                createImageFile()
+            } catch (ex: IOException) {
+                null
+            }
+
+            if (photoFile != null) {
+                documentScanImageUri = FileProvider.getUriForFile(
+                    this,
+                    "${packageName}.fileprovider",
+                    photoFile
+                )
+                captureIntent.putExtra(MediaStore.EXTRA_OUTPUT, documentScanImageUri)
+            } else {
+                documentScanImageUri = null
+            }
+
+            val titleText = if (currentScanDocType == "passport") "পাসপোর্টের ছবি তুলুন বা সিলেক্ট করুন" else "এনআইডি কার্ডের ছবি তুলুন বা সিলেক্ট করুন"
+            val chooserIntent = Intent(Intent.ACTION_CHOOSER).apply {
+                putExtra(Intent.EXTRA_INTENT, contentSelectionIntent)
+                putExtra(Intent.EXTRA_TITLE, titleText)
+                putExtra(Intent.EXTRA_INITIAL_INTENTS, arrayOf(captureIntent))
+            }
+
+            startActivityForResult(chooserIntent, DOCUMENT_SCAN_REQUEST_CODE)
+        } catch (e: Exception) {
+            Toast.makeText(this, "ইমেজ সিলেক্টর ওপেন করা যাচ্ছে না", Toast.LENGTH_SHORT).show()
+        }
+    }
+
+    // লাইভ কিউআর কোড স্ক্যানার (সম্পূর্ণ বহাল রাখা হয়েছে)
     private fun startLiveCameraScanner() {
         if (!hasCameraPermission()) {
             requestAllRequiredPermissions()
@@ -477,193 +530,6 @@ class MainActivity : AppCompatActivity() {
                 stopLiveCameraScanner()
             }
         }, ContextCompat.getMainExecutor(this))
-    }
-
-    private fun startLiveDocumentOCRScanner() {
-        if (!hasCameraPermission()) {
-            requestAllRequiredPermissions()
-            Toast.makeText(this, "ক্যামেরা পারমিশন প্রয়োজন", Toast.LENGTH_SHORT).show()
-            return
-        }
-
-        if (isScanningActive) return
-        isScanningActive = true
-
-        scannerLayout = FrameLayout(this).apply {
-            layoutParams = RelativeLayout.LayoutParams(
-                RelativeLayout.LayoutParams.MATCH_PARENT,
-                RelativeLayout.LayoutParams.MATCH_PARENT
-            )
-            setBackgroundColor(Color.BLACK)
-        }
-
-        previewView = PreviewView(this).apply {
-            layoutParams = FrameLayout.LayoutParams(
-                FrameLayout.LayoutParams.MATCH_PARENT,
-                FrameLayout.LayoutParams.MATCH_PARENT
-            )
-        }
-        scannerLayout?.addView(previewView)
-
-        val scanTitleText = if (currentScanDocType == "passport") "পাসপোর্ট পেজ ফ্রেমে রাখুন..." else "এনআইডি কার্ড ফ্রেমে রাখুন..."
-        val infoTextView = TextView(this).apply {
-            text = scanTitleText
-            setTextColor(Color.WHITE)
-            textSize = 16f
-            gravity = Gravity.CENTER
-            setBackgroundColor(Color.parseColor("#88000000"))
-            val params = FrameLayout.LayoutParams(
-                FrameLayout.LayoutParams.MATCH_PARENT,
-                (50 * resources.displayMetrics.density).toInt()
-            ).apply {
-                gravity = Gravity.TOP
-                topMargin = 100
-            }
-            layoutParams = params
-        }
-        scannerLayout?.addView(infoTextView)
-
-        val closeButton = Button(this).apply {
-            text = "বাতিল (Cancel)"
-            setTextColor(Color.WHITE)
-            setBackgroundColor(Color.parseColor("#AA000000"))
-            val params = FrameLayout.LayoutParams(
-                FrameLayout.LayoutParams.WRAP_CONTENT,
-                FrameLayout.LayoutParams.WRAP_CONTENT
-            ).apply {
-                gravity = Gravity.TOP or Gravity.END
-                topMargin = 160
-                rightMargin = 50
-            }
-            layoutParams = params
-            setOnClickListener {
-                stopLiveCameraScanner()
-            }
-        }
-        scannerLayout?.addView(closeButton)
-
-        mainLayout.addView(scannerLayout)
-
-        val cameraProviderFuture = ProcessCameraProvider.getInstance(this)
-        cameraProviderFuture.addListener({
-            try {
-                cameraProvider = cameraProviderFuture.get()
-                bindSmartOCRUseCases()
-            } catch (e: Exception) {
-                e.printStackTrace()
-                stopLiveCameraScanner()
-                Toast.makeText(this, "ক্যামেরা স্টার্ট করতে সমস্যা হয়েছে", Toast.LENGTH_SHORT).show()
-            }
-        }, ContextCompat.getMainExecutor(this))
-    }
-
-    private fun bindSmartOCRUseCases() {
-        val cameraProvider = cameraProvider ?: return
-
-        val preview = Preview.Builder().build().also {
-            it.setSurfaceProvider(previewView?.surfaceProvider)
-        }
-
-        val imageAnalysis = ImageAnalysis.Builder()
-            .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
-            .build()
-
-        val recognizer = TextRecognition.getClient(TextRecognizerOptions.DEFAULT_OPTIONS)
-
-        imageAnalysis.setAnalyzer(cameraExecutor) { imageProxy ->
-            val mediaImage = imageProxy.image
-            if (mediaImage != null) {
-                val image = InputImage.fromMediaImage(mediaImage, imageProxy.imageInfo.rotationDegrees)
-                recognizer.process(image)
-                    .addOnSuccessListener { visionText ->
-                        val fullText = visionText.text
-                        if (!fullText.isNullOrEmpty()) {
-                            if (currentScanDocType == "passport") {
-                                val passportRegex = Regex("[A-Z][0-9]{7,8}")
-                                val match = passportRegex.find(fullText)
-                                val passportNo = match?.value ?: ""
-
-                                var extractedName = ""
-                                for (block in visionText.textBlocks) {
-                                    for (line in block.lines) {
-                                        val textLine = line.text.trim()
-                                        if (textLine.length > 3 && !textLine.any { it.isDigit() } && !textLine.contains("REPUBLIC", true) && !textLine.contains("BANGLADESH", true) && !textLine.contains("PASSPORT", true)) {
-                                            if (extractedName.isEmpty()) {
-                                                extractedName = textLine
-                                            }
-                                        }
-                                    }
-                                }
-
-                                if (passportNo.isNotEmpty() || extractedName.isNotEmpty()) {
-                                    runOnUiThread {
-                                        stopLiveCameraScanner()
-                                        val safeName = extractedName.replace("'", "\\'")
-                                        val safeDocNo = passportNo.replace("'", "\\'")
-                                        webView.evaluateJavascript("javascript:window.onScanCompleted('$safeName', '$safeDocNo');", null)
-                                    }
-                                }
-                            } else {
-                                val nidRegex = Regex("\\b[0-9]{10,17}\\b")
-                                val nidMatch = nidRegex.find(fullText)
-                                val nidNo = nidMatch?.value ?: ""
-
-                                val dobRegex = Regex("(?:DOB|Date of Birth|জন্ম তারিখ)[:\\s]*([0-9]{2}[-/\\s][0-9]{2}[-/\\s][0-9]{4})", RegexOption.IGNORE_CASE)
-                                val dobMatch = dobRegex.find(fullText)
-                                val dobEn = dobMatch?.groupValues?.get(1) ?: ""
-
-                                var nameEn = ""
-                                var fatherBn = ""
-                                var motherBn = ""
-                                var addressBn = ""
-
-                                for (block in visionText.textBlocks) {
-                                    for (line in block.lines) {
-                                        val t = line.text.trim()
-                                        if (t.matches(Regex("^[A-Z\\s]{4,}$")) && nameEn.isEmpty() && !t.contains("BANGLADESH") && !t.contains("NID")) {
-                                            nameEn = t
-                                        } else if (t.contains("পিতা", true) || t.contains("Father", true)) {
-                                            fatherBn = t
-                                        } else if (t.contains("মাতা", true) || t.contains("Mother", true)) {
-                                            motherBn = t
-                                        } else if (t.contains("বাসা", true) || t.contains("গ্রাম", true) || t.contains("ডাকঘর", true)) {
-                                            addressBn = t
-                                        }
-                                    }
-                                }
-
-                                if (nidNo.isNotEmpty() || nameEn.isNotEmpty()) {
-                                    runOnUiThread {
-                                        stopLiveCameraScanner()
-                                        val jsCall = "window.onNIDScanCompleted('$nameEn', '$fatherBn', '$motherBn', '$dobEn', '$nidNo', '$addressBn');"
-                                        webView.evaluateJavascript("javascript:$jsCall", null)
-                                    }
-                                }
-                            }
-                        }
-                    }
-                    .addOnFailureListener {
-                        // Silent catch
-                    }
-                    .addOnCompleteListener {
-                        imageProxy.close()
-                    }
-            } else {
-                imageProxy.close()
-            }
-        }
-
-        val cameraSelector = CameraSelector.DEFAULT_BACK_CAMERA
-
-        try {
-            cameraProvider.unbindAll()
-            cameraProvider.bindToLifecycle(
-                this, cameraSelector, preview, imageAnalysis
-            )
-        } catch (exc: Exception) {
-            Toast.makeText(this, "ডকুমেন্ট স্ক্যানার চালু করা যায়নি", Toast.LENGTH_SHORT).show()
-            stopLiveCameraScanner()
-        }
     }
 
     private fun bindCameraUseCases() {
@@ -731,6 +597,110 @@ class MainActivity : AppCompatActivity() {
         previewView = null
     }
 
+    // বাংলা সংখ্যাকে ইংরেজিতে কনভার্ট করার হেল্পার ফাংশন
+    private fun convertBanglaToEnglishDigits(input: String): String {
+        val banglaDigits = charArrayOf('০', '১', '২', '৩', '৪', '৫', '৬', '৭', '৮', '৯')
+        val englishDigits = charArrayOf('0', '1', '2', '3', '4', '5', '6', '7', '8', '9')
+        var result = input
+        for (i in banglaDigits.indices) {
+            result = result.replace(banglaDigits[i], englishDigits[i])
+        }
+        return result
+    }
+
+    // সিলেক্ট করা ছবি বা তোলা ছবি থেকে NID অথবা Passport স্ক্যান করে ডেটা বের করার ফাংশন
+    private fun processDocumentImageFromUri(imageUri: Uri) {
+        try {
+            val image = InputImage.fromFilePath(this, imageUri)
+            val recognizer = TextRecognition.getClient(TextRecognizerOptions.DEFAULT_OPTIONS)
+
+            recognizer.process(image)
+                .addOnSuccessListener { visionText ->
+                    val rawText = visionText.text
+                    val fullText = convertBanglaToEnglishDigits(rawText)
+
+                    if (fullText.isNullOrEmpty()) {
+                        Toast.makeText(this, "ছবিতে কোনো লেখা পাওয়া যায়নি", Toast.LENGTH_SHORT).show()
+                        return@addOnSuccessListener
+                    }
+
+                    if (currentScanDocType == "passport") {
+                        // পাসপোর্ট প্রসেসিং
+                        var passportNo = ""
+                        var nameEn = ""
+
+                        val passportRegex = Regex("[A-Z][0-9]{7,8}")
+                        val match = passportRegex.find(fullText)
+                        passportNo = match?.value ?: ""
+
+                        val lines = fullText.split("\n")
+                        for (line in lines) {
+                            val cleanLine = line.trim().replace(" ", "")
+                            if (cleanLine.startsWith("P<") && cleanLine.length > 30) {
+                                val parts = cleanLine.split("<")
+                                if (parts.size > 2) {
+                                    nameEn = "${parts[1]} ${parts[2]}".replace("<", " ").trim()
+                                }
+                            }
+                        }
+
+                        runOnUiThread {
+                            val safeName = nameEn.replace("'", "\\'")
+                            val safeDocNo = passportNo.replace("'", "\\'")
+                            webView.evaluateJavascript("javascript:if(window.onScanCompleted) { window.onScanCompleted('$safeName', '$safeDocNo'); }", null)
+                            Toast.makeText(this, "পাসপোর্ট সফলভাবে স্ক্যান করা হয়েছে!", Toast.LENGTH_SHORT).show()
+                        }
+
+                    } else {
+                        // এনআইডি (NID) প্রসেসিং
+                        val nidRegex = Regex("\\b[0-9]{10,17}\\b")
+                        val nidMatch = nidRegex.find(fullText)
+                        val nidNo = nidMatch?.value ?: ""
+
+                        val dobRegex = Regex("([0-9]{2}[-/\\.][0-9]{2}[-/\\.][0-9]{4})")
+                        val dobMatch = dobRegex.find(fullText)
+                        val dobStr = dobMatch?.value ?: ""
+
+                        var nameEn = ""
+                        var fatherBn = ""
+                        var motherBn = ""
+
+                        val lines = fullText.split("\n")
+                        for (line in lines) {
+                            val t = line.trim()
+                            if (t.matches(Regex("^[A-Z\\s]{4,}$")) && nameEn.isEmpty() && !t.contains("BANGLADESH") && !t.contains("NID") && !t.contains("GOVERNMENT")) {
+                                nameEn = t
+                            } 
+                            else if (t.contains("পিতা", true) || t.contains("Father", true)) {
+                                fatherBn = t.replace(Regex("^(পিতা|Father)[\\s:]*", RegexOption.IGNORE_CASE), "").trim()
+                            } 
+                            else if (t.contains("মাতা", true) || t.contains("Mother", true)) {
+                                motherBn = t.replace(Regex("^(মাতা|Mother)[\\s:]*", RegexOption.IGNORE_CASE), "").trim()
+                            }
+                        }
+
+                        runOnUiThread {
+                            val safeName = nameEn.replace("'", "\\'")
+                            val safeFather = fatherBn.replace("'", "\\'")
+                            val safeMother = motherBn.replace("'", "\\'")
+                            val safeDob = dobStr.replace("'", "\\'")
+                            val safeNid = nidNo.replace("'", "\\'")
+
+                            val jsCall = "if(window.onNIDScanCompleted) { window.onNIDScanCompleted('$safeName', '$safeFather', '$safeMother', '$safeDob', '$safeNid', ''); }"
+                            webView.evaluateJavascript("javascript:$jsCall", null)
+                            Toast.makeText(this, "এনআইডি (NID) সফলভাবে স্ক্যান করা হয়েছে!", Toast.LENGTH_SHORT).show()
+                        }
+                    }
+                }
+                .addOnFailureListener {
+                    Toast.makeText(this, "ছবি থেকে টেক্সট রিড করতে ব্যর্থ হয়েছে", Toast.LENGTH_SHORT).show()
+                }
+        } catch (e: Exception) {
+            e.printStackTrace()
+            Toast.makeText(this, "ছবি প্রসেস করতে সমস্যা হয়েছে", Toast.LENGTH_SHORT).show()
+        }
+    }
+
     @Throws(IOException::class)
     private fun createImageFile(): File {
         val timeStamp: String = SimpleDateFormat("yyyyMMdd_HHmmss", Locale.getDefault()).format(Date())
@@ -793,6 +763,19 @@ class MainActivity : AppCompatActivity() {
                     Toast.makeText(this, "গ্যালারি ইমেজ প্রসেস করতে সমস্যা হয়েছে", Toast.LENGTH_SHORT).show()
                 }
             }
+        } else if (requestCode == DOCUMENT_SCAN_REQUEST_CODE) {
+            if (resultCode == Activity.RESULT_OK) {
+                if (data == null || data.dataString == null) {
+                    if (documentScanImageUri != null) {
+                        processDocumentImageFromUri(documentScanImageUri!!)
+                    }
+                } else {
+                    data.dataString?.let { uriString ->
+                        processDocumentImageFromUri(Uri.parse(uriString))
+                    }
+                }
+            }
+            documentScanImageUri = null
         } else if (requestCode == FILE_CHOOSER_REQUEST_CODE) {
             if (filePathCallback == null) return
             var results: Array<Uri>? = null
