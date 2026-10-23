@@ -40,6 +40,7 @@ import android.widget.ImageView
 import android.widget.ProgressBar
 import android.widget.RelativeLayout
 import android.widget.Toast
+import androidx.activity.OnBackPressedCallback
 import androidx.appcompat.app.AppCompatActivity
 import androidx.camera.core.CameraSelector
 import androidx.camera.core.ImageAnalysis
@@ -91,7 +92,7 @@ class MainActivity : AppCompatActivity() {
     private val DOCUMENT_SCAN_REQUEST_CODE = 1005
     private val PERMISSION_REQUEST_CODE = 1002
 
-    // ML Kit Clients (Lazy initialization for performance)
+    // ML Kit Clients
     private val barcodeScanner: BarcodeScanner by lazy { BarcodeScanning.getClient() }
     private val textRecognizer: TextRecognizer by lazy { TextRecognition.getClient(TextRecognizerOptions.DEFAULT_OPTIONS) }
 
@@ -175,6 +176,30 @@ class MainActivity : AppCompatActivity() {
         requestAllRequiredPermissions()
         hideSystemNavigationBar()
         setupKeyboardListener(mainLayout)
+
+        // আধুনিক Back Button হ্যান্ডলিং (যেকোনো জায়গা থেকে হোম পেজে ফেরা এবং হিস্ট্রি ক্লিন করা, অ্যাপ থেকে না বের হওয়া)
+        onBackPressedDispatcher.addCallback(this, object : OnBackPressedCallback(true) {
+            override fun handleOnBackPressed() {
+                if (isScanningActive) {
+                    stopLiveCameraScanner()
+                } else if (::webView.isInitialized) {
+                    val currentUrl = webView.url ?: ""
+                    val homeUrl = "https://bdrsf.com/"
+                    val homeUrlAlt = "https://bdrsf.com"
+
+                    // যদি বর্তমান পেজ হোমপেজ না হয়, তবে হোমপেজে নিয়ে যাবে এবং সব হিস্ট্রি ক্লিয়ার করবে
+                    if (!currentUrl.startsWith(homeUrl) && !currentUrl.startsWith(homeUrlAlt)) {
+                        webView.loadUrl(homeUrl)
+                        webView.clearHistory()
+                    } else {
+                        // যদি ইতিমধ্যে হোমপেজে থাকে, তবে অ্যাপ বন্ধ না করে ব্যাকগ্রাউন্ডে পাঠিয়ে দিবে
+                        moveTaskToBack(true)
+                    }
+                } else {
+                    moveTaskToBack(true)
+                }
+            }
+        })
 
         webView.setLayerType(View.LAYER_TYPE_HARDWARE, null)
         val webSettings: WebSettings = webView.settings
@@ -302,12 +327,10 @@ class MainActivity : AppCompatActivity() {
                     try {
                         val uri = Uri.parse(url)
                         val host = uri.host ?: ""
-                        // নিরাপদ ডোমেইন চেক (bdrsf.com এবং তার সাবডোমেইন)
                         if (host == "bdrsf.com" || host.endsWith(".bdrsf.com")) {
                             view?.loadUrl(url)
                             return true
                         } else {
-                            // বহিরাগত লিংক ব্রাউজারে ওপেন করা
                             val intent = Intent(Intent.ACTION_VIEW, uri)
                             view?.context?.startActivity(intent)
                             return true
@@ -631,7 +654,6 @@ class MainActivity : AppCompatActivity() {
         for (i in banglaDigits.indices) {
             result = result.replace(banglaDigits[i], englishDigits[i])
         }
-        // OCR typos fix for numbers
         result = result.replace('O', '0').replace('o', '0').replace('I', '1').replace('l', '1')
         return result
     }
@@ -651,7 +673,6 @@ class MainActivity : AppCompatActivity() {
                     }
 
                     if (currentScanDocType == "passport") {
-                        // পাসপোর্ট প্রসেসিং (MRZ এবং ভিজ্যুয়াল ফিল্ড পার্সিং)
                         var passportNo = ""
                         var nameEn = ""
 
@@ -680,7 +701,6 @@ class MainActivity : AppCompatActivity() {
                         }
 
                     } else if (currentScanDocType == "nid_front") {
-                        // এনআইডি সামনের পার্ট (Front Part): NID নম্বর, জন্মতারিখ, নাম, পিতা, মাতা
                         val nidRegex = Regex("\\b(?:[0-9]{10}|[0-9]{13}|[0-9]{17})\\b")
                         val nidMatch = nidRegex.find(fullText)
                         val nidNo = nidMatch?.value ?: ""
@@ -720,7 +740,6 @@ class MainActivity : AppCompatActivity() {
                         }
 
                     } else if (currentScanDocType == "nid_back") {
-                        // এনআইডি পেছনের পার্ট (Back Part): ঠিকানা
                         var addressBn = ""
                         val lines = fullText.split("\n")
                         for (line in lines) {
@@ -913,17 +932,6 @@ class MainActivity : AppCompatActivity() {
             }
         } catch (e: Exception) {
             e.printStackTrace()
-        }
-    }
-
-    @Deprecated("Deprecated in Java")
-    override fun onBackPressed() {
-        if (isScanningActive) {
-            stopLiveCameraScanner()
-        } else if (::webView.isInitialized && webView.canGoBack()) {
-            webView.goBack()
-        } else {
-            super.onBackPressed()
         }
     }
 }
