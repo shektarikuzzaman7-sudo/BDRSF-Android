@@ -322,7 +322,7 @@ class MainActivity : Activity() {
                             } else {
                                 Toast.makeText(this, "কিউআর কোড পাওয়া যায়নি, আবার চেষ্টা করুন", Toast.LENGTH_LONG).show()
                             }
-                        })
+                        }
                         .addOnFailureListener {
                             Toast.makeText(this, "স্ক্যানিং ব্যর্থ হয়েছে", Toast.LENGTH_SHORT).show()
                         }
