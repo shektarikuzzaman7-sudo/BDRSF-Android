@@ -53,6 +53,7 @@ import androidx.core.content.FileProvider
 import com.google.mlkit.vision.barcode.BarcodeScanning
 import com.google.mlkit.vision.common.InputImage
 import java.io.File
+import java.io.FileOutputStream
 import java.io.IOException
 import java.text.SimpleDateFormat
 import java.util.Date
@@ -321,7 +322,7 @@ class MainActivity : AppCompatActivity() {
             }
         }
 
-        // থিওরি ১ অনুযায়ী জাভাস্ক্রিপ্ট থেকে বেসডিক্স ইমেজ রিসিভ করে ফোনে সেভ করার নেটিভ ব্রিজ
+        // জাভাস্ক্রিপ্ট থেকে বেসডিক্স ইমেজ রিসিভ করে ফোনে সেভ করার নেটিভ ব্রিজ
         @JavascriptInterface
         fun saveBase64Image(base64Data: String, fileName: String) {
             activity.runOnUiThread {
@@ -351,6 +352,42 @@ class MainActivity : AppCompatActivity() {
                 } catch (e: Exception) {
                     e.printStackTrace()
                     Toast.makeText(activity, "সেভ করতে সমস্যা হয়েছে: ${e.message}", Toast.LENGTH_SHORT).show()
+                }
+            }
+        }
+
+        // নতুন যুক্ত করা হলো: থিওরি ১ অনুযায়ী ক্যাশ ফোল্ডারে ইমেজ সেভ করে ফোনের সব অ্যাপসের মাধ্যমে শেয়ার করার নেটিভ ব্রিজ
+        @JavascriptInterface
+        fun shareBase64Image(base64Data: String, fileName: String) {
+            activity.runOnUiThread {
+                try {
+                    val cleanBase64 = if (base64Data.contains(",")) base64Data.split(",")[1] else base64Data
+                    val decodedBytes = Base64.decode(cleanBase64, Base64.DEFAULT)
+
+                    val cacheFile = File(activity.cacheDir, fileName)
+                    val fos = FileOutputStream(cacheFile)
+                    fos.write(decodedBytes)
+                    fos.flush()
+                    fos.close()
+
+                    val imageUri = FileProvider.getUriForFile(
+                        activity,
+                        "${activity.packageName}.fileprovider",
+                        cacheFile
+                    )
+
+                    val shareIntent = Intent(Intent.ACTION_SEND).apply {
+                        type = "image/png"
+                        putExtra(Intent.EXTRA_STREAM, imageUri)
+                        addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                    }
+
+                    val chooser = Intent.createChooser(shareIntent, "কিউআর কার্ড শেয়ার করুন")
+                    activity.startActivity(chooser)
+
+                } catch (e: Exception) {
+                    e.printStackTrace()
+                    Toast.makeText(activity, "শেয়ার করতে সমস্যা হয়েছে: ${e.message}", Toast.LENGTH_SHORT).show()
                 }
             }
         }
