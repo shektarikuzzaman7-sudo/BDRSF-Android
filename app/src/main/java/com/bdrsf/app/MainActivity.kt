@@ -830,12 +830,16 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun parseAndDispatchNID(
-        combinedFrontText: String,
+        rawFrontText: String,
         latinFrontText: String,
-        backRawText: String,
+        rawBackText: String,
         barcodeRaw: String,
         facePhotoBase64: String
     ) {
+        // OCR এর ভুল অক্ষর (যেমন: কোলনের পরে ভ বা ম আসা) মুছে পরিষ্কার করা
+        val combinedFrontText = rawFrontText.replace(Regex("[:;\\-]\\s*[ভম]"), ": ").replace(Regex("[:;\\-][ভম]"), ": ")
+        val backRawText = rawBackText.replace(Regex("[:;\\-]\\s*[ভম]"), ": ").replace(Regex("[:;\\-][ভম]"), ": ")
+
         val cleanFront = convertBanglaDigitsOnly(combinedFrontText)
         val numericFront = normalizeForIdNumberSearch(cleanFront)
         val barcodeMap = parseNidBarcodeData(barcodeRaw)
@@ -926,83 +930,57 @@ class MainActivity : AppCompatActivity() {
             }
         }
 
-        // ৫. পিতা ও মাতার নাম ১০০% নির্ভুল নিষ্কাশন
+        // ৫. বাংলা নাম, পিতা ও মাতার নাম (নিখুঁত ফলব্যাক সহ)
         var nameBn = barcodeMap["name_bn"] ?: ""
-        var fatherName = barcodeMap["father"] ?: ""
-        var motherName = barcodeMap["mother"] ?: ""
+        var fatherName = ""
+        var motherName = ""
 
         val allFrontLines = cleanFront.split("\n").map { it.trim() }
         var fatherLineIdx = -1
-        var dobLineIdx = -1
 
         for (i in allFrontLines.indices) {
             val t = allFrontLines[i]
-            if (t.contains("Date", true) || t.contains("Birth", true) || t.contains("জন্ম")) {
-                dobLineIdx = i
-            }
-
-            val isFather = (t.contains("পিতা") || t.contains("पिता") || t.contains("Father", true)) &&
-                    !t.contains("মাতা") && !t.contains("माता") && !t.contains("Mother", true)
-
-            val isMother = t.contains("মাতা") || t.contains("माता") || t.contains("मাতা") ||
-                    t.contains("Mother", true) || t.contains("মা তা") || t.startsWith("মা:") || t.startsWith("মা :")
-
-            if (isFather && fatherName.isEmpty()) {
-                val extracted = t.replace(Regex("""^.*?(পিতার নাম|পিতা|पिता|Father's Name|Father's|Father)[\s:./-]*""", RegexOption.IGNORE_CASE), "").trim()
-                if (extracted.length >= 2 && !extracted.contains("Date", true)) {
+            
+            // পিতার নাম
+            if ((t.contains("পিতা") || t.contains("Father", true)) && fatherName.isEmpty()) {
+                val extracted = t.replace(Regex("^.*?(পিতা|Father's Name|Father)[\\s:.-]*", RegexOption.IGNORE_CASE), "").trim()
+                if (extracted.length > 2) {
                     fatherName = extracted
                     fatherLineIdx = i
-                } else if (i + 1 < allFrontLines.size) {
-                    val next = allFrontLines[i + 1].trim()
-                    if (!next.contains("মাতা") && !next.contains("Mother", true) && !next.contains("Date", true)) {
-                        fatherName = next
-                        fatherLineIdx = i + 1
-                    } else {
-                        fatherLineIdx = i
-                    }
                 }
             }
-
-            if (isMother && motherName.isEmpty()) {
-                val extracted = t.replace(Regex("""^.*?(মাতার নাম|মাতা|माता|मাতা|Mother's Name|Mother's|Mother|মা তা|মা)[\s:./-]*""", RegexOption.IGNORE_CASE), "").trim()
-                if (extracted.length >= 2 && !extracted.contains("Date", true)) {
+            
+            // মাতার নাম (সরাসরি লাইনে পেলে)
+            if ((t.contains("মাতা") || t.contains("Mother", true) || t.contains("মা তা")) && motherName.isEmpty()) {
+                val extracted = t.replace(Regex("^.*?(মাতা|Mother's Name|Mother|মা তা)[\\s:.-]*", RegexOption.IGNORE_CASE), "").trim()
+                if (extracted.length > 2 && !extracted.contains("Date", true)) {
                     motherName = extracted
-                } else if (i + 1 < allFrontLines.size) {
-                    val next = allFrontLines[i + 1].trim()
-                    if (!next.contains("Date", true) && !next.contains("Birth", true) && next.length >= 2) {
-                        motherName = next
-                    }
                 }
             }
 
+            // বাংলা নাম
             if ((t.contains("নাম") || t.contains("Name", true)) && nameBn.isEmpty()) {
-                val extracted = t.replace(Regex("""^.*?(নাম|Name)[\s:./-]*""", RegexOption.IGNORE_CASE), "").trim()
+                val extracted = t.replace(Regex("^.*?(নাম|Name)[\\s:.-]*", RegexOption.IGNORE_CASE), "").trim()
                 if (extracted.any { it in '\u0980'..'\u09FF' }) {
                     nameBn = extracted
                 }
             }
         }
 
-        // মাতার নামের ফলব্যাক (পিতার নামের নিচের লাইন থেকে নেওয়া)
-        if (motherName.isEmpty() && fatherLineIdx != -1) {
-            val limit = if (dobLineIdx != -1 && dobLineIdx > fatherLineIdx) dobLineIdx else allFrontLines.size
-            for (k in (fatherLineIdx + 1) until limit) {
-                val cand = allFrontLines[k].trim()
-                if (cand == fatherName || cand.contains("পিতা") || cand.contains("Father", true)) continue
-                val cleaned = cand.replace(Regex("""^.*?(মাতার নাম|মাতা|माता|मাতা|Mother's Name|Mother's|Mother|মা তা|মা)[\s:./-]*""", RegexOption.IGNORE_CASE), "").trim()
-                if (cleaned.length >= 2 && cleaned != fatherName && !cleaned.contains("Date", true) && !cleaned.contains("Birth", true)) {
-                    motherName = cleaned
-                    break
-                }
+        // মাতার নামের শক্তিশালী ফলব্যাক (পিতার নামের নিচের লাইন থেকে নেওয়া)
+        if (motherName.isEmpty() && fatherLineIdx != -1 && fatherLineIdx + 1 < allFrontLines.size) {
+            val nextLine = allFrontLines[fatherLineIdx + 1]
+            if (!nextLine.contains("Date", true) && !nextLine.contains("Birth", true) && nextLine.length > 2) {
+                motherName = nextLine.replace(Regex("^.*?(মাতা|Mother's Name|Mother)[\\s:.-]*", RegexOption.IGNORE_CASE), "").trim()
             }
         }
 
         if (motherName == fatherName) motherName = ""
 
         val displayName = if (nameEn.isNotEmpty()) nameEn else nameBn
-        
-        // ব্যাকপার্ট টেক্সটটি পিএইচপিতে পাস করার জন্য প্রস্তুত করা হচ্ছে
-        val rawBackToPass = backRawText
+
+        // ৬. ব্যাকপার্টের সম্পূর্ণ কাঁচা টেক্সট সরাসরি ওয়েবসাইটে পাঠানো
+        val fullDetails = if (barcodeRaw.isNotBlank()) "--- BARCODE DATA ---\n$barcodeRaw\n\n--- BACK DETAILS ---\n$backRawText" else backRawText
 
         runOnUiThread {
             val safeName = JSONObject.quote(displayName)
@@ -1010,11 +988,16 @@ class MainActivity : AppCompatActivity() {
             val safeMother = JSONObject.quote(motherName)
             val safeDob = JSONObject.quote(dobStr)
             val safeNid = JSONObject.quote(nidNo)
+            val safeDetails = JSONObject.quote(fullDetails)
             val safeFace = JSONObject.quote(facePhotoBase64)
-            val safeBackRawText = JSONObject.quote(rawBackToPass)
 
-            // কলব্যাক পাঠানো (php ফাইলে জাভাস্ক্রিপ্ট দিয়ে বাকি ঠিকানা পার্সিং করা হবে)
-            webView.evaluateJavascript("if(window.onFullNIDParsed) { window.onFullNIDParsed($safeName, $safeFather, $safeMother, $safeDob, $safeNid, $safeBackRawText, $safeFace); }", null)
+            // ওয়েবসাইটের জাভাস্ক্রিপ্ট ফাংশনগুলোতে কলব্যাক
+            webView.evaluateJavascript("if(window.onFullNIDParsed) { window.onFullNIDParsed($safeName, $safeFather, $safeMother, $safeDob, $safeNid, $safeDetails, $safeFace); }", null)
+            webView.evaluateJavascript("if(window.onNIDFrontScanCompleted) { window.onNIDFrontScanCompleted($safeName, $safeFather, $safeMother, $safeDob, $safeNid, $safeFace); }", null)
+            if (fullDetails.isNotEmpty()) {
+                webView.evaluateJavascript("if(window.onNIDBackScanCompleted) { window.onNIDBackScanCompleted($safeDetails); }", null)
+            }
+
             Toast.makeText(this, "এনআইডি স্ক্যান সফল হয়েছে!", Toast.LENGTH_SHORT).show()
         }
     }
@@ -1054,6 +1037,7 @@ class MainActivity : AppCompatActivity() {
             val safeFace = JSONObject.quote(facePhotoBase64)
 
             webView.evaluateJavascript("if(window.onFullPassportParsed) { window.onFullPassportParsed($safeName, $safeDocNo, $safeFace); }", null)
+            webView.evaluateJavascript("if(window.onScanCompleted) { window.onScanCompleted($safeName, $safeDocNo, $safeFace); }", null)
             Toast.makeText(this, "পাসপোর্ট স্ক্যান সফল!", Toast.LENGTH_SHORT).show()
         }
     }
