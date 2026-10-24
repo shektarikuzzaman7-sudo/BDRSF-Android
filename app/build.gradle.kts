@@ -42,9 +42,8 @@ dependencies {
     // --- Google ML Kit QR Code Scanner (লাইভ এবং গ্যালারি কিউআর স্ক্যানের জন্য) ---
     implementation("com.google.mlkit:barcode-scanning:17.3.0")
     
-    // --- Google ML Kit Text Recognition (OCR) - ইংরেজি ও বাংলা NID/পাসপোর্ট টেক্সট পড়ার জন্য ---
-    implementation("com.google.mlkit:text-recognition:16.0.0")
-    implementation("com.google.mlkit:text-recognition-devanagari:16.0.0")
+    // --- API Call এবং সার্ভারে ছবি পাঠানোর জন্য OkHttp (নতুন যুক্ত করা হলো) ---
+    implementation("com.squareup.okhttp3:okhttp:4.12.0")
     
     // --- CameraX (শুধুমাত্র লাইভ কিউআর স্ক্যানারের ক্যামেরা প্রিভিউ ও অ্যানালাইসিসের জন্য) ---
     val cameraxVersion = "1.3.4"
