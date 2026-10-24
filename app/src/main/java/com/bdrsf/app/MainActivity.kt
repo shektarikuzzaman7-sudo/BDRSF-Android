@@ -10,9 +10,10 @@ import android.content.Intent
 import android.content.pm.ActivityInfo
 import android.content.pm.PackageManager
 import android.graphics.Bitmap
+import android.graphics.BitmapFactory
 import android.graphics.Color
+import android.graphics.Matrix
 import android.graphics.PorterDuff
-import android.graphics.Rect
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
@@ -52,8 +53,11 @@ import androidx.camera.view.PreviewView
 import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
 import androidx.core.content.FileProvider
+import androidx.core.view.ViewCompat
 import androidx.core.view.WindowCompat
+import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
+import androidx.exifinterface.media.ExifInterface
 import com.google.mlkit.vision.barcode.BarcodeScanner
 import com.google.mlkit.vision.barcode.BarcodeScanning
 import com.google.mlkit.vision.common.InputImage
@@ -90,7 +94,9 @@ class MainActivity : AppCompatActivity() {
     private var currentScanDocType = "nid_front"
 
     private var filePathCallback: ValueCallback<Array<Uri>>? = null
+    private var cameraImageFile: File? = null
     private var cameraImageUri: Uri? = null
+    private var documentScanFile: File? = null
     private var documentScanImageUri: Uri? = null
 
     private val FILE_CHOOSER_REQUEST_CODE = 1001
@@ -98,7 +104,7 @@ class MainActivity : AppCompatActivity() {
     private val GALLERY_QR_REQUEST_CODE = 1004
     private val DOCUMENT_SCAN_REQUEST_CODE = 1005
 
-    // ML Kit Clients (ইংরেজি ও বাংলা উভয় টেক্সট সাপোর্টের জন্য)
+    // ML Kit Clients
     private val barcodeScanner: BarcodeScanner by lazy { BarcodeScanning.getClient() }
     private val latinTextRecognizer: TextRecognizer by lazy {
         TextRecognition.getClient(TextRecognizerOptions.DEFAULT_OPTIONS)
@@ -110,14 +116,16 @@ class MainActivity : AppCompatActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
-        // অ্যাকশন বার বা টাইটেল হেডার থাকলে তা হাইড করা
         supportActionBar?.hide()
         requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_PORTRAIT
 
-        // স্ট্যাটাস বারের ঠিক নিচে ফুল-স্ক্রিন ভিউ ফিট করা এবং কীবোর্ড রিসাইজ সচল রাখা
+        // স্ট্যাটাস বার কালার এবং আইকন সেটআপ
         try {
-            WindowCompat.setDecorFitsSystemWindows(window, true)
+            WindowCompat.setDecorFitsSystemWindows(window, false)
+            @Suppress("DEPRECATION")
             window.statusBarColor = Color.parseColor("#0A2F1D")
+            @Suppress("DEPRECATION")
+            window.navigationBarColor = Color.BLACK
             WindowInsetsControllerCompat(window, window.decorView).isAppearanceLightStatusBars = false
 
             @Suppress("DEPRECATION")
@@ -131,6 +139,19 @@ class MainActivity : AppCompatActivity() {
                 RelativeLayout.LayoutParams.MATCH_PARENT,
                 RelativeLayout.LayoutParams.MATCH_PARENT
             )
+            setBackgroundColor(Color.parseColor("#0A2F1D"))
+        }
+
+        // Android 15 (SDK 35) সহ সকল ভার্সনে স্ট্যাটাস বারের ঠিক নিচে ফিট করা এবং কীবোর্ড উঠলে অ্যাডজাস্ট করার গ্যারান্টিড সিস্টেম
+        ViewCompat.setOnApplyWindowInsetsListener(mainLayout) { view, windowInsets ->
+            val statusBars = windowInsets.getInsets(WindowInsetsCompat.Type.statusBars())
+            val ime = windowInsets.getInsets(WindowInsetsCompat.Type.ime())
+            view.setPadding(0, statusBars.top, 0, ime.bottom)
+            
+            if (ime.bottom == 0) {
+                hideSystemNavigationBar()
+            }
+            WindowInsetsCompat.CONSUMED
         }
 
         webView = WebView(this).apply {
@@ -186,7 +207,6 @@ class MainActivity : AppCompatActivity() {
 
         requestAllRequiredPermissions()
         hideSystemNavigationBar()
-        setupKeyboardListener(mainLayout)
 
         // নিখুঁত ব্যাক বাটন হ্যান্ডলিং
         onBackPressedDispatcher.addCallback(this, object : OnBackPressedCallback(true) {
@@ -218,8 +238,9 @@ class MainActivity : AppCompatActivity() {
             useWideViewPort = true
             allowFileAccess = true
             allowContentAccess = true
-             setGeolocationEnabled(true)
+            setGeolocationEnabled(true)
             mediaPlaybackRequiresUserGesture = false
+            mixedContentMode = WebSettings.MIXED_CONTENT_ALWAYS_ALLOW
         }
 
         webView.addJavascriptInterface(WebAppInterface(this), "AndroidBridge")
@@ -270,7 +291,6 @@ class MainActivity : AppCompatActivity() {
                 }
             }
 
-            // ওয়েবসাইটের লোকেশন অ্যাক্সেস সচল রাখার জন্য
             override fun onGeolocationPermissionsShowPrompt(
                 origin: String?,
                 callback: GeolocationPermissions.Callback?
@@ -305,6 +325,7 @@ class MainActivity : AppCompatActivity() {
                         }
 
                         if (photoFile != null) {
+                            cameraImageFile = photoFile
                             cameraImageUri = FileProvider.getUriForFile(
                                 this@MainActivity,
                                 "${packageName}.fileprovider",
@@ -313,10 +334,12 @@ class MainActivity : AppCompatActivity() {
                             captureIntent.putExtra(MediaStore.EXTRA_OUTPUT, cameraImageUri)
                             arrayOf(captureIntent)
                         } else {
+                            cameraImageFile = null
                             cameraImageUri = null
                             emptyArray()
                         }
                     } else {
+                        cameraImageFile = null
                         cameraImageUri = null
                         emptyArray()
                     }
@@ -373,7 +396,7 @@ class MainActivity : AppCompatActivity() {
 
                     val host = uri.host ?: ""
                     return if (host == "bdrsf.com" || host.endsWith(".bdrsf.com")) {
-                        false // WebView নিজেই লোড করবে
+                        false
                     } else {
                         val intent = Intent(Intent.ACTION_VIEW, uri)
                         view?.context?.startActivity(intent)
@@ -538,6 +561,7 @@ class MainActivity : AppCompatActivity() {
             }
 
             if (photoFile != null) {
+                documentScanFile = photoFile
                 documentScanImageUri = FileProvider.getUriForFile(
                     this,
                     "${packageName}.fileprovider",
@@ -545,6 +569,7 @@ class MainActivity : AppCompatActivity() {
                 )
                 captureIntent.putExtra(MediaStore.EXTRA_OUTPUT, documentScanImageUri)
             } else {
+                documentScanFile = null
                 documentScanImageUri = null
             }
 
@@ -603,7 +628,7 @@ class MainActivity : AppCompatActivity() {
                 FrameLayout.LayoutParams.WRAP_CONTENT
             ).apply {
                 gravity = Gravity.TOP or Gravity.END
-                topMargin = 60
+                topMargin = 50
                 rightMargin = 40
             }
             setOnClickListener {
@@ -696,7 +721,56 @@ class MainActivity : AppCompatActivity() {
         previewView = null
     }
 
-    // নামের অক্ষর নষ্ট না করে শুধুমাত্র বাংলা সংখ্যাকে ইংরেজি সংখ্যায় রূপান্তর
+    // HD ক্যামেরা ছবির রোটেশন সোজা করা এবং ফাইল সাইজ অপটিমাইজ করার ফাংশন
+    private fun optimizeAndFixCameraImage(file: File) {
+        try {
+            if (!file.exists() || file.length() == 0L) return
+
+            val exif = ExifInterface(file.absolutePath)
+            val orientation = exif.getAttributeInt(ExifInterface.TAG_ORIENTATION, ExifInterface.ORIENTATION_NORMAL)
+            val rotationInDegrees = when (orientation) {
+                ExifInterface.ORIENTATION_ROTATE_90 -> 90
+                ExifInterface.ORIENTATION_ROTATE_180 -> 180
+                ExifInterface.ORIENTATION_ROTATE_270 -> 270
+                else -> 0
+            }
+
+            // মেমরি ক্র্যাশ এড়িয়ে HD রেজোলিউশনে (Max ~1920px) ডিকোড করা
+            val boundsOptions = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+            BitmapFactory.decodeFile(file.absolutePath, boundsOptions)
+
+            var inSampleSize = 1
+            val maxDimension = 1920
+            if (boundsOptions.outHeight > maxDimension || boundsOptions.outWidth > maxDimension) {
+                val halfHeight = boundsOptions.outHeight / 2
+                val halfWidth = boundsOptions.outWidth / 2
+                while ((halfHeight / inSampleSize) >= maxDimension && (halfWidth / inSampleSize) >= maxDimension) {
+                    inSampleSize *= 2
+                }
+            }
+
+            val decodeOptions = BitmapFactory.Options().apply { this.inSampleSize = inSampleSize }
+            var bitmap = BitmapFactory.decodeFile(file.absolutePath, decodeOptions) ?: return
+
+            if (rotationInDegrees != 0) {
+                val matrix = Matrix().apply { postRotate(rotationInDegrees.toFloat()) }
+                val rotatedBitmap = Bitmap.createBitmap(bitmap, 0, 0, bitmap.width, bitmap.height, matrix, true)
+                if (rotatedBitmap != bitmap) {
+                    bitmap.recycle()
+                }
+                bitmap = rotatedBitmap
+            }
+
+            FileOutputStream(file).use { out ->
+                bitmap.compress(Bitmap.CompressFormat.JPEG, 85, out)
+                out.flush()
+            }
+            bitmap.recycle()
+        } catch (e: Exception) {
+            e.printStackTrace()
+        }
+    }
+
     private fun convertBanglaDigitsOnly(input: String): String {
         val banglaDigits = charArrayOf('০', '১', '২', '৩', '৪', '৫', '৬', '৭', '৮', '৯')
         val englishDigits = charArrayOf('0', '1', '2', '3', '4', '5', '6', '7', '8', '9')
@@ -707,7 +781,6 @@ class MainActivity : AppCompatActivity() {
         return result
     }
 
-    // শুধুমাত্র আইডি বা পাসপোর্ট নম্বর খোঁজার জন্য O->0 এবং I->1 রূপান্তর
     private fun normalizeForIdNumberSearch(input: String): String {
         return convertBanglaDigitsOnly(input)
             .replace('O', '0')
@@ -720,7 +793,6 @@ class MainActivity : AppCompatActivity() {
         try {
             val image = InputImage.fromFilePath(this, imageUri)
 
-            // প্রথমে বাংলা ও ইংরেজি উভয় টেক্সট রিকগনাইজার দিয়ে ছবি রিড করা হচ্ছে
             banglaTextRecognizer.process(image)
                 .addOnSuccessListener { banglaVisionText ->
                     latinTextRecognizer.process(image)
@@ -765,7 +837,6 @@ class MainActivity : AppCompatActivity() {
             val match = passportRegex.find(cleanLatinText) ?: passportRegex.find(numericFriendlyText)
             passportNo = match?.value ?: ""
 
-            // MRZ লাইন থেকে নিখুঁত নাম বের করা (এখানে O বা I পরিবর্তন করা হয়নি, তাই নাম ১০০% সঠিক থাকবে)
             val lines = cleanLatinText.split("\n")
             for (line in lines) {
                 val cleanLine = line.trim().replace(" ", "")
@@ -788,7 +859,6 @@ class MainActivity : AppCompatActivity() {
             }
 
         } else if (currentScanDocType == "nid_front") {
-            // ১০, ১৩ বা ১৭ ডিজিটের এনআইডি নম্বর খোঁজা (মাঝখানে স্পেস থাকলেও কাজ করবে)
             val compactNumericText = numericFriendlyText.replace(Regex("(?<=\\d)\\s+(?=\\d)"), "")
             val nidRegex = Regex("\\b(?:[0-9]{10}|[0-9]{13}|[0-9]{17})\\b")
             val nidMatch = nidRegex.find(compactNumericText)
@@ -802,7 +872,6 @@ class MainActivity : AppCompatActivity() {
             var fatherBn = ""
             var motherBn = ""
 
-            // ইংরেজি নাম খোঁজা (cleanLatinText থেকে, যাতে O/I সংখ্যা না হয়ে যায়)
             val latinLines = cleanLatinText.split("\n")
             for (line in latinLines) {
                 val t = line.trim().replace(Regex("^Name[:\\s]*", RegexOption.IGNORE_CASE), "").trim()
@@ -814,7 +883,6 @@ class MainActivity : AppCompatActivity() {
                 }
             }
 
-            // বাংলা পিতা ও মাতার নাম খোঁজা
             val allLines = cleanText.split("\n")
             for (i in allLines.indices) {
                 val t = allLines[i].trim()
@@ -926,10 +994,13 @@ class MainActivity : AppCompatActivity() {
                 val targetUri: Uri? = if (data?.data != null) {
                     data.data
                 } else {
+                    // ক্যামেরা দিয়ে তোলা HD ছবি হলে রোটেশন ও সাইজ অপটিমাইজ করা হচ্ছে
+                    documentScanFile?.let { optimizeAndFixCameraImage(it) }
                     documentScanImageUri
                 }
                 targetUri?.let { processDocumentImageFromUri(it) }
             }
+            documentScanFile = null
             documentScanImageUri = null
         } else if (requestCode == FILE_CHOOSER_REQUEST_CODE) {
             if (filePathCallback == null) return
@@ -939,30 +1010,17 @@ class MainActivity : AppCompatActivity() {
                 if (data?.data != null) {
                     results = arrayOf(data.data!!)
                 } else if (cameraImageUri != null) {
+                    // ক্যামেরা দিয়ে তোলা HD ছবি হলে ওয়েবসাইটে পাঠানোর আগে অপটিমাইজ করা হচ্ছে
+                    cameraImageFile?.let { optimizeAndFixCameraImage(it) }
                     results = arrayOf(cameraImageUri!!)
                 }
             }
             filePathCallback?.onReceiveValue(results)
             filePathCallback = null
+            cameraImageFile = null
             cameraImageUri = null
         } else {
             super.onActivityResult(requestCode, resultCode, data)
-        }
-    }
-
-    private fun setupKeyboardListener(rootView: View) {
-        rootView.viewTreeObserver.addOnGlobalLayoutListener {
-            try {
-                val r = Rect()
-                rootView.getWindowVisibleDisplayFrame(r)
-                val screenHeight = rootView.rootView.height
-                val keypadHeight = screenHeight - r.bottom
-                if (keypadHeight < screenHeight * 0.15) {
-                    hideSystemNavigationBar()
-                }
-            } catch (e: Exception) {
-                e.printStackTrace()
-            }
         }
     }
 
