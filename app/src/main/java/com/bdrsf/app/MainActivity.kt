@@ -117,7 +117,7 @@ class MainActivity : AppCompatActivity() {
     // বারকোড স্ক্যানার
     private val barcodeScanner: BarcodeScanner by lazy { BarcodeScanning.getClient() }
 
-    // API কল করার জন্য OkHttpClient
+    // API কল করার জন্য OkHttpClient (ফায়ারওয়াল বাইপাস হেডার সহ)
     private val okHttpClient = OkHttpClient.Builder()
         .connectTimeout(60, TimeUnit.SECONDS)
         .writeTimeout(60, TimeUnit.SECONDS)
@@ -689,7 +689,7 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    // সার্ভারে (ocr_scan.js) ছবি পাঠানোর ফাংশন
+    // সার্ভারে (ocr_scan.js) ছবি পাঠানোর ফাংশন (ফায়ারওয়াল বাইপাস হেডার সহ)
     private fun sendImageToServerForOCR(frontFile: File, backFile: File?, faceBase64: String, barcodeMap: Map<String, String>, barcodeRawText: String) {
         val requestBodyBuilder = MultipartBody.Builder()
             .setType(MultipartBody.FORM)
@@ -703,6 +703,8 @@ class MainActivity : AppCompatActivity() {
         val request = Request.Builder()
             .url("https://bdrsf.com/api/ocr_scan")
             .post(requestBodyBuilder.build())
+            .addHeader("Accept", "application/json")
+            .addHeader("User-Agent", "Mozilla/5.0 (Linux; Android 13; Mobile) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/114.0.0.0 Mobile Safari/537.36")
             .build()
 
         okHttpClient.newCall(request).enqueue(object : Callback {
@@ -719,7 +721,6 @@ class MainActivity : AppCompatActivity() {
                         val json = JSONObject(responseBody)
                         if (json.optString("status") == "success") {
                             val data = json.getJSONObject("data")
-                            // Note: ocr_scan.js sends "raw_text", not "raw_back_text"
                             val rawBackText = json.optString("raw_text", "")
                             
                             // Cross-Matching & Injection
