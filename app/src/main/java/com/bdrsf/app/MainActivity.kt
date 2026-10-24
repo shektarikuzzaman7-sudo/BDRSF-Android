@@ -653,7 +653,6 @@ class MainActivity : AppCompatActivity() {
         return convertBanglaDigitsOnly(input).replace('O', '0').replace('o', '0').replace('I', '1').replace('l', '1')
     }
 
-    // কার্ডের ছবি (Face Photo) ক্রপ করা
     private fun extractFacePhotoBase64(file: File): String {
         try {
             if (!file.exists() || file.length() == 0L) return ""
@@ -689,7 +688,6 @@ class MainActivity : AppCompatActivity() {
                 }
             } catch (e: Exception) { e.printStackTrace() }
 
-            // ফলব্যাক: কার্ডের বাম পাশের ফটো সেকশন ক্রপ করা
             try {
                 val x = (bitmap.width * 0.03).toInt()
                 val y = (bitmap.height * 0.20).toInt()
@@ -704,7 +702,6 @@ class MainActivity : AppCompatActivity() {
         return ""
     }
 
-    // বারকোড থেকে সরাসরি UTF-8 এনকোডিংয়ে বাংলা ও ইংরেজি ডাটা পার্স করা
     private fun parseNidBarcodeData(barcodeData: String): Map<String, String> {
         val result = mutableMapOf<String, String>()
         if (barcodeData.isEmpty()) return result
@@ -734,7 +731,6 @@ class MainActivity : AppCompatActivity() {
         return result
     }
 
-    // "পরবর্তী ধাপ" বাটনে চাপ দিলে সম্পূর্ণ স্ক্যান ও পার্সিং লজিক
     private fun processSavedDocuments(docType: String) {
         if (frontDocFile == null || !frontDocFile!!.exists()) {
             Toast.makeText(this, "সামনের অংশের ছবি পাওয়া যায়নি", Toast.LENGTH_SHORT).show()
@@ -753,7 +749,6 @@ class MainActivity : AppCompatActivity() {
                         webView.evaluateJavascript("if(window.onScanFailed) { window.onScanFailed('পাসপোর্ট রিড করা যায়নি'); }", null)
                     }
             } else {
-                // ডুয়াল ওসিআর: সামনের অংশ থেকে লাতিন ও দেবনাগরী উভয় টেক্সট পড়া
                 latinTextRecognizer.process(frontImage)
                     .addOnSuccessListener { latinFrontResult ->
                         val frontLatinText = latinFrontResult.text
@@ -788,7 +783,6 @@ class MainActivity : AppCompatActivity() {
                 .addOnSuccessListener { barcodes ->
                     var barcodeRawUtf8 = ""
                     for (b in barcodes) {
-                        // UTF-8 এনকোডিংয়ে বাংলা ডিকোড করা
                         val decoded = b.rawBytes?.let { bytes ->
                             try {
                                 String(bytes, Charsets.UTF_8)
@@ -802,7 +796,6 @@ class MainActivity : AppCompatActivity() {
                         }
                     }
 
-                    // পেছনের অংশের টেক্সট রিড
                     latinTextRecognizer.process(backImage)
                         .addOnSuccessListener { backTextResult ->
                             banglaTextRecognizer.process(backImage)
@@ -821,7 +814,14 @@ class MainActivity : AppCompatActivity() {
                 .addOnFailureListener {
                     latinTextRecognizer.process(backImage)
                         .addOnSuccessListener { backResult ->
-                            parseAndDispatchNID(combinedFrontText, latinFrontText, backResult.text, "", facePhotoBase64)
+                            banglaTextRecognizer.process(backImage)
+                                .addOnSuccessListener { backDevaResult ->
+                                    val combinedBack = "${backResult.text}\n${backDevaResult.text}"
+                                    parseAndDispatchNID(combinedFrontText, latinFrontText, combinedBack, "", facePhotoBase64)
+                                }
+                                .addOnFailureListener {
+                                    parseAndDispatchNID(combinedFrontText, latinFrontText, backResult.text, "", facePhotoBase64)
+                                }
                         }
                         .addOnFailureListener {
                             parseAndDispatchNID(combinedFrontText, latinFrontText, "", "", facePhotoBase64)
@@ -855,7 +855,7 @@ class MainActivity : AppCompatActivity() {
 
         val hasValidBarcode = barcodeRaw.isNotEmpty() && (barcodeRaw.contains("<pin>", true) || barcodeMap.containsKey("nid") || barcodeRaw.length > 25)
 
-        // ২. এনআইডি নম্বর ডিটেকশন (স্পেসযুক্ত নম্বর বা যে ফরম্যাটেই থাকুক স্মার্টলি বের করা)
+        // ২. এনআইডি নম্বর ডিটেকশন
         var nidNo = barcodeMap["nid"] ?: ""
         if (nidNo.isEmpty()) {
             val lines = numericFront.split("\n")
@@ -929,24 +929,30 @@ class MainActivity : AppCompatActivity() {
             }
         }
 
-        // ৫. বাংলা নাম, পিতা ও মাতার নাম (বারকোড বা কার্ডের টেক্সট থেকে)
+        // ৫. পিতা ও মাতার নাম স্মার্ট এক্সট্র্যাকশন
         var nameBn = barcodeMap["name_bn"] ?: ""
         var fatherName = barcodeMap["father"] ?: ""
         var motherName = barcodeMap["mother"] ?: ""
 
         val allFrontLines = cleanFront.split("\n").map { it.trim() }
+        var fatherLineIndex = -1
+
         for (i in allFrontLines.indices) {
             val t = allFrontLines[i]
-            // পিতা
+            
+            // পিতার নাম খোঁজা
             if ((t.contains("পিতা") || t.contains("Father", true)) && fatherName.isEmpty()) {
                 val extracted = t.replace(Regex("^.*?(পিতা|Father's Name|Father)[\\s:.-]*", RegexOption.IGNORE_CASE), "").trim()
                 fatherName = if (extracted.length > 2) extracted else if (i + 1 < allFrontLines.size) allFrontLines[i + 1] else ""
+                fatherLineIndex = i
             }
-            // মাতা
-            if ((t.contains("মাতা") || t.contains("Mother", true)) && motherName.isEmpty()) {
-                val extracted = t.replace(Regex("^.*?(মাতা|Mother's Name|Mother)[\\s:.-]*", RegexOption.IGNORE_CASE), "").trim()
+            
+            // মাতার নাম খোঁজা (বাংলা ও ইংরেজি উভয় প্যাটার্নে)
+            if ((t.contains("মাতা") || t.contains("Mother", true) || t.contains("মা তা")) && motherName.isEmpty()) {
+                val extracted = t.replace(Regex("^.*?(মাতা|Mother's Name|Mother|মা তা)[\\s:.-]*", RegexOption.IGNORE_CASE), "").trim()
                 motherName = if (extracted.length > 2) extracted else if (i + 1 < allFrontLines.size) allFrontLines[i + 1] else ""
             }
+
             // বাংলা নাম
             if ((t.contains("নাম") || t.contains("Name", true)) && nameBn.isEmpty()) {
                 val extracted = t.replace(Regex("^.*?(নাম|Name)[\\s:.-]*", RegexOption.IGNORE_CASE), "").trim()
@@ -956,19 +962,61 @@ class MainActivity : AppCompatActivity() {
             }
         }
 
-        // ৬. সম্পূর্ণ ঠিকানা (বারকোড অথবা কার্ডের পেছনের অংশ থেকে)
+        // মাতার নাম যদি লেবেল মিস হওয়ার কারণে না পাওয়া যায়, তবে পিতার নামের পরবর্তী লাইনের ফলব্যাক নেওয়া
+        if (motherName.isEmpty() && fatherLineIndex != -1 && fatherLineIndex + 1 < allFrontLines.size) {
+            val nextLine = allFrontLines[fatherLineIndex + 1]
+            if (!nextLine.contains("Date", true) && !nextLine.contains("Birth", true) && nextLine.length > 2) {
+                motherName = nextLine.replace(Regex("^.*?(মাতা|Mother's Name|Mother)[\\s:.-]*", RegexOption.IGNORE_CASE), "").trim()
+            }
+        }
+
+        // ৬. পেছনের অংশের বাংলা ঠিকানা স্মার্ট এক্সট্র্যাকশন
         var fullAddress = barcodeMap["address"] ?: ""
         if (fullAddress.isEmpty()) {
             val backLines = backRawText.split("\n").map { it.trim() }.filter { it.isNotEmpty() }
+            val addressParts = mutableListOf<String>()
+            var isAddressZoneStarted = false
+
             for (line in backLines) {
-                if (line.length > 3 && !line.contains("Sign", true) && !line.contains("Blood", true)) {
-                    fullAddress += "$line, "
+                // অপ্রয়োজনীয় সরকারি টেক্সট এবং রক্তের গ্রুপ বাদ দেওয়া
+                if (line.contains("Blood", true) || line.contains("রক্তের গ্রুপ") || 
+                    line.contains("Sign", true) || line.contains("স্বাক্ষর") ||
+                    line.contains("সম্পত্তি") || line.contains("অনুরোধ") ||
+                    line.contains("প্রদানের তারিখ") || line.contains("Date of Issue")) {
+                    continue
+                }
+
+                // ঠিকানার মূল কি-ওয়ার্ড পেলে ঠিকানা জোন সক্রিয় করা
+                if (line.contains("ঠিকানা") || line.contains("বাসা") || line.contains("হোল্ডিং") || 
+                    line.contains("গ্রাম") || line.contains("রাস্তা") || line.contains("ডাকঘর") || 
+                    line.contains("উপজেলা") || line.contains("জেলা") || line.contains("থানা") ||
+                    line.contains("Address", true)) {
+                    isAddressZoneStarted = true
+                    val cleanLine = line.replace(Regex("^(ঠিকানা|Address)[\\s:.-]*", RegexOption.IGNORE_CASE), "").trim()
+                    if (cleanLine.isNotEmpty()) {
+                        addressParts.add(cleanLine)
+                    }
+                    continue
+                }
+
+                // ঠিকানার ভেতরে থাকা পরবর্তী লাইনগুলো ধরা
+                if (isAddressZoneStarted && line.length > 3) {
+                    addressParts.add(line)
                 }
             }
-            fullAddress = fullAddress.trimEnd(',', ' ')
+
+            // যদি কোনো নির্দিষ্ট কি-ওয়ার্ড ফিল্টার না পায়, তবে পেছনের সব ভ্যালিড লাইন নেওয়া
+            if (addressParts.isEmpty()) {
+                for (line in backLines) {
+                    if (line.length > 4 && !line.contains("Blood", true) && !line.contains("Sign", true) && !line.contains("সম্পত্তি")) {
+                        addressParts.add(line)
+                    }
+                }
+            }
+
+            fullAddress = addressParts.joinToString(", ").trimEnd(',', ' ')
         }
 
-        // বাংলা নাম পেলে তা মূল নামের সাথে সমন্বয় করা
         val displayName = if (nameEn.isNotEmpty()) nameEn else nameBn
 
         runOnUiThread {
@@ -997,8 +1045,8 @@ class MainActivity : AppCompatActivity() {
         var nameEn = ""
 
         val lines = clean.split("\n")
-        for (line in lines) {
-            val cleanLine = line.trim().replace(" ", "").uppercase()
+        for (i in lines.indices) {
+            val cleanLine = lines[i].trim().replace(" ", "").uppercase()
             if (cleanLine.startsWith("P<") && cleanLine.length > 20) {
                 val parts = cleanLine.removePrefix("P<").split("<<")
                 if (parts.isNotEmpty()) {
@@ -1100,7 +1148,6 @@ class MainActivity : AppCompatActivity() {
                         backDocFile = selectedFile
                     }
 
-                    // ছবি সিলেক্ট হলে শুধুমাত্র প্রিভিউ পাঠানো হবে
                     try {
                         val bmp = BitmapFactory.decodeFile(selectedFile.absolutePath)
                         if (bmp != null) {
