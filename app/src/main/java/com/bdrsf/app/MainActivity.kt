@@ -26,11 +26,13 @@ import android.view.WindowInsetsController
 import android.view.WindowManager
 import android.webkit.CookieManager
 import android.webkit.DownloadListener
+import android.webkit.GeolocationPermissions
 import android.webkit.JavascriptInterface
 import android.webkit.PermissionRequest
 import android.webkit.URLUtil
 import android.webkit.ValueCallback
 import android.webkit.WebChromeClient
+import android.webkit.WebResourceRequest
 import android.webkit.WebSettings
 import android.webkit.WebView
 import android.webkit.WebViewClient
@@ -50,11 +52,14 @@ import androidx.camera.view.PreviewView
 import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
 import androidx.core.content.FileProvider
-import com.google.mlkit.vision.barcode.BarcodeScanning
+import androidx.core.view.WindowCompat
+import androidx.core.view.WindowInsetsControllerCompat
 import com.google.mlkit.vision.barcode.BarcodeScanner
+import com.google.mlkit.vision.barcode.BarcodeScanning
 import com.google.mlkit.vision.common.InputImage
 import com.google.mlkit.vision.text.TextRecognition
 import com.google.mlkit.vision.text.TextRecognizer
+import com.google.mlkit.vision.text.devanagari.DevanagariTextRecognizerOptions
 import com.google.mlkit.vision.text.latin.TextRecognizerOptions
 import org.json.JSONObject
 import java.io.File
@@ -72,13 +77,14 @@ class MainActivity : AppCompatActivity() {
     private lateinit var webView: WebView
     private lateinit var splashLayout: FrameLayout
     private lateinit var mainLayout: RelativeLayout
-    
+
     private var scannerLayout: FrameLayout? = null
     private var previewView: PreviewView? = null
     private var cameraProvider: ProcessCameraProvider? = null
     private lateinit var cameraExecutor: ExecutorService
     private var isScanningActive = false
     private val isQRProcessed = AtomicBoolean(false)
+    private var isFirstPageLoad = true
 
     // ডকুমেন্ট টাইপ: "nid_front", "nid_back", অথবা "passport"
     private var currentScanDocType = "nid_front"
@@ -88,83 +94,88 @@ class MainActivity : AppCompatActivity() {
     private var documentScanImageUri: Uri? = null
 
     private val FILE_CHOOSER_REQUEST_CODE = 1001
+    private val PERMISSION_REQUEST_CODE = 1002
     private val GALLERY_QR_REQUEST_CODE = 1004
     private val DOCUMENT_SCAN_REQUEST_CODE = 1005
-    private val PERMISSION_REQUEST_CODE = 1002
 
-    // ML Kit Clients
+    // ML Kit Clients (ইংরেজি ও বাংলা উভয় টেক্সট সাপোর্টের জন্য)
     private val barcodeScanner: BarcodeScanner by lazy { BarcodeScanning.getClient() }
-    private val textRecognizer: TextRecognizer by lazy { TextRecognition.getClient(TextRecognizerOptions.DEFAULT_OPTIONS) }
+    private val latinTextRecognizer: TextRecognizer by lazy {
+        TextRecognition.getClient(TextRecognizerOptions.DEFAULT_OPTIONS)
+    }
+    private val banglaTextRecognizer: TextRecognizer by lazy {
+        TextRecognition.getClient(DevanagariTextRecognizerOptions.Builder().build())
+    }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
+        // অ্যাকশন বার বা টাইটেল হেডার থাকলে তা হাইড করা
+        supportActionBar?.hide()
         requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_PORTRAIT
-        
+
+        // স্ট্যাটাস বারের ঠিক নিচে ফুল-স্ক্রিন ভিউ ফিট করা এবং কীবোর্ড রিসাইজ সচল রাখা
         try {
-            window.setFlags(
-                WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS,
-                WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS
-            )
+            WindowCompat.setDecorFitsSystemWindows(window, true)
+            window.statusBarColor = Color.parseColor("#0A2F1D")
+            WindowInsetsControllerCompat(window, window.decorView).isAppearanceLightStatusBars = false
 
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
-                window.attributes.layoutInDisplayCutoutMode =
-                    WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_SHORT_EDGES
-            }
-
+            @Suppress("DEPRECATION")
             window.setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE)
         } catch (e: Exception) {
             e.printStackTrace()
         }
 
-        mainLayout = RelativeLayout(this)
-        mainLayout.layoutParams = RelativeLayout.LayoutParams(
-            RelativeLayout.LayoutParams.MATCH_PARENT,
-            RelativeLayout.LayoutParams.MATCH_PARENT
-        )
+        mainLayout = RelativeLayout(this).apply {
+            layoutParams = RelativeLayout.LayoutParams(
+                RelativeLayout.LayoutParams.MATCH_PARENT,
+                RelativeLayout.LayoutParams.MATCH_PARENT
+            )
+        }
 
-        webView = WebView(this)
-        val webViewParams = RelativeLayout.LayoutParams(
-            RelativeLayout.LayoutParams.MATCH_PARENT,
-            RelativeLayout.LayoutParams.MATCH_PARENT
-        )
-        webView.layoutParams = webViewParams
+        webView = WebView(this).apply {
+            layoutParams = RelativeLayout.LayoutParams(
+                RelativeLayout.LayoutParams.MATCH_PARENT,
+                RelativeLayout.LayoutParams.MATCH_PARENT
+            )
+        }
         mainLayout.addView(webView)
 
-        splashLayout = FrameLayout(this)
-        val splashParams = RelativeLayout.LayoutParams(
-            RelativeLayout.LayoutParams.MATCH_PARENT,
-            RelativeLayout.LayoutParams.MATCH_PARENT
-        )
-        splashLayout.layoutParams = splashParams
-        splashLayout.setBackgroundColor(Color.parseColor("#0A2F1D"))
+        splashLayout = FrameLayout(this).apply {
+            layoutParams = RelativeLayout.LayoutParams(
+                RelativeLayout.LayoutParams.MATCH_PARENT,
+                RelativeLayout.LayoutParams.MATCH_PARENT
+            )
+            setBackgroundColor(Color.parseColor("#0A2F1D"))
+        }
 
         val logoSizePx = (130 * resources.displayMetrics.density).toInt()
         val loaderSizePx = (155 * resources.displayMetrics.density).toInt()
 
-        val circularProgressBar = ProgressBar(this, null, android.R.attr.progressBarStyleLarge)
-        val progressParams = FrameLayout.LayoutParams(loaderSizePx, loaderSizePx)
-        progressParams.gravity = Gravity.CENTER
-        circularProgressBar.layoutParams = progressParams
-        
-        try {
-            circularProgressBar.indeterminateDrawable.setColorFilter(
-                Color.parseColor("#FFD700"),
-                PorterDuff.Mode.SRC_IN
-            )
-        } catch (e: Exception) {
-            e.printStackTrace()
+        val circularProgressBar = ProgressBar(this, null, android.R.attr.progressBarStyleLarge).apply {
+            layoutParams = FrameLayout.LayoutParams(loaderSizePx, loaderSizePx).apply {
+                gravity = Gravity.CENTER
+            }
+            try {
+                @Suppress("DEPRECATION")
+                indeterminateDrawable.setColorFilter(
+                    Color.parseColor("#FFD700"),
+                    PorterDuff.Mode.SRC_IN
+                )
+            } catch (e: Exception) {
+                e.printStackTrace()
+            }
         }
         splashLayout.addView(circularProgressBar)
 
-        val logoImageView = ImageView(this)
-        val logoParams = FrameLayout.LayoutParams(logoSizePx, logoSizePx)
-        logoParams.gravity = Gravity.CENTER
-        logoImageView.layoutParams = logoParams
-        
-        val logoResId = resources.getIdentifier("ic_logo", "drawable", packageName)
-        if (logoResId != 0) {
-            logoImageView.setImageResource(logoResId)
+        val logoImageView = ImageView(this).apply {
+            layoutParams = FrameLayout.LayoutParams(logoSizePx, logoSizePx).apply {
+                gravity = Gravity.CENTER
+            }
+            val logoResId = resources.getIdentifier("ic_logo", "drawable", packageName)
+            if (logoResId != 0) {
+                setImageResource(logoResId)
+            }
         }
         splashLayout.addView(logoImageView)
 
@@ -177,7 +188,7 @@ class MainActivity : AppCompatActivity() {
         hideSystemNavigationBar()
         setupKeyboardListener(mainLayout)
 
-        // নিখুঁত ব্যাক বাটন হ্যান্ডলিং: সাব-পেজে থাকলে হোমপেজে নিয়ে যাবে ও হিস্ট্রি ক্লিন করবে, আর হোমপেজে থাকলে পেজ রিফ্রেশ করবে (অ্যাপ থেকে কখনো বের হবে না)
+        // নিখুঁত ব্যাক বাটন হ্যান্ডলিং
         onBackPressedDispatcher.addCallback(this, object : OnBackPressedCallback(true) {
             override fun handleOnBackPressed() {
                 if (isScanningActive) {
@@ -187,12 +198,10 @@ class MainActivity : AppCompatActivity() {
                     val normalizedUrl = currentUrl.trimEnd('/')
                     val homeBase = "https://bdrsf.com"
 
-                    if (normalizedUrl != homeBase) {
-                        // অন্য কোনো পেজে থাকলে সরাসরি হোমপেজে নিয়ে যাবে এবং সমস্ত হিস্ট্রি ক্লিন করবে
+                    if (normalizedUrl.isNotEmpty() && normalizedUrl != homeBase) {
                         webView.loadUrl("https://bdrsf.com/")
                         webView.clearHistory()
                     } else {
-                        // ইতিমধ্যে হোমপেজে থাকলে অ্যাপ থেকে বের না হয়ে পেজটি রিফ্রেশ হবে
                         webView.reload()
                     }
                 }
@@ -200,16 +209,18 @@ class MainActivity : AppCompatActivity() {
         })
 
         webView.setLayerType(View.LAYER_TYPE_HARDWARE, null)
-        val webSettings: WebSettings = webView.settings
-        webSettings.javaScriptEnabled = true
-        webSettings.domStorageEnabled = true
-        webSettings.databaseEnabled = true
-        webSettings.cacheMode = WebSettings.LOAD_DEFAULT
-        webSettings.loadWithOverviewMode = true
-        webSettings.useWideViewPort = true
-        webSettings.allowFileAccess = true
-        webSettings.allowContentAccess = true
-        webSettings.mediaPlaybackRequiresUserGesture = false
+        webView.settings.apply {
+            javaScriptEnabled = true
+            domStorageEnabled = true
+            databaseEnabled = true
+            cacheMode = WebSettings.LOAD_DEFAULT
+            loadWithOverviewMode = true
+            useWideViewPort = true
+            allowFileAccess = true
+            allowContentAccess = true
+             setGeolocationEnabled(true)
+            mediaPlaybackRequiresUserGesture = false
+        }
 
         webView.addJavascriptInterface(WebAppInterface(this), "AndroidBridge")
 
@@ -219,7 +230,7 @@ class MainActivity : AppCompatActivity() {
 
         clearAppSessionKeepSmartId()
 
-        webView.setDownloadListener(DownloadListener { url, userAgent, contentDisposition, mimetype, contentLength ->
+        webView.setDownloadListener(DownloadListener { url, userAgent, contentDisposition, mimetype, _ ->
             try {
                 if (url.startsWith("blob:")) {
                     Toast.makeText(this, "ব্লব ফাইল সরাসরি ডাউনলোড করা যায় না", Toast.LENGTH_SHORT).show()
@@ -228,21 +239,21 @@ class MainActivity : AppCompatActivity() {
 
                 val request = DownloadManager.Request(Uri.parse(url))
                 val fileName = URLUtil.guessFileName(url, contentDisposition, mimetype)
-                
-                request.allowScanningByMediaScanner()
+
                 request.setNotificationVisibility(DownloadManager.Request.VISIBILITY_VISIBLE_NOTIFY_COMPLETED)
                 request.setTitle(fileName)
                 request.setDescription("ফাইল ডাউনলোড হচ্ছে...")
                 request.setDestinationInExternalPublicDir(Environment.DIRECTORY_DOWNLOADS, fileName)
-                
+
                 val cookies = CookieManager.getInstance().getCookie(url)
                 if (!cookies.isNullOrEmpty()) {
                     request.addRequestHeader("cookie", cookies)
                 }
-                
+                request.addRequestHeader("User-Agent", userAgent)
+
                 val downloadManager = getSystemService(Context.DOWNLOAD_SERVICE) as DownloadManager
                 downloadManager.enqueue(request)
-                
+
                 Toast.makeText(this, "ডাউনলোড শুরু হয়েছে: $fileName", Toast.LENGTH_LONG).show()
             } catch (e: Exception) {
                 e.printStackTrace()
@@ -252,11 +263,19 @@ class MainActivity : AppCompatActivity() {
 
         webView.webChromeClient = object : WebChromeClient() {
             override fun onPermissionRequest(request: PermissionRequest?) {
-                if (request != null) {
+                request?.let {
                     runOnUiThread {
-                        request.grant(request.resources)
+                        it.grant(it.resources)
                     }
                 }
+            }
+
+            // ওয়েবসাইটের লোকেশন অ্যাক্সেস সচল রাখার জন্য
+            override fun onGeolocationPermissionsShowPrompt(
+                origin: String?,
+                callback: GeolocationPermissions.Callback?
+            ) {
+                callback?.invoke(origin, true, false)
             }
 
             override fun onShowFileChooser(
@@ -264,48 +283,56 @@ class MainActivity : AppCompatActivity() {
                 callback: ValueCallback<Array<Uri>>?,
                 fileChooserParams: FileChooserParams?
             ): Boolean {
-                if (!hasCameraPermission()) {
-                    requestAllRequiredPermissions()
-                    Toast.makeText(this@MainActivity, "ক্যামেরা পারমিশন প্রয়োজন।", Toast.LENGTH_LONG).show()
-                    callback?.onReceiveValue(null)
-                    return false
-                }
-
                 filePathCallback?.onReceiveValue(null)
                 filePathCallback = callback
+
+                if (!hasCameraPermission()) {
+                    requestAllRequiredPermissions()
+                }
 
                 try {
                     val contentSelectionIntent = Intent(Intent.ACTION_GET_CONTENT).apply {
                         addCategory(Intent.CATEGORY_OPENABLE)
-                        type = "*/*" 
+                        type = "*/*"
                     }
 
-                    val captureIntent = Intent(MediaStore.ACTION_IMAGE_CAPTURE)
-                    val photoFile: File? = try {
-                        createImageFile()
-                    } catch (ex: IOException) {
-                        null
-                    }
+                    val intentArray: Array<Intent> = if (hasCameraPermission()) {
+                        val captureIntent = Intent(MediaStore.ACTION_IMAGE_CAPTURE)
+                        val photoFile: File? = try {
+                            createImageFile()
+                        } catch (ex: IOException) {
+                            null
+                        }
 
-                    if (photoFile != null) {
-                        cameraImageUri = FileProvider.getUriForFile(
-                            this@MainActivity,
-                            "${packageName}.fileprovider",
-                            photoFile
-                        )
-                        captureIntent.putExtra(MediaStore.EXTRA_OUTPUT, cameraImageUri)
+                        if (photoFile != null) {
+                            cameraImageUri = FileProvider.getUriForFile(
+                                this@MainActivity,
+                                "${packageName}.fileprovider",
+                                photoFile
+                            )
+                            captureIntent.putExtra(MediaStore.EXTRA_OUTPUT, cameraImageUri)
+                            arrayOf(captureIntent)
+                        } else {
+                            cameraImageUri = null
+                            emptyArray()
+                        }
                     } else {
                         cameraImageUri = null
+                        emptyArray()
                     }
 
                     val chooserIntent = Intent(Intent.ACTION_CHOOSER).apply {
                         putExtra(Intent.EXTRA_INTENT, contentSelectionIntent)
                         putExtra(Intent.EXTRA_TITLE, "ফাইল বা ছবি সিলেক্ট করুন")
-                        putExtra(Intent.EXTRA_INITIAL_INTENTS, arrayOf(captureIntent))
+                        if (intentArray.isNotEmpty()) {
+                            putExtra(Intent.EXTRA_INITIAL_INTENTS, intentArray)
+                        }
                     }
 
+                    @Suppress("DEPRECATION")
                     startActivityForResult(chooserIntent, FILE_CHOOSER_REQUEST_CODE)
                 } catch (e: ActivityNotFoundException) {
+                    filePathCallback?.onReceiveValue(null)
                     filePathCallback = null
                     Toast.makeText(this@MainActivity, "ফাইল সিলেক্টর ওপেন করা যাচ্ছে না", Toast.LENGTH_SHORT).show()
                     return false
@@ -317,25 +344,43 @@ class MainActivity : AppCompatActivity() {
         webView.webViewClient = object : WebViewClient() {
             override fun onPageStarted(view: WebView?, url: String?, favicon: Bitmap?) {
                 super.onPageStarted(view, url, favicon)
-                splashLayout.visibility = View.VISIBLE
+                if (isFirstPageLoad) {
+                    splashLayout.visibility = View.VISIBLE
+                }
             }
 
+            override fun shouldOverrideUrlLoading(view: WebView?, request: WebResourceRequest?): Boolean {
+                val url = request?.url?.toString() ?: return false
+                return handleUrlLoading(view, url)
+            }
+
+            @Deprecated("Deprecated in Java")
             override fun shouldOverrideUrlLoading(view: WebView?, url: String?): Boolean {
-                if (url != null) {
-                    try {
-                        val uri = Uri.parse(url)
-                        val host = uri.host ?: ""
-                        if (host == "bdrsf.com" || host.endsWith(".bdrsf.com")) {
-                            view?.loadUrl(url)
-                            return true
-                        } else {
-                            val intent = Intent(Intent.ACTION_VIEW, uri)
-                            view?.context?.startActivity(intent)
-                            return true
-                        }
-                    } catch (e: Exception) {
-                        e.printStackTrace()
+                if (url == null) return false
+                return handleUrlLoading(view, url)
+            }
+
+            private fun handleUrlLoading(view: WebView?, url: String): Boolean {
+                try {
+                    val uri = Uri.parse(url)
+                    val scheme = uri.scheme ?: ""
+
+                    if (scheme == "tel" || scheme == "mailto" || scheme == "whatsapp" || scheme == "intent") {
+                        val intent = Intent(Intent.ACTION_VIEW, uri)
+                        view?.context?.startActivity(intent)
+                        return true
                     }
+
+                    val host = uri.host ?: ""
+                    return if (host == "bdrsf.com" || host.endsWith(".bdrsf.com")) {
+                        false // WebView নিজেই লোড করবে
+                    } else {
+                        val intent = Intent(Intent.ACTION_VIEW, uri)
+                        view?.context?.startActivity(intent)
+                        true
+                    }
+                } catch (e: Exception) {
+                    e.printStackTrace()
                 }
                 return false
             }
@@ -344,12 +389,15 @@ class MainActivity : AppCompatActivity() {
                 super.onPageFinished(view, url)
                 CookieManager.getInstance().flush()
 
-                splashLayout.animate()
-                    .alpha(0f)
-                    .setDuration(400)
-                    .withEndAction {
-                        splashLayout.visibility = View.GONE
-                    }
+                if (isFirstPageLoad) {
+                    isFirstPageLoad = false
+                    splashLayout.animate()
+                        .alpha(0f)
+                        .setDuration(400)
+                        .withEndAction {
+                            splashLayout.visibility = View.GONE
+                        }
+                }
             }
         }
 
@@ -385,7 +433,7 @@ class MainActivity : AppCompatActivity() {
                 try {
                     val cleanBase64 = if (base64Data.contains(",")) base64Data.split(",")[1] else base64Data
                     val decodedBytes = Base64.decode(cleanBase64, Base64.DEFAULT)
-                    
+
                     val contentValues = ContentValues().apply {
                         put(MediaStore.MediaColumns.DISPLAY_NAME, fileName)
                         put(MediaStore.MediaColumns.MIME_TYPE, "image/png")
@@ -396,7 +444,7 @@ class MainActivity : AppCompatActivity() {
 
                     val resolver = activity.contentResolver
                     val uri = resolver.insert(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, contentValues)
-                    
+
                     uri?.let {
                         resolver.openOutputStream(it)?.use { outputStream ->
                             outputStream.write(decodedBytes)
@@ -421,10 +469,10 @@ class MainActivity : AppCompatActivity() {
 
                     val safeFileName = fileName.replace(Regex("[^a-zA-Z0-9._-]"), "_")
                     val cacheFile = File(activity.cacheDir, safeFileName)
-                    val fos = FileOutputStream(cacheFile)
-                    fos.write(decodedBytes)
-                    fos.flush()
-                    fos.close()
+                    FileOutputStream(cacheFile).use { fos ->
+                        fos.write(decodedBytes)
+                        fos.flush()
+                    }
 
                     val imageUri = FileProvider.getUriForFile(
                         activity,
@@ -454,12 +502,14 @@ class MainActivity : AppCompatActivity() {
             type = "image/*"
         }
         try {
+            @Suppress("DEPRECATION")
             startActivityForResult(intent, GALLERY_QR_REQUEST_CODE)
         } catch (e: Exception) {
             try {
                 val fallbackIntent = Intent(Intent.ACTION_GET_CONTENT).apply {
                     type = "image/*"
                 }
+                @Suppress("DEPRECATION")
                 startActivityForResult(fallbackIntent, GALLERY_QR_REQUEST_CODE)
             } catch (ex: Exception) {
                 Toast.makeText(this, "গ্যালারি ওপেন করা যাচ্ছে না", Toast.LENGTH_SHORT).show()
@@ -470,7 +520,7 @@ class MainActivity : AppCompatActivity() {
     private fun openImagePickerForDocumentScan() {
         if (!hasCameraPermission()) {
             requestAllRequiredPermissions()
-            Toast.makeText(this, "ক্যামেরা পারমিশন প্রয়োজন", Toast.LENGTH_SHORT).show()
+            Toast.makeText(this, "ক্যামেরা পারমিশন প্রয়োজন, পারমিশন দিয়ে আবার চেষ্টা করুন", Toast.LENGTH_SHORT).show()
             return
         }
 
@@ -510,6 +560,7 @@ class MainActivity : AppCompatActivity() {
                 putExtra(Intent.EXTRA_INITIAL_INTENTS, arrayOf(captureIntent))
             }
 
+            @Suppress("DEPRECATION")
             startActivityForResult(chooserIntent, DOCUMENT_SCAN_REQUEST_CODE)
         } catch (e: Exception) {
             Toast.makeText(this, "ইমেজ সিলেক্টর ওপেন করা যাচ্ছে না", Toast.LENGTH_SHORT).show()
@@ -547,15 +598,14 @@ class MainActivity : AppCompatActivity() {
             text = "বন্ধ করুন (Close)"
             setTextColor(Color.WHITE)
             setBackgroundColor(Color.parseColor("#AA000000"))
-            val params = FrameLayout.LayoutParams(
+            layoutParams = FrameLayout.LayoutParams(
                 FrameLayout.LayoutParams.WRAP_CONTENT,
                 FrameLayout.LayoutParams.WRAP_CONTENT
             ).apply {
                 gravity = Gravity.TOP or Gravity.END
-                topMargin = 100
-                rightMargin = 50
+                topMargin = 60
+                rightMargin = 40
             }
-            layoutParams = params
             setOnClickListener {
                 stopLiveCameraScanner()
             }
@@ -576,6 +626,7 @@ class MainActivity : AppCompatActivity() {
         }, ContextCompat.getMainExecutor(this))
     }
 
+    @androidx.annotation.OptIn(androidx.camera.core.ExperimentalGetImage::class)
     private fun bindCameraUseCases() {
         val cameraProvider = cameraProvider ?: return
 
@@ -645,121 +696,50 @@ class MainActivity : AppCompatActivity() {
         previewView = null
     }
 
-    private fun convertBanglaToEnglishDigits(input: String): String {
+    // নামের অক্ষর নষ্ট না করে শুধুমাত্র বাংলা সংখ্যাকে ইংরেজি সংখ্যায় রূপান্তর
+    private fun convertBanglaDigitsOnly(input: String): String {
         val banglaDigits = charArrayOf('০', '১', '২', '৩', '৪', '৫', '৬', '৭', '৮', '৯')
         val englishDigits = charArrayOf('0', '1', '2', '3', '4', '5', '6', '7', '8', '9')
         var result = input
         for (i in banglaDigits.indices) {
             result = result.replace(banglaDigits[i], englishDigits[i])
         }
-        result = result.replace('O', '0').replace('o', '0').replace('I', '1').replace('l', '1')
         return result
+    }
+
+    // শুধুমাত্র আইডি বা পাসপোর্ট নম্বর খোঁজার জন্য O->0 এবং I->1 রূপান্তর
+    private fun normalizeForIdNumberSearch(input: String): String {
+        return convertBanglaDigitsOnly(input)
+            .replace('O', '0')
+            .replace('o', '0')
+            .replace('I', '1')
+            .replace('l', '1')
     }
 
     private fun processDocumentImageFromUri(imageUri: Uri) {
         try {
             val image = InputImage.fromFilePath(this, imageUri)
 
-            textRecognizer.process(image)
-                .addOnSuccessListener { visionText ->
-                    val rawText = visionText.text
-                    val fullText = convertBanglaToEnglishDigits(rawText)
-
-                    if (fullText.isBlank()) {
-                        Toast.makeText(this, "ছবিতে কোনো লেখা পাওয়া যায়নি", Toast.LENGTH_SHORT).show()
-                        return@addOnSuccessListener
-                    }
-
-                    if (currentScanDocType == "passport") {
-                        var passportNo = ""
-                        var nameEn = ""
-
-                        val passportRegex = Regex("\\b[A-Z]{1,2}[0-9]{7,8}\\b")
-                        val match = passportRegex.find(fullText)
-                        passportNo = match?.value ?: ""
-
-                        val lines = fullText.split("\n")
-                        for (line in lines) {
-                            val cleanLine = line.trim().replace(" ", "")
-                            if (cleanLine.startsWith("P<") && cleanLine.length > 30) {
-                                val parts = cleanLine.split("<<")
-                                if (parts.isNotEmpty()) {
-                                    val surname = parts[0].removePrefix("P<").replace("<", " ").trim()
-                                    val givenNames = if (parts.size > 1) parts[1].replace("<", " ").trim() else ""
-                                    nameEn = "$givenNames $surname".trim()
-                                }
-                            }
+            // প্রথমে বাংলা ও ইংরেজি উভয় টেক্সট রিকগনাইজার দিয়ে ছবি রিড করা হচ্ছে
+            banglaTextRecognizer.process(image)
+                .addOnSuccessListener { banglaVisionText ->
+                    latinTextRecognizer.process(image)
+                        .addOnSuccessListener { latinVisionText ->
+                            val combinedRawText = "${latinVisionText.text}\n${banglaVisionText.text}"
+                            handleExtractedDocumentText(combinedRawText, latinVisionText.text)
                         }
-
-                        runOnUiThread {
-                            val safeName = JSONObject.quote(nameEn)
-                            val safeDocNo = JSONObject.quote(passportNo)
-                            webView.evaluateJavascript("if(window.onScanCompleted) { window.onScanCompleted($safeName, $safeDocNo); }", null)
-                            Toast.makeText(this, "পাসপোর্ট সফলভাবে স্ক্যান হয়েছে!", Toast.LENGTH_SHORT).show()
+                        .addOnFailureListener {
+                            handleExtractedDocumentText(banglaVisionText.text, banglaVisionText.text)
                         }
-
-                    } else if (currentScanDocType == "nid_front") {
-                        val nidRegex = Regex("\\b(?:[0-9]{10}|[0-9]{13}|[0-9]{17})\\b")
-                        val nidMatch = nidRegex.find(fullText)
-                        val nidNo = nidMatch?.value ?: ""
-
-                        val dobRegex = Regex("([0-9]{2}[-/\\.][0-9]{2}[-/\\.][0-9]{4})")
-                        val dobMatch = dobRegex.find(fullText)
-                        val dobStr = dobMatch?.value ?: ""
-
-                        var nameEn = ""
-                        var fatherBn = ""
-                        var motherBn = ""
-
-                        val lines = fullText.split("\n")
-                        for (line in lines) {
-                            val t = line.trim()
-                            if (t.matches(Regex("^[A-Z\\s]{4,}$")) && nameEn.isEmpty() && 
-                                !t.contains("BANGLADESH") && !t.contains("NID") && 
-                                !t.contains("GOVERNMENT") && !t.contains("COMMISSION") && !t.contains("REPUBLIC")) {
-                                nameEn = t
-                            } else if (t.contains("পিতা", true) || t.contains("Father", true)) {
-                                fatherBn = t.replace(Regex("^(পিতা|Father)[\\s:]*", RegexOption.IGNORE_CASE), "").trim()
-                            } else if (t.contains("মাতা", true) || t.contains("Mother", true)) {
-                                motherBn = t.replace(Regex("^(মাতা|Mother)[\\s:]*", RegexOption.IGNORE_CASE), "").trim()
-                            }
-                        }
-
-                        runOnUiThread {
-                            val safeName = JSONObject.quote(nameEn)
-                            val safeFather = JSONObject.quote(fatherBn)
-                            val safeMother = JSONObject.quote(motherBn)
-                            val safeDob = JSONObject.quote(dobStr)
-                            val safeNid = JSONObject.quote(nidNo)
-
-                            val jsCall = "if(window.onNIDFrontScanCompleted) { window.onNIDFrontScanCompleted($safeName, $safeFather, $safeMother, $safeDob, $safeNid); }"
-                            webView.evaluateJavascript(jsCall, null)
-                            Toast.makeText(this, "এনআইডি সামনের অংশ স্ক্যান সম্পন্ন!", Toast.LENGTH_SHORT).show()
-                        }
-
-                    } else if (currentScanDocType == "nid_back") {
-                        var addressBn = ""
-                        val lines = fullText.split("\n")
-                        for (line in lines) {
-                            val t = line.trim()
-                            if (t.contains("বাসা", true) || t.contains("গ্রাম", true) || 
-                                t.contains("ডাকঘর", true) || t.contains("উপজেলা", true) || 
-                                t.contains("জেলা", true) || t.contains("ঠিকানা", true) || 
-                                t.contains("রোড", true) || t.contains("হোল্ডিং", true)) {
-                                addressBn += "$t "
-                            }
-                        }
-
-                        runOnUiThread {
-                            val safeAddress = JSONObject.quote(addressBn.trim())
-                            val jsCall = "if(window.onNIDBackScanCompleted) { window.onNIDBackScanCompleted($safeAddress); }"
-                            webView.evaluateJavascript(jsCall, null)
-                            Toast.makeText(this, "এনআইডি পেছনের অংশ স্ক্যান সম্পন্ন!", Toast.LENGTH_SHORT).show()
-                        }
-                    }
                 }
                 .addOnFailureListener {
-                    Toast.makeText(this, "ছবি থেকে টেক্সট রিড করতে ব্যর্থ হয়েছে", Toast.LENGTH_SHORT).show()
+                    latinTextRecognizer.process(image)
+                        .addOnSuccessListener { latinVisionText ->
+                            handleExtractedDocumentText(latinVisionText.text, latinVisionText.text)
+                        }
+                        .addOnFailureListener {
+                            Toast.makeText(this, "ছবি থেকে টেক্সট রিড করতে ব্যর্থ হয়েছে", Toast.LENGTH_SHORT).show()
+                        }
                 }
         } catch (e: Exception) {
             e.printStackTrace()
@@ -767,10 +747,124 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
+    private fun handleExtractedDocumentText(combinedRawText: String, latinOnlyText: String) {
+        val cleanText = convertBanglaDigitsOnly(combinedRawText)
+        val cleanLatinText = convertBanglaDigitsOnly(latinOnlyText)
+        val numericFriendlyText = normalizeForIdNumberSearch(latinOnlyText)
+
+        if (cleanText.isBlank()) {
+            Toast.makeText(this, "ছবিতে কোনো লেখা পাওয়া যায়নি", Toast.LENGTH_SHORT).show()
+            return
+        }
+
+        if (currentScanDocType == "passport") {
+            var passportNo = ""
+            var nameEn = ""
+
+            val passportRegex = Regex("\\b[A-Z]{1,2}[0-9]{7,8}\\b")
+            val match = passportRegex.find(cleanLatinText) ?: passportRegex.find(numericFriendlyText)
+            passportNo = match?.value ?: ""
+
+            // MRZ লাইন থেকে নিখুঁত নাম বের করা (এখানে O বা I পরিবর্তন করা হয়নি, তাই নাম ১০০% সঠিক থাকবে)
+            val lines = cleanLatinText.split("\n")
+            for (line in lines) {
+                val cleanLine = line.trim().replace(" ", "")
+                if (cleanLine.startsWith("P<") && cleanLine.length > 30) {
+                    val withoutPrefix = if (cleanLine.length > 5) cleanLine.substring(5) else cleanLine.removePrefix("P<")
+                    val parts = withoutPrefix.split("<<")
+                    if (parts.isNotEmpty()) {
+                        val surname = parts[0].replace("<", " ").trim()
+                        val givenNames = if (parts.size > 1) parts[1].replace("<", " ").trim() else ""
+                        nameEn = "$givenNames $surname".trim()
+                    }
+                }
+            }
+
+            runOnUiThread {
+                val safeName = JSONObject.quote(nameEn)
+                val safeDocNo = JSONObject.quote(passportNo)
+                webView.evaluateJavascript("if(window.onScanCompleted) { window.onScanCompleted($safeName, $safeDocNo); }", null)
+                Toast.makeText(this, "পাসপোর্ট সফলভাবে স্ক্যান হয়েছে!", Toast.LENGTH_SHORT).show()
+            }
+
+        } else if (currentScanDocType == "nid_front") {
+            // ১০, ১৩ বা ১৭ ডিজিটের এনআইডি নম্বর খোঁজা (মাঝখানে স্পেস থাকলেও কাজ করবে)
+            val compactNumericText = numericFriendlyText.replace(Regex("(?<=\\d)\\s+(?=\\d)"), "")
+            val nidRegex = Regex("\\b(?:[0-9]{10}|[0-9]{13}|[0-9]{17})\\b")
+            val nidMatch = nidRegex.find(compactNumericText)
+            val nidNo = nidMatch?.value ?: ""
+
+            val dobRegex = Regex("([0-9]{2}\\s*(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec|[0-9]{2})[a-zA-Z]*[-/\\.\\s]+[0-9]{4})", RegexOption.IGNORE_CASE)
+            val dobMatch = dobRegex.find(cleanLatinText)
+            val dobStr = dobMatch?.value ?: ""
+
+            var nameEn = ""
+            var fatherBn = ""
+            var motherBn = ""
+
+            // ইংরেজি নাম খোঁজা (cleanLatinText থেকে, যাতে O/I সংখ্যা না হয়ে যায়)
+            val latinLines = cleanLatinText.split("\n")
+            for (line in latinLines) {
+                val t = line.trim().replace(Regex("^Name[:\\s]*", RegexOption.IGNORE_CASE), "").trim()
+                if (t.matches(Regex("^[A-Z.\\s]{4,}$")) && nameEn.isEmpty() &&
+                    !t.contains("BANGLADESH") && !t.contains("NATIONAL") &&
+                    !t.contains("CARD") && !t.contains("GOVERNMENT") &&
+                    !t.contains("COMMISSION") && !t.contains("REPUBLIC") && !t.contains("IDENTITY")) {
+                    nameEn = t
+                }
+            }
+
+            // বাংলা পিতা ও মাতার নাম খোঁজা
+            val allLines = cleanText.split("\n")
+            for (i in allLines.indices) {
+                val t = allLines[i].trim()
+                if ((t.contains("পিতা") || t.contains("Father", true)) && fatherBn.isEmpty()) {
+                    val extracted = t.replace(Regex("^.*?(পিতা|Father)[\\s:.-]*", RegexOption.IGNORE_CASE), "").trim()
+                    fatherBn = if (extracted.length > 2) extracted else if (i + 1 < allLines.size) allLines[i + 1].trim() else ""
+                } else if ((t.contains("মাতা") || t.contains("Mother", true)) && motherBn.isEmpty()) {
+                    val extracted = t.replace(Regex("^.*?(মাতা|Mother)[\\s:.-]*", RegexOption.IGNORE_CASE), "").trim()
+                    motherBn = if (extracted.length > 2) extracted else if (i + 1 < allLines.size) allLines[i + 1].trim() else ""
+                }
+            }
+
+            runOnUiThread {
+                val safeName = JSONObject.quote(nameEn)
+                val safeFather = JSONObject.quote(fatherBn)
+                val safeMother = JSONObject.quote(motherBn)
+                val safeDob = JSONObject.quote(dobStr)
+                val safeNid = JSONObject.quote(nidNo)
+
+                val jsCall = "if(window.onNIDFrontScanCompleted) { window.onNIDFrontScanCompleted($safeName, $safeFather, $safeMother, $safeDob, $safeNid); }"
+                webView.evaluateJavascript(jsCall, null)
+                Toast.makeText(this, "এনআইডি সামনের অংশ স্ক্যান সম্পন্ন!", Toast.LENGTH_SHORT).show()
+            }
+
+        } else if (currentScanDocType == "nid_back") {
+            var addressBn = ""
+            val lines = cleanText.split("\n")
+            for (line in lines) {
+                val t = line.trim()
+                if (t.contains("বাসা") || t.contains("গ্রাম") ||
+                    t.contains("ডাকঘর") || t.contains("উপজেলা") ||
+                    t.contains("জেলা") || t.contains("ঠিকানা") ||
+                    t.contains("রোড") || t.contains("হোল্ডিং") || t.contains("পৌরসভা") || t.contains("সিটি")) {
+                    addressBn += "$t "
+                }
+            }
+
+            runOnUiThread {
+                val safeAddress = JSONObject.quote(addressBn.trim())
+                val jsCall = "if(window.onNIDBackScanCompleted) { window.onNIDBackScanCompleted($safeAddress); }"
+                webView.evaluateJavascript(jsCall, null)
+                Toast.makeText(this, "এনআইডি পেছনের অংশ স্ক্যান সম্পন্ন!", Toast.LENGTH_SHORT).show()
+            }
+        }
+    }
+
     @Throws(IOException::class)
     private fun createImageFile(): File {
         val timeStamp: String = SimpleDateFormat("yyyyMMdd_HHmmss", Locale.getDefault()).format(Date())
-        val storageDir: File = cacheDir 
+        val storageDir: File = cacheDir
         return File.createTempFile("KYC_${timeStamp}_", ".jpg", storageDir)
     }
 
@@ -800,9 +894,10 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
+    @Deprecated("Deprecated in Java")
     override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
         if (requestCode == GALLERY_QR_REQUEST_CODE) {
-            if (resultCode == Activity.RESULT_OK && data != null && data.data != null) {
+            if (resultCode == Activity.RESULT_OK && data?.data != null) {
                 val imageUri = data.data!!
                 try {
                     val image = InputImage.fromFilePath(this, imageUri)
@@ -828,15 +923,12 @@ class MainActivity : AppCompatActivity() {
             }
         } else if (requestCode == DOCUMENT_SCAN_REQUEST_CODE) {
             if (resultCode == Activity.RESULT_OK) {
-                if (data == null || data.dataString == null) {
-                    if (documentScanImageUri != null) {
-                        processDocumentImageFromUri(documentScanImageUri!!)
-                    }
+                val targetUri: Uri? = if (data?.data != null) {
+                    data.data
                 } else {
-                    data.dataString?.let { uriString ->
-                        processDocumentImageFromUri(Uri.parse(uriString))
-                    }
+                    documentScanImageUri
                 }
+                targetUri?.let { processDocumentImageFromUri(it) }
             }
             documentScanImageUri = null
         } else if (requestCode == FILE_CHOOSER_REQUEST_CODE) {
@@ -844,14 +936,10 @@ class MainActivity : AppCompatActivity() {
             var results: Array<Uri>? = null
 
             if (resultCode == Activity.RESULT_OK) {
-                if (data == null || data.dataString == null) {
-                    if (cameraImageUri != null) {
-                        results = arrayOf(cameraImageUri!!)
-                    }
-                } else {
-                    data.dataString?.let {
-                        results = arrayOf(Uri.parse(it))
-                    }
+                if (data?.data != null) {
+                    results = arrayOf(data.data!!)
+                } else if (cameraImageUri != null) {
+                    results = arrayOf(cameraImageUri!!)
                 }
             }
             filePathCallback?.onReceiveValue(results)
@@ -878,7 +966,6 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    @Suppress("DEPRECATION")
     private fun clearAppSessionKeepSmartId() {
         try {
             val cookieManager = CookieManager.getInstance()
@@ -895,7 +982,7 @@ class MainActivity : AppCompatActivity() {
                 }
                 cookieManager.removeSessionCookies(null)
                 if (smartIdValue.isNotEmpty()) {
-                    cookieManager.setCookie("https://bdrsf.com/", smartIdValue)
+                    cookieManager.setCookie("https://bdrsf.com/", "$smartIdValue; Path=/; Secure")
                 }
                 cookieManager.flush()
             }
@@ -906,8 +993,15 @@ class MainActivity : AppCompatActivity() {
 
     override fun onDestroy() {
         super.onDestroy()
-        if (::cameraExecutor.isInitialized) {
-            cameraExecutor.shutdown()
+        try {
+            barcodeScanner.close()
+            latinTextRecognizer.close()
+            banglaTextRecognizer.close()
+            if (::cameraExecutor.isInitialized) {
+                cameraExecutor.shutdown()
+            }
+        } catch (e: Exception) {
+            e.printStackTrace()
         }
     }
 
@@ -923,9 +1017,6 @@ class MainActivity : AppCompatActivity() {
                 window.decorView.systemUiVisibility = (
                     View.SYSTEM_UI_FLAG_HIDE_NAVIGATION
                     or View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY
-                    or View.SYSTEM_UI_FLAG_LAYOUT_STABLE
-                    or View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN
-                    or View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION
                 )
             }
         } catch (e: Exception) {
