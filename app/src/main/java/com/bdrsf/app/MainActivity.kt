@@ -63,10 +63,14 @@ import androidx.exifinterface.media.ExifInterface
 import com.google.mlkit.vision.barcode.BarcodeScanner
 import com.google.mlkit.vision.barcode.BarcodeScanning
 import com.google.mlkit.vision.common.InputImage
-import com.google.mlkit.vision.text.TextRecognition
-import com.google.mlkit.vision.text.TextRecognizer
-import com.google.mlkit.vision.text.devanagari.DevanagariTextRecognizerOptions
-import com.google.mlkit.vision.text.latin.TextRecognizerOptions
+import okhttp3.Call
+import okhttp3.Callback
+import okhttp3.MediaType.Companion.toMediaTypeOrNull
+import okhttp3.MultipartBody
+import okhttp3.OkHttpClient
+import okhttp3.Request
+import okhttp3.RequestBody.Companion.asRequestBody
+import okhttp3.Response
 import org.json.JSONObject
 import java.io.ByteArrayOutputStream
 import java.io.File
@@ -77,6 +81,7 @@ import java.util.Date
 import java.util.Locale
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
+import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 
 class MainActivity : AppCompatActivity() {
@@ -109,17 +114,18 @@ class MainActivity : AppCompatActivity() {
     private val GALLERY_QR_REQUEST_CODE = 1004
     private val DOCUMENT_SCAN_REQUEST_CODE = 1005
 
+    // শুধুমাত্র বারকোড স্ক্যানার রাখা হয়েছে, অফলাইন টেক্সট স্ক্যানার (TextRecognizer) মুছে ফেলা হয়েছে
     private val barcodeScanner: BarcodeScanner by lazy { BarcodeScanning.getClient() }
-    private val latinTextRecognizer: TextRecognizer by lazy {
-        TextRecognition.getClient(TextRecognizerOptions.DEFAULT_OPTIONS)
-    }
-    private val banglaTextRecognizer: TextRecognizer by lazy {
-        TextRecognition.getClient(DevanagariTextRecognizerOptions.Builder().build())
-    }
+
+    // API কল করার জন্য OkHttpClient
+    private val okHttpClient = OkHttpClient.Builder()
+        .connectTimeout(60, TimeUnit.SECONDS)
+        .writeTimeout(60, TimeUnit.SECONDS)
+        .readTimeout(60, TimeUnit.SECONDS)
+        .build()
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-
         supportActionBar?.hide()
         requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_PORTRAIT
 
@@ -264,7 +270,6 @@ class MainActivity : AppCompatActivity() {
             override fun onPermissionRequest(request: PermissionRequest?) {
                 request?.let { runOnUiThread { it.grant(it.resources) } }
             }
-
             override fun onGeolocationPermissionsShowPrompt(origin: String?, callback: GeolocationPermissions.Callback?) {
                 val hasLocationPermission = ContextCompat.checkSelfPermission(
                     this@MainActivity,
@@ -272,13 +277,10 @@ class MainActivity : AppCompatActivity() {
                 ) == PackageManager.PERMISSION_GRANTED
                 callback?.invoke(origin, hasLocationPermission, false)
             }
-
             override fun onShowFileChooser(webView: WebView?, callback: ValueCallback<Array<Uri>>?, fileChooserParams: FileChooserParams?): Boolean {
                 filePathCallback?.onReceiveValue(null)
                 filePathCallback = callback
-
                 if (!hasCameraPermission()) requestAllRequiredPermissions()
-
                 try {
                     val contentSelectionIntent = Intent(Intent.ACTION_GET_CONTENT).apply {
                         addCategory(Intent.CATEGORY_OPENABLE)
@@ -294,7 +296,6 @@ class MainActivity : AppCompatActivity() {
                             arrayOf(captureIntent)
                         } else emptyArray()
                     } else emptyArray()
-
                     val chooserIntent = Intent(Intent.ACTION_CHOOSER).apply {
                         putExtra(Intent.EXTRA_INTENT, contentSelectionIntent)
                         putExtra(Intent.EXTRA_TITLE, "ফাইল বা ছবি সিলেক্ট করুন")
@@ -316,18 +317,15 @@ class MainActivity : AppCompatActivity() {
                 super.onPageStarted(view, url, favicon)
                 if (isFirstPageLoad) splashLayout.visibility = View.VISIBLE
             }
-
             override fun shouldOverrideUrlLoading(view: WebView?, request: WebResourceRequest?): Boolean {
                 val url = request?.url?.toString() ?: return false
                 return handleUrlLoading(view, url)
             }
-
             @Deprecated("Deprecated in Java")
             override fun shouldOverrideUrlLoading(view: WebView?, url: String?): Boolean {
                 if (url == null) return false
                 return handleUrlLoading(view, url)
             }
-
             private fun handleUrlLoading(view: WebView?, url: String): Boolean {
                 try {
                     val uri = Uri.parse(url)
@@ -349,12 +347,9 @@ class MainActivity : AppCompatActivity() {
                         view?.context?.startActivity(intent)
                         true
                     }
-                } catch (e: Exception) {
-                    e.printStackTrace()
-                }
+                } catch (e: Exception) { e.printStackTrace() }
                 return false
             }
-
             override fun onPageFinished(view: WebView?, url: String?) {
                 super.onPageFinished(view, url)
                 CookieManager.getInstance().flush()
@@ -366,7 +361,6 @@ class MainActivity : AppCompatActivity() {
                 }
             }
         }
-
         webView.loadUrl("https://bdrsf.com/")
     }
 
@@ -375,15 +369,6 @@ class MainActivity : AppCompatActivity() {
         fun startNativeMLKitScanner() {
             activity.runOnUiThread { activity.startLiveCameraScanner() }
         }
-
-        @JavascriptInterface
-        fun startNativeDocumentScan(docType: String) {
-            activity.runOnUiThread {
-                activity.currentScanDocType = docType
-                activity.openImagePickerForDocumentScan()
-            }
-        }
-
         @JavascriptInterface
         fun pickDocumentImage(slot: String, mode: String) {
             activity.runOnUiThread {
@@ -395,22 +380,14 @@ class MainActivity : AppCompatActivity() {
                 }
             }
         }
-
         @JavascriptInterface
         fun triggerFullDocumentProcessing(docType: String) {
-            activity.runOnUiThread { activity.processSavedDocuments(docType) }
+            activity.runOnUiThread { activity.processSavedDocumentsHybrid(docType) }
         }
-
-        @JavascriptInterface
-        fun triggerDocumentScan(docType: String) {
-            activity.runOnUiThread { activity.processSavedDocuments(docType) }
-        }
-
         @JavascriptInterface
         fun startNativeGalleryPicker() {
             activity.runOnUiThread { activity.openGalleryForQR() }
         }
-
         @JavascriptInterface
         fun saveBase64Image(base64Data: String, fileName: String) {
             activity.runOnUiThread {
@@ -438,7 +415,6 @@ class MainActivity : AppCompatActivity() {
                 }
             }
         }
-
         @JavascriptInterface
         fun shareBase64Image(base64Data: String, fileName: String) {
             activity.runOnUiThread {
@@ -506,32 +482,6 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    private fun openImagePickerForDocumentScan() {
-        if (!hasCameraPermission()) { requestAllRequiredPermissions(); return }
-        try {
-            val contentSelectionIntent = Intent(Intent.ACTION_GET_CONTENT).apply {
-                addCategory(Intent.CATEGORY_OPENABLE)
-                type = "image/*"
-            }
-            val captureIntent = Intent(MediaStore.ACTION_IMAGE_CAPTURE)
-            val photoFile: File? = try { createImageFile() } catch (ex: IOException) { null }
-            if (photoFile != null) {
-                tempDocumentFile = photoFile
-                tempDocumentUri = FileProvider.getUriForFile(this, "${packageName}.fileprovider", photoFile)
-                captureIntent.putExtra(MediaStore.EXTRA_OUTPUT, tempDocumentUri)
-            }
-            val chooserIntent = Intent(Intent.ACTION_CHOOSER).apply {
-                putExtra(Intent.EXTRA_INTENT, contentSelectionIntent)
-                putExtra(Intent.EXTRA_TITLE, "ছবি নির্বাচন করুন")
-                if (photoFile != null) putExtra(Intent.EXTRA_INITIAL_INTENTS, arrayOf(captureIntent))
-            }
-            @Suppress("DEPRECATION")
-            startActivityForResult(chooserIntent, DOCUMENT_SCAN_REQUEST_CODE)
-        } catch (e: Exception) {
-            Toast.makeText(this, "ইমেজ সিলেক্টর ওপেন করা যাচ্ছে না", Toast.LENGTH_SHORT).show()
-        }
-    }
-
     private fun startLiveCameraScanner() {
         if (!hasCameraPermission()) { requestAllRequiredPermissions(); return }
         if (isScanningActive) return
@@ -564,9 +514,7 @@ class MainActivity : AppCompatActivity() {
             try {
                 cameraProvider = cameraProviderFuture.get()
                 bindCameraUseCases()
-            } catch (e: Exception) {
-                stopLiveCameraScanner()
-            }
+            } catch (e: Exception) { stopLiveCameraScanner() }
         }, ContextCompat.getMainExecutor(this))
     }
 
@@ -598,9 +546,7 @@ class MainActivity : AppCompatActivity() {
         try {
             cameraProvider.unbindAll()
             cameraProvider.bindToLifecycle(this, CameraSelector.DEFAULT_BACK_CAMERA, preview, imageAnalysis)
-        } catch (exc: Exception) {
-            stopLiveCameraScanner()
-        }
+        } catch (exc: Exception) { stopLiveCameraScanner() }
     }
 
     private fun clientUiCallbackQR(scannedValue: String) {
@@ -638,18 +584,7 @@ class MainActivity : AppCompatActivity() {
         } catch (e: Exception) { e.printStackTrace() }
     }
 
-    private fun convertBanglaDigitsOnly(input: String): String {
-        val banglaDigits = charArrayOf('০', '১', '২', '৩', '৪', '৫', '৬', '৭', '৮', '৯')
-        val englishDigits = charArrayOf('0', '1', '2', '3', '4', '5', '6', '7', '8', '9')
-        var result = input
-        for (i in banglaDigits.indices) result = result.replace(banglaDigits[i], englishDigits[i])
-        return result
-    }
-
-    private fun normalizeForIdNumberSearch(input: String): String {
-        return convertBanglaDigitsOnly(input).replace('O', '0').replace('o', '0').replace('I', '1').replace('l', '1')
-    }
-
+    // মুখমণ্ডল (Face) কেটে বের করার ফাংশন
     private fun extractFacePhotoBase64(file: File): String {
         try {
             if (!file.exists() || file.length() == 0L) return ""
@@ -684,7 +619,6 @@ class MainActivity : AppCompatActivity() {
                     }
                 }
             } catch (e: Exception) { e.printStackTrace() }
-
             try {
                 val x = (bitmap.width * 0.03).toInt()
                 val y = (bitmap.height * 0.20).toInt()
@@ -699,83 +633,41 @@ class MainActivity : AppCompatActivity() {
         return ""
     }
 
+    // বারকোড থেকে সরাসরি ডাটা বের করার লজিক (অফলাইন)
     private fun parseNidBarcodeData(barcodeData: String): Map<String, String> {
         val result = mutableMapOf<String, String>()
         if (barcodeData.isEmpty()) return result
-
         val pinMatch = Regex("<pin>\\s*([0-9]{10,17})\\s*</pin>", RegexOption.IGNORE_CASE).find(barcodeData)
             ?: Regex("\\b([0-9]{10}|[0-9]{13}|[0-9]{17})\\b").find(barcodeData)
         pinMatch?.groupValues?.getOrNull(1)?.let { result["nid"] = it }
-
         val nameMatch = Regex("<name>\\s*([^<]+)\\s*</name>", RegexOption.IGNORE_CASE).find(barcodeData)
         nameMatch?.groupValues?.getOrNull(1)?.let { result["name"] = it.trim() }
-
         val nameBnMatch = Regex("<(nameBn|name_bn|banglaName)>\\s*([^<]+)\\s*<", RegexOption.IGNORE_CASE).find(barcodeData)
         nameBnMatch?.groupValues?.getOrNull(2)?.let { result["name_bn"] = it.trim() }
-
         val dobMatch = Regex("<DOB>\\s*([^<]+)\\s*</DOB>", RegexOption.IGNORE_CASE).find(barcodeData)
         dobMatch?.groupValues?.getOrNull(1)?.let { result["dob"] = it.trim() }
-
         val fatherMatch = Regex("<(father|fname|fatherName|father_name)>\\s*([^<]+)\\s*<", RegexOption.IGNORE_CASE).find(barcodeData)
         fatherMatch?.groupValues?.getOrNull(2)?.let { result["father"] = it.trim() }
-
         val motherMatch = Regex("<(mother|mname|motherName|mother_name)>\\s*([^<]+)\\s*<", RegexOption.IGNORE_CASE).find(barcodeData)
         motherMatch?.groupValues?.getOrNull(2)?.let { result["mother"] = it.trim() }
-
-        val addressMatch = Regex("<(address|addr|permanentAddress)>\\s*([^<]+)\\s*<", RegexOption.IGNORE_CASE).find(barcodeData)
-        addressMatch?.groupValues?.getOrNull(2)?.let { result["address"] = it.trim() }
-
         return result
     }
 
-    private fun processSavedDocuments(docType: String) {
+    // =======================================================================
+    // হাইব্রিড স্ক্যানিং প্রসেস (অফলাইন বারকোড + অনলাইন সার্ভার এপিআই)
+    // =======================================================================
+    private fun processSavedDocumentsHybrid(docType: String) {
         if (frontDocFile == null || !frontDocFile!!.exists()) {
             Toast.makeText(this, "সামনের অংশের ছবি পাওয়া যায়নি", Toast.LENGTH_SHORT).show()
             webView.evaluateJavascript("if(window.onScanFailed) { window.onScanFailed('সামনের অংশের ছবি পাওয়া যায়নি'); }", null)
             return
         }
 
-        try {
-            val frontImage = InputImage.fromFilePath(this, Uri.fromFile(frontDocFile))
-            val facePhotoBase64 = extractFacePhotoBase64(frontDocFile!!)
+        val facePhotoBase64 = extractFacePhotoBase64(frontDocFile!!)
 
-            if (docType.equals("passport", ignoreCase = true)) {
-                latinTextRecognizer.process(frontImage)
-                    .addOnSuccessListener { parseAndDispatchPassport(it.text, facePhotoBase64) }
-                    .addOnFailureListener {
-                        webView.evaluateJavascript("if(window.onScanFailed) { window.onScanFailed('পাসপোর্ট রিড করা যায়নি'); }", null)
-                    }
-            } else {
-                latinTextRecognizer.process(frontImage)
-                    .addOnSuccessListener { latinFrontResult ->
-                        val frontLatinText = latinFrontResult.text
-
-                        banglaTextRecognizer.process(frontImage)
-                            .addOnSuccessListener { devanagariFrontResult ->
-                                val combinedFrontText = "$frontLatinText\n${devanagariFrontResult.text}"
-                                processBackPartAndDispatch(combinedFrontText, frontLatinText, facePhotoBase64)
-                            }
-                            .addOnFailureListener {
-                                processBackPartAndDispatch(frontLatinText, frontLatinText, facePhotoBase64)
-                            }
-                    }
-                    .addOnFailureListener {
-                        webView.evaluateJavascript("if(window.onScanFailed) { window.onScanFailed('এনআইডি কার্ডের লেখা রিড করা যায়নি'); }", null)
-                    }
-            }
-        } catch (e: Exception) {
-            webView.evaluateJavascript("if(window.onScanFailed) { window.onScanFailed('ডকুমেন্ট প্রসেস করতে সমস্যা হয়েছে'); }", null)
-        }
-    }
-
-    private fun processBackPartAndDispatch(
-        combinedFrontText: String,
-        latinFrontText: String,
-        facePhotoBase64: String
-    ) {
-        if (backDocFile != null && backDocFile!!.exists()) {
+        // পেছনের অংশের অফলাইন বারকোড রিড করা
+        if (docType.equals("NID", ignoreCase = true) && backDocFile != null && backDocFile!!.exists()) {
             val backImage = InputImage.fromFilePath(this, Uri.fromFile(backDocFile))
-
             barcodeScanner.process(backImage)
                 .addOnSuccessListener { barcodes ->
                     var barcodeRawUtf8 = ""
@@ -783,279 +675,113 @@ class MainActivity : AppCompatActivity() {
                         val decoded = b.rawBytes?.let { bytes ->
                             try { String(bytes, Charsets.UTF_8) } catch (e: Exception) { b.rawValue ?: "" }
                         } ?: (b.rawValue ?: "")
-
                         if (decoded.isNotEmpty()) barcodeRawUtf8 += "$decoded\n"
                     }
-
-                    latinTextRecognizer.process(backImage)
-                        .addOnSuccessListener { backTextResult ->
-                            banglaTextRecognizer.process(backImage)
-                                .addOnSuccessListener { backDevaResult ->
-                                    val combinedBack = "${backTextResult.text}\n${backDevaResult.text}"
-                                    parseAndDispatchNID(combinedFrontText, latinFrontText, combinedBack, barcodeRawUtf8, facePhotoBase64)
-                                }
-                                .addOnFailureListener {
-                                    parseAndDispatchNID(combinedFrontText, latinFrontText, backTextResult.text, barcodeRawUtf8, facePhotoBase64)
-                                }
-                        }
-                        .addOnFailureListener {
-                            parseAndDispatchNID(combinedFrontText, latinFrontText, "", barcodeRawUtf8, facePhotoBase64)
-                        }
+                    val barcodeMap = parseNidBarcodeData(barcodeRawUtf8)
+                    sendImageToServerForOCR(frontDocFile!!, backDocFile, facePhotoBase64, barcodeMap, barcodeRawUtf8)
                 }
                 .addOnFailureListener {
-                    latinTextRecognizer.process(backImage)
-                        .addOnSuccessListener { backResult ->
-                            banglaTextRecognizer.process(backImage)
-                                .addOnSuccessListener { backDevaResult ->
-                                    val combinedBack = "${backResult.text}\n${backDevaResult.text}"
-                                    parseAndDispatchNID(combinedFrontText, latinFrontText, combinedBack, "", facePhotoBase64)
-                                }
-                                .addOnFailureListener {
-                                    parseAndDispatchNID(combinedFrontText, latinFrontText, backResult.text, "", facePhotoBase64)
-                                }
-                        }
-                        .addOnFailureListener {
-                            parseAndDispatchNID(combinedFrontText, latinFrontText, "", "", facePhotoBase64)
-                        }
+                    // বারকোড ফেইল হলেও সার্ভারে পাঠানো হবে
+                    sendImageToServerForOCR(frontDocFile!!, backDocFile, facePhotoBase64, emptyMap(), "")
                 }
         } else {
-            parseAndDispatchNID(combinedFrontText, latinFrontText, "", "", facePhotoBase64)
+            sendImageToServerForOCR(frontDocFile!!, backDocFile, facePhotoBase64, emptyMap(), "")
         }
     }
 
-    private fun parseAndDispatchNID(
-        rawFrontText: String,
-        latinFrontText: String,
-        rawBackText: String,
-        barcodeRaw: String,
-        facePhotoBase64: String
-    ) {
-        // --- OCR এর ভুল অক্ষর (যেমন: কোলনের পরে ভ বা ম আসা) মুছে পরিষ্কার করা ---
-        val artifactRegex = Regex("(?<=(নাম|Name|পিতা|Father|মাতা|মা তা|Mother|ঠিকানা|বাসা/হোল্ডিং|বাসা|হোল্ডিং|গ্রাম/রাস্তা|গ্রাম|রাস্তা|ডাকঘর|উপজেলা|জেলা))\\s*[:;\\-]?\\s*[ভম]\\s*")
-        val fixedFrontText = rawFrontText.replace(artifactRegex, ": ")
-        val fixedBackText = rawBackText.replace(artifactRegex, ": ")
+    // সার্ভারে (ocr_scan.js) ছবি পাঠানোর ফাংশন
+    private fun sendImageToServerForOCR(frontFile: File, backFile: File?, faceBase64: String, barcodeMap: Map<String, String>, barcodeRawText: String) {
+        val requestBodyBuilder = MultipartBody.Builder()
+            .setType(MultipartBody.FORM)
+            .addFormDataPart("action", "scan_document")
+            .addFormDataPart("document_image", frontFile.name, frontFile.asRequestBody("image/*".toMediaTypeOrNull()))
 
-        val cleanFront = convertBanglaDigitsOnly(fixedFrontText)
-        val numericFront = normalizeForIdNumberSearch(cleanFront)
-        val barcodeMap = parseNidBarcodeData(barcodeRaw)
-
-        // ১. জেনুইন এনআইডি কার্ড যাচাই
-        val upperFront = fixedFrontText.uppercase()
-        val hasGovtKeywords = upperFront.contains("BANGLADESH") ||
-                upperFront.contains("GOVERNMENT") ||
-                upperFront.contains("REPUBLIC") ||
-                upperFront.contains("NATIONAL ID") ||
-                upperFront.contains("ELECTION") ||
-                cleanFront.contains("জাতীয় পরিচয়পত্র") ||
-                cleanFront.contains("জাতীয় পরিচয়পত্র")
-
-        val hasValidBarcode = barcodeRaw.isNotEmpty() && (barcodeRaw.contains("<pin>", true) || barcodeMap.containsKey("nid") || barcodeRaw.length > 25)
-
-        // ২. এনআইডি নম্বর ডিটেকশন (OCR)
-        var ocrNidNo = ""
-        val lines = numericFront.split("\n")
-        for (line in lines) {
-            val onlyDigits = line.filter { it.isDigit() }
-            if (onlyDigits.length == 10 || onlyDigits.length == 13 || onlyDigits.length == 17) {
-                ocrNidNo = onlyDigits
-                break
-            }
+        if (backFile != null && backFile.exists()) {
+            requestBodyBuilder.addFormDataPart("back_image", backFile.name, backFile.asRequestBody("image/*".toMediaTypeOrNull()))
         }
-        if (ocrNidNo.isEmpty()) {
-            val compact = numericFront.replace(Regex("(?<=\\d)[\\s-]+(?=\\d)"), "")
-            ocrNidNo = Regex("\\b(?:[0-9]{10}|[0-9]{13}|[0-9]{17})\\b").find(compact)?.value ?: ""
-        }
-        
-        val barcodeNid = barcodeMap["nid"] ?: ""
-        val hasDobSignature = cleanFront.contains("Birth", true) || cleanFront.contains("DOB", true) || barcodeMap.containsKey("dob")
 
-        if (!hasGovtKeywords && !hasValidBarcode && (ocrNidNo.isEmpty() || !hasDobSignature)) {
-            runOnUiThread {
-                webView.evaluateJavascript("if(window.onScanFailed) { window.onScanFailed('এটি কোনো বৈধ এনআইডি কার্ড নয়! আসল কার্ডের ছবি দিন।'); }", null)
-                Toast.makeText(this, "অবৈধ এনআইডি ডকুমেন্ট!", Toast.LENGTH_LONG).show()
-            }
-            return
-        }
-        
-        // ==========================================
-        // CROSS-MATCH LOGIC (ফ্রন্ট ও ব্যাক পার্ট মিলানো)
-        // ==========================================
-        var dobStr = ""
-        val dobRegex = Regex("([0-9]{1,2}[\\s-/\\.]+(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec|[0-9]{2})[a-zA-Z]*[\\s-/\\.]+[0-9]{4})", RegexOption.IGNORE_CASE)
-        val ocrDob = dobRegex.find(cleanFront)?.value?.trim() ?: ""
-        val barcodeDob = barcodeMap["dob"] ?: ""
-        
-        if (ocrNidNo.isNotEmpty() && barcodeNid.isNotEmpty()) {
-            // যদি এনআইডি নম্বর না মিলে এবং একটি আরেকটির অংশ না হয়
-            if (ocrNidNo != barcodeNid && !ocrNidNo.contains(barcodeNid) && !barcodeNid.contains(ocrNidNo)) {
-                // OCR ভুল হতে পারে, তাই জন্মতারিখও মিলিয়ে দেখা (দুটিই ভুল হলে কার্ড ফেক বা ভিন্ন)
-                if (barcodeDob.isNotEmpty() && ocrDob.isNotEmpty() && barcodeDob != ocrDob) {
-                    runOnUiThread {
-                        webView.evaluateJavascript("if(window.onScanFailed) { window.onScanFailed('ক্রস-ম্যাচ ফেইল! সামনের এবং পেছনের অংশ একই এনআইডি কার্ডের নয়। সঠিক কার্ড দিন।'); }", null)
-                    }
-                    return
+        val request = Request.Builder()
+            .url("https://bdrsf.com/api/ocr_scan")
+            .post(requestBodyBuilder.build())
+            .build()
+
+        okHttpClient.newCall(request).enqueue(object : Callback {
+            override fun onFailure(call: Call, e: IOException) {
+                runOnUiThread {
+                    webView.evaluateJavascript("if(window.onScanFailed) { window.onScanFailed('সার্ভার কানেকশন ব্যর্থ হয়েছে।'); }", null)
                 }
             }
-        }
-        // চূড়ান্ত এনআইডি এবং জন্মতারিখ (বারকোডের ডাটা বেশি নিখুঁত তাই সেটিকে অগ্রাধিকার দেওয়া হলো)
-        val finalNidNo = if (barcodeNid.isNotEmpty()) barcodeNid else ocrNidNo
-        dobStr = if (barcodeDob.isNotEmpty()) barcodeDob else ocrDob
 
-        // ৪. ইংরেজি পূর্ণ নাম
-        var nameEn = barcodeMap["name"] ?: ""
-        if (nameEn.isEmpty()) {
-            val rawLines = latinFrontText.split("\n").map { it.trim() }.filter { it.isNotEmpty() }
-            for (i in rawLines.indices) {
-                val line = rawLines[i]
-                val nameRegex = Regex("""(?i)\b(?:Name|Namc|Narme|Nane|Nam)\b[\s:.-]*(.*)""")
-                val match = nameRegex.find(line)
-                if (match != null) {
-                    val candidate = match.groupValues[1].replace(Regex("[^A-Za-z.\\s-]"), " ").trim()
-                    if (candidate.length >= 3) {
-                        nameEn = candidate.uppercase()
-                        break
-                    } else if (i + 1 < rawLines.size) {
-                        val nextCandidate = rawLines[i + 1].replace(Regex("[^A-Za-z.\\s-]"), " ").trim()
-                        if (nextCandidate.length >= 3 && !nextCandidate.contains("Date", true) && !nextCandidate.contains("Birth", true)) {
-                            nameEn = nextCandidate.uppercase()
-                            break
+            override fun onResponse(call: Call, response: Response) {
+                val responseBody = response.body?.string()
+                if (response.isSuccessful && responseBody != null) {
+                    try {
+                        val json = JSONObject(responseBody)
+                        if (json.optString("status") == "success") {
+                            val data = json.getJSONObject("data")
+                            val rawBackText = json.optString("raw_back_text", "")
+                            
+                            // Cross-Matching & Injection
+                            handleServerResponse(data, rawBackText, barcodeMap, barcodeRawText, faceBase64)
+                        } else {
+                            val msg = json.optString("message", "স্ক্যান ব্যর্থ হয়েছে।")
+                            runOnUiThread { webView.evaluateJavascript("if(window.onScanFailed) { window.onScanFailed('$msg'); }", null) }
                         }
+                    } catch (e: Exception) {
+                        runOnUiThread { webView.evaluateJavascript("if(window.onScanFailed) { window.onScanFailed('সার্ভার থেকে সঠিক তথ্য পাওয়া যায়নি।'); }", null) }
                     }
+                } else {
+                    runOnUiThread { webView.evaluateJavascript("if(window.onScanFailed) { window.onScanFailed('সার্ভার এরর 발생।'); }", null) }
                 }
             }
-            if (nameEn.isEmpty()) {
-                for (line in rawLines) {
-                    val cleanCandidate = line.replace(Regex("[^A-Za-z.\\s-]"), "").trim()
-                    val upper = cleanCandidate.uppercase()
-                    if (cleanCandidate.length >= 4 && cleanCandidate.split(" ").size >= 2 &&
-                        !upper.contains("BANGLADESH") && !upper.contains("GOVERNMENT") &&
-                        !upper.contains("REPUBLIC") && !upper.contains("NATIONAL") &&
-                        !upper.contains("IDENTITY") && !upper.contains("CARD") &&
-                        !upper.contains("ELECTION") && !upper.contains("COMMISSION") &&
-                        !upper.contains("DATE") && !upper.contains("BIRTH")) {
-                        nameEn = upper
-                        break
-                    }
+        })
+    }
+
+    // সার্ভারের ডাটা ও বারকোড ডাটা মিলিয়ে ফ্রেমে ইনজেক্ট করা
+    private fun handleServerResponse(ocrData: JSONObject, rawBackText: String, barcodeMap: Map<String, String>, barcodeRaw: String, faceBase64: String) {
+        // বারকোডকে সবসময় বেশি অগ্রাধিকার দেওয়া হবে
+        val finalNidNo = barcodeMap["nid"]?.takeIf { it.isNotEmpty() } ?: ocrData.optString("nidNo", "")
+        val finalDob = barcodeMap["dob"]?.takeIf { it.isNotEmpty() } ?: ocrData.optString("dob", "")
+        var finalNameEn = barcodeMap["name"]?.takeIf { it.isNotEmpty() } ?: ocrData.optString("nameEn", "")
+        val finalNameBn = barcodeMap["name_bn"]?.takeIf { it.isNotEmpty() } ?: ocrData.optString("nameBn", "")
+        val fatherName = barcodeMap["father"]?.takeIf { it.isNotEmpty() } ?: ocrData.optString("fatherName", "")
+        val motherName = barcodeMap["mother"]?.takeIf { it.isNotEmpty() } ?: ocrData.optString("motherName", "")
+
+        val ocrNid = ocrData.optString("nidNo", "")
+        
+        // ক্রস-ম্যাচ ভেরিফিকেশন (Cross-Match)
+        if (ocrNid.isNotEmpty() && barcodeMap["nid"]?.isNotEmpty() == true) {
+            if (ocrNid != barcodeMap["nid"] && !ocrNid.contains(barcodeMap["nid"]!!) && !barcodeMap["nid"]!!.contains(ocrNid)) {
+                runOnUiThread {
+                    webView.evaluateJavascript("if(window.onScanFailed) { window.onScanFailed('ক্রস-ম্যাচ ফেইল! সামনের এবং পেছনের অংশ একই কার্ডের নয়।'); }", null)
                 }
+                return
             }
         }
 
-        // ৫. পিতা ও মাতার নাম এবং বাংলা নাম
-        var nameBn = barcodeMap["name_bn"] ?: ""
-        var fatherName = barcodeMap["father"] ?: ""
-        var motherName = barcodeMap["mother"] ?: ""
-        var fatherLineIdx = -1
+        val displayName = if (finalNameEn.isNotEmpty()) finalNameEn else finalNameBn
 
-        val allFrontLines = cleanFront.split("\n").map { it.trim() }
-
-        for (i in allFrontLines.indices) {
-            val t = allFrontLines[i]
-            
-            // পিতার নাম
-            if ((t.contains("পিতা") || t.contains("Father", true)) && fatherName.isEmpty()) {
-                val extracted = t.replace(Regex("^.*?(পিতা|Father's Name|Father)[\\s:.-]*", RegexOption.IGNORE_CASE), "").trim()
-                if (extracted.length > 2) {
-                    fatherName = extracted
-                    fatherLineIdx = i
-                } else if (i + 1 < allFrontLines.size) {
-                    val next = allFrontLines[i + 1].trim()
-                    if (!next.contains("মাতা") && !next.contains("Mother", true) && !next.contains("Date", true)) {
-                        fatherName = next
-                        fatherLineIdx = i + 1
-                    }
-                }
-            }
-            
-            // মাতার নাম (সরাসরি লাইনে পেলে)
-            if ((t.contains("মাতা") || t.contains("Mother", true) || t.contains("মা তা")) && motherName.isEmpty()) {
-                val extracted = t.replace(Regex("^.*?(মাতা|Mother's Name|Mother|মা তা)[\\s:.-]*", RegexOption.IGNORE_CASE), "").trim()
-                if (extracted.length > 2 && !extracted.contains("Date", true)) {
-                    motherName = extracted
-                } else if (i + 1 < allFrontLines.size) {
-                    val next = allFrontLines[i + 1].trim()
-                    if (!next.contains("Date", true) && !next.contains("Birth", true) && next.length >= 2) {
-                        motherName = next
-                    }
-                }
-            }
-
-            // বাংলা নাম
-            if ((t.contains("নাম") || t.contains("Name", true)) && nameBn.isEmpty()) {
-                val extracted = t.replace(Regex("^.*?(নাম|Name)[\\s:.-]*", RegexOption.IGNORE_CASE), "").trim()
-                if (extracted.any { it in '\u0980'..'\u09FF' }) {
-                    nameBn = extracted
-                }
-            }
-        }
-
-        // মাতার নামের শক্তিশালী ফলব্যাক (পিতার নামের নিচের লাইন থেকে নেওয়া)
-        if (motherName.isEmpty() && fatherLineIdx != -1 && fatherLineIdx + 1 < allFrontLines.size) {
-            val nextLine = allFrontLines[fatherLineIdx + 1]
-            if (!nextLine.contains("Date", true) && !nextLine.contains("Birth", true) && nextLine.length > 2) {
-                motherName = nextLine.replace(Regex("^.*?(মাতা|Mother's Name|Mother|মা তা)[\\s:.-]*", RegexOption.IGNORE_CASE), "").trim()
-            }
-        }
-
-        if (motherName == fatherName) motherName = ""
-        val displayName = if (nameEn.isNotEmpty()) nameEn else nameBn
-
-        // ৬. ব্যাকপার্টের সম্পূর্ণ কাঁচা টেক্সট সরাসরি ওয়েবসাইটে পাঠানো হবে (পিএইচপিতে পার্স হবে)
         val fullDetailsBuilder = java.lang.StringBuilder()
         if (barcodeRaw.isNotBlank()) {
             fullDetailsBuilder.append("--- BARCODE DATA ---\n").append(barcodeRaw.trim()).append("\n\n")
         }
-        fullDetailsBuilder.append("--- BACK DETAILS ---\n").append(fixedBackText.trim())
-        val fullDetails = fullDetailsBuilder.toString().trim()
+        if (rawBackText.isNotBlank()) {
+            val backLines = rawBackText.split("\n").map { it.trim() }.filter { it.isNotBlank() && !it.contains("সম্পত্তি") && !it.contains("অনুরোধ") && !it.contains("Sign", true) }
+            fullDetailsBuilder.append("--- BACK DETAILS ---\n").append(backLines.joinToString("\n"))
+        }
+        val finalDetails = fullDetailsBuilder.toString().trim()
 
         runOnUiThread {
             val safeName = JSONObject.quote(displayName)
             val safeFather = JSONObject.quote(fatherName)
             val safeMother = JSONObject.quote(motherName)
-            val safeDob = JSONObject.quote(dobStr)
+            val safeDob = JSONObject.quote(finalDob)
             val safeNid = JSONObject.quote(finalNidNo)
-            val safeDetails = JSONObject.quote(fullDetails)
-            val safeFace = JSONObject.quote(facePhotoBase64)
+            val safeDetails = JSONObject.quote(finalDetails)
+            val safeFace = JSONObject.quote(faceBase64)
 
             webView.evaluateJavascript("if(window.onFullNIDParsed) { window.onFullNIDParsed($safeName, $safeFather, $safeMother, $safeDob, $safeNid, $safeDetails, $safeFace); }", null)
             Toast.makeText(this, "এনআইডি স্ক্যান সফল হয়েছে!", Toast.LENGTH_SHORT).show()
-        }
-    }
-
-    private fun parseAndDispatchPassport(cleanText: String, facePhotoBase64: String) {
-        var passportNo = ""
-        var nameEn = ""
-
-        val lines = cleanText.split("\n")
-        for (line in lines) {
-            val cleanLine = line.trim().replace(" ", "").uppercase()
-            if (cleanLine.startsWith("P<") && cleanLine.length > 20) {
-                val parts = cleanLine.removePrefix("P<").split("<<")
-                if (parts.isNotEmpty()) {
-                    val surname = parts[0].replace("<", " ").trim()
-                    val givenNames = if (parts.size > 1) parts[1].replace("<", " ").trim() else ""
-                    nameEn = "$givenNames $surname".trim()
-                }
-            }
-        }
-
-        if (passportNo.isEmpty()) {
-            val passportRegex = Regex("\\b[A-Z]{1,2}[0-9]{7,8}\\b")
-            passportNo = passportRegex.find(cleanText)?.value ?: ""
-        }
-
-        val isPassportDoc = cleanText.contains("PASSPORT", true) || cleanText.contains("P<", true)
-
-        runOnUiThread {
-            if (!isPassportDoc || passportNo.isEmpty()) {
-                webView.evaluateJavascript("if(window.onScanFailed) { window.onScanFailed('এটি কোনো বৈধ পাসপোর্ট নয়!'); }", null)
-                return@runOnUiThread
-            }
-            val safeName = JSONObject.quote(nameEn)
-            val safeDocNo = JSONObject.quote(passportNo)
-            val safeFace = JSONObject.quote(facePhotoBase64)
-
-            webView.evaluateJavascript("if(window.onFullPassportParsed) { window.onFullPassportParsed($safeName, $safeDocNo, $safeFace); }", null)
-            Toast.makeText(this, "পাসপোর্ট স্ক্যান সফল!", Toast.LENGTH_SHORT).show()
         }
     }
 
@@ -1191,8 +917,6 @@ class MainActivity : AppCompatActivity() {
         super.onDestroy()
         try {
             barcodeScanner.close()
-            latinTextRecognizer.close()
-            banglaTextRecognizer.close()
             if (::cameraExecutor.isInitialized) cameraExecutor.shutdown()
         } catch (e: Exception) { e.printStackTrace() }
     }
