@@ -11,7 +11,7 @@
     <uses-feature android:name="android.hardware.camera.autofocus" android:required="false" />
 
     <!-- ফাইল ম্যানেজার, গ্যালারি ও ডকুমেন্ট (পিডিএফ, ছবি, ডাউনলোড ও শেয়ার) এক্সেস পারমিশন -->
-    <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE" />
+    <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE" android:maxSdkVersion="32" />
     <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE" android:maxSdkVersion="32" />
     
     <!-- Android 13+ (API 33+) এর জন্য লেটেস্ট মিডিয়া পারমিশন -->
@@ -34,14 +34,15 @@
             android:name=".MainActivity"
             android:exported="true"
             android:screenOrientation="portrait"
-            android:configChanges="screenSize|keyboardHidden|orientation">
+            android:windowSoftInputMode="adjustResize"
+            android:configChanges="screenSize|smallestScreenSize|screenLayout|keyboardHidden|orientation">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
         </activity>
 
-        <!-- ক্যামেরা থেকে ফাইল নিরাপده শেয়ার করার জন্য FileProvider -->
+        <!-- ক্যামেরা থেকে ফাইল নিরাপদে শেয়ার করার জন্য FileProvider -->
         <provider
             android:name="androidx.core.content.FileProvider"
             android:authorities="${applicationId}.fileprovider"
