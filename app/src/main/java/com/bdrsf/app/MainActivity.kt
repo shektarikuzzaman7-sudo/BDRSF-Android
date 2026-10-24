@@ -114,7 +114,7 @@ class MainActivity : AppCompatActivity() {
     private val GALLERY_QR_REQUEST_CODE = 1004
     private val DOCUMENT_SCAN_REQUEST_CODE = 1005
 
-    // শুধুমাত্র বারকোড স্ক্যানার রাখা হয়েছে, অফলাইন টেক্সট স্ক্যানার (TextRecognizer) মুছে ফেলা হয়েছে
+    // বারকোড স্ক্যানার
     private val barcodeScanner: BarcodeScanner by lazy { BarcodeScanning.getClient() }
 
     // API কল করার জন্য OkHttpClient
@@ -708,7 +708,7 @@ class MainActivity : AppCompatActivity() {
         okHttpClient.newCall(request).enqueue(object : Callback {
             override fun onFailure(call: Call, e: IOException) {
                 runOnUiThread {
-                    webView.evaluateJavascript("if(window.onScanFailed) { window.onScanFailed('সার্ভার কানেকশন ব্যর্থ হয়েছে।'); }", null)
+                    webView.evaluateJavascript("if(window.onScanFailed) { window.onScanFailed('সার্ভার কানেকশন ব্যর্থ হয়েছে। ইন্টারনেট চেক করুন।'); }", null)
                 }
             }
 
@@ -719,7 +719,8 @@ class MainActivity : AppCompatActivity() {
                         val json = JSONObject(responseBody)
                         if (json.optString("status") == "success") {
                             val data = json.getJSONObject("data")
-                            val rawBackText = json.optString("raw_back_text", "")
+                            // Note: ocr_scan.js sends "raw_text", not "raw_back_text"
+                            val rawBackText = json.optString("raw_text", "")
                             
                             // Cross-Matching & Injection
                             handleServerResponse(data, rawBackText, barcodeMap, barcodeRawText, faceBase64)
@@ -731,7 +732,8 @@ class MainActivity : AppCompatActivity() {
                         runOnUiThread { webView.evaluateJavascript("if(window.onScanFailed) { window.onScanFailed('সার্ভার থেকে সঠিক তথ্য পাওয়া যায়নি।'); }", null) }
                     }
                 } else {
-                    runOnUiThread { webView.evaluateJavascript("if(window.onScanFailed) { window.onScanFailed('সার্ভার এরর 발생।'); }", null) }
+                    val code = response.code
+                    runOnUiThread { webView.evaluateJavascript("if(window.onScanFailed) { window.onScanFailed('সার্ভার এরর: HTTP $code'); }", null) }
                 }
             }
         })
@@ -781,7 +783,6 @@ class MainActivity : AppCompatActivity() {
             val safeFace = JSONObject.quote(faceBase64)
 
             webView.evaluateJavascript("if(window.onFullNIDParsed) { window.onFullNIDParsed($safeName, $safeFather, $safeMother, $safeDob, $safeNid, $safeDetails, $safeFace); }", null)
-            Toast.makeText(this, "এনআইডি স্ক্যান সফল হয়েছে!", Toast.LENGTH_SHORT).show()
         }
     }
 
@@ -865,8 +866,6 @@ class MainActivity : AppCompatActivity() {
                             webView.evaluateJavascript("if(window.onImageSelectedPreview) { window.onImageSelectedPreview($safeSlot, $safeB64); }", null)
                         }
                     } catch (e: Exception) { e.printStackTrace() }
-
-                    Toast.makeText(this, "ছবি সেট করা হয়েছে", Toast.LENGTH_SHORT).show()
                 }
             }
             tempDocumentFile = null
