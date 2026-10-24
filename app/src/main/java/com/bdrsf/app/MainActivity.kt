@@ -931,9 +931,8 @@ class MainActivity : AppCompatActivity() {
         var fatherName = barcodeMap["father"] ?: ""
         var motherName = barcodeMap["mother"] ?: ""
 
-        val allFrontLines = cleanFront.split("\n").map { it.trim() }.filter { it.isNotEmpty() }
+        val allFrontLines = cleanFront.split("\n").map { it.trim() }
         var fatherLineIdx = -1
-        var motherLineIdx = -1
         var dobLineIdx = -1
 
         for (i in allFrontLines.indices) {
@@ -949,7 +948,7 @@ class MainActivity : AppCompatActivity() {
                     t.contains("Mother", true) || t.contains("মা তা") || t.startsWith("মা:") || t.startsWith("মা :")
 
             if (isFather && fatherName.isEmpty()) {
-                val extracted = t.replace(Regex("""^.*?(পিতা|पिता|Father's Name|Father's|Father)[\s:./-]*""", RegexOption.IGNORE_CASE), "").trim()
+                val extracted = t.replace(Regex("""^.*?(পিতার নাম|পিতা|पिता|Father's Name|Father's|Father)[\s:./-]*""", RegexOption.IGNORE_CASE), "").trim()
                 if (extracted.length >= 2 && !extracted.contains("Date", true)) {
                     fatherName = extracted
                     fatherLineIdx = i
@@ -965,17 +964,13 @@ class MainActivity : AppCompatActivity() {
             }
 
             if (isMother && motherName.isEmpty()) {
-                val extracted = t.replace(Regex("""^.*?(মাতা|माता|मাতা|Mother's Name|Mother's|Mother|মা তা|মা)[\s:./-]*""", RegexOption.IGNORE_CASE), "").trim()
+                val extracted = t.replace(Regex("""^.*?(মাতার নাম|মাতা|माता|मাতা|Mother's Name|Mother's|Mother|মা তা|মা)[\s:./-]*""", RegexOption.IGNORE_CASE), "").trim()
                 if (extracted.length >= 2 && !extracted.contains("Date", true)) {
                     motherName = extracted
-                    motherLineIdx = i
                 } else if (i + 1 < allFrontLines.size) {
                     val next = allFrontLines[i + 1].trim()
                     if (!next.contains("Date", true) && !next.contains("Birth", true) && next.length >= 2) {
                         motherName = next
-                        motherLineIdx = i + 1
-                    } else {
-                        motherLineIdx = i
                     }
                 }
             }
@@ -988,14 +983,13 @@ class MainActivity : AppCompatActivity() {
             }
         }
 
-        // মাতার নামের ফলব্যাক (পিতার নামের নিচের লাইন থেকে নেওয়া, যাতে কখনোই পিতার নাম রিপিট না হয়)
+        // মাতার নামের ফলব্যাক (পিতার নামের নিচের লাইন থেকে নেওয়া)
         if (motherName.isEmpty() && fatherLineIdx != -1) {
             val limit = if (dobLineIdx != -1 && dobLineIdx > fatherLineIdx) dobLineIdx else allFrontLines.size
             for (k in (fatherLineIdx + 1) until limit) {
                 val cand = allFrontLines[k].trim()
-                if (cand == fatherName) continue
-                if (cand.contains("পিতা") || cand.contains("Father", true)) continue
-                val cleaned = cand.replace(Regex("""^.*?(মাতা|माता|मাতা|Mother's Name|Mother's|Mother|মা তা|মা)[\s:./-]*""", RegexOption.IGNORE_CASE), "").trim()
+                if (cand == fatherName || cand.contains("পিতা") || cand.contains("Father", true)) continue
+                val cleaned = cand.replace(Regex("""^.*?(মাতার নাম|মাতা|माता|मাতা|Mother's Name|Mother's|Mother|মা তা|মা)[\s:./-]*""", RegexOption.IGNORE_CASE), "").trim()
                 if (cleaned.length >= 2 && cleaned != fatherName && !cleaned.contains("Date", true) && !cleaned.contains("Birth", true)) {
                     motherName = cleaned
                     break
@@ -1003,115 +997,12 @@ class MainActivity : AppCompatActivity() {
             }
         }
 
-        if (motherName == fatherName) {
-            motherName = ""
-        }
-
-        // ৬. ব্যাকপার্টের প্রতিটি তথ্য আলাদা ও নির্ভুলভাবে পার্সিং
-        val cleanBack = convertBanglaDigitsOnly(backRawText)
-
-        // ক. রক্তের গ্রুপ (Blood Group)
-        var bloodGroup = ""
-        val bgRegex = Regex("""(?i)(?:Blood\s*Group|রক্তের\s*গ্রুপ)[\s:.-]*([ABO][+-]|\bAB[+-]|\b[ABO]\s*\([+-]\)|\bAB\s*\([+-]\))""")
-        val bgMatch = bgRegex.find(backRawText) ?: bgRegex.find(cleanBack)
-        if (bgMatch != null) {
-            bloodGroup = bgMatch.groupValues[1].replace(" ", "").replace("(", "").replace(")", "").uppercase()
-        } else {
-            val standaloneBg = Regex("""\b(A|B|AB|O)\s*([+-]|\([+-]\))""").find(backRawText)
-            if (standaloneBg != null) {
-                bloodGroup = standaloneBg.value.replace(" ", "").replace("(", "").replace(")", "").uppercase()
-            }
-        }
-
-        // খ. জন্মস্থান (Place of Birth)
-        var birthPlace = ""
-        val pobRegex = Regex("""(?i)(?:Place\s*of\s*Birth|জন্মস্থান)[\s:.-]*([A-Za-z\s]+)""")
-        val pobMatch = pobRegex.find(backRawText) ?: pobRegex.find(cleanBack)
-        if (pobMatch != null) {
-            val cand = pobMatch.groupValues[1].trim()
-            if (cand.length >= 2 && !cand.contains("Date", true) && !cand.contains("Issue", true)) {
-                birthPlace = cand.uppercase()
-            }
-        }
-
-        // গ. প্রদানের তারিখ (Issue Date)
-        var issueDate = ""
-        val issueRegex = Regex("""(?i)(?:Issue\s*Date|প্রদানের\s*তারিখ|Date\s*of\s*Issue)[\s:.-]*([0-9]{1,2}[\s-/.A-Za-z]+[0-9]{4})""")
-        val issueMatch = issueRegex.find(cleanBack)
-        if (issueMatch != null) {
-            issueDate = issueMatch.groupValues[1].trim()
-        }
-
-        // ঘ. বাসা/হোল্ডিং
-        var holding = ""
-        val holdingRegex = Regex("""(?i)(?:বাসা/হোল্ডিং|বাসা\s*/\s*হোল্ডিং|হোল্ডিং|বাসা|Holding)[\s:.-]*([^,\n]+)""")
-        holdingRegex.find(cleanBack)?.let { holding = it.groupValues[1].trim() }
-
-        // ঙ. গ্রাম/রাস্তা
-        var village = ""
-        val villageRegex = Regex("""(?i)(?:গ্রাম/রাস্তা|গ্রাম\s*/\s*রাস্তা|গ্রাম|রাস্তা|Village/Road|Village)[\s:.-]*([^,\n]+)""")
-        villageRegex.find(cleanBack)?.let { village = it.groupValues[1].trim() }
-
-        // চ. ডাকঘর ও জিপ কোড (বাংলাটি ডাকঘরে এবং ৪ সংখ্যার ইংরেজি নম্বরটি জিপ কোডে)
-        var postOffice = ""
-        var zipCode = ""
-        val poWithZipRegex = Regex("""(?i)(?:ডাকঘর|Post\s*Office)[\s:.-]*([^,\n0-9-]+)[\s:.-]*([0-9]{4})""")
-        val poWithZipMatch = poWithZipRegex.find(cleanBack)
-
-        if (poWithZipMatch != null) {
-            postOffice = poWithZipMatch.groupValues[1].replace("-", "").trim()
-            zipCode = poWithZipMatch.groupValues[2].trim()
-        } else {
-            val poSoloRegex = Regex("""(?i)(?:ডাকঘর|Post\s*Office)[\s:.-]*([^,\n0-9-]+)""")
-            poSoloRegex.find(cleanBack)?.let { postOffice = it.groupValues[1].replace("-", "").trim() }
-            val zipSoloRegex = Regex("""\b([0-9]{4})\b""")
-            zipSoloRegex.find(cleanBack)?.let { zipCode = it.groupValues[1].trim() }
-        }
-
-        // ছ. নাম্বারের (জিপ কোড) পরের দুটি ঠিকানা থেকে ১ম টি উপজেলা এবং ২য় টি জেলা
-        var upazila = ""
-        var district = ""
-
-        if (zipCode.isNotEmpty() && cleanBack.contains(zipCode)) {
-            val textAfterZip = cleanBack.substringAfter(zipCode).trim()
-            val partsAfterZip = textAfterZip.split(Regex("[,\\n]+"))
-                .map { it.trim() }
-                .filter { it.isNotEmpty() && !it.contains("Blood", true) && !it.contains("রক্তের") &&
-                        !it.contains("Place", true) && !it.contains("জন্মস্থান") &&
-                        !it.contains("Issue", true) && !it.contains("তারিখ") &&
-                        !it.contains("Sign", true) && !it.contains("স্বাক্ষর") &&
-                        it.length > 1 }
-
-            if (partsAfterZip.isNotEmpty()) {
-                upazila = partsAfterZip[0].replace(Regex("^(উপজেলা|থানা|Upazila)[\\s:.-]*", RegexOption.IGNORE_CASE), "").trim()
-            }
-            if (partsAfterZip.size >= 2) {
-                district = partsAfterZip[1].replace(Regex("^(জেলা|District)[\\s:.-]*", RegexOption.IGNORE_CASE), "").trim()
-            }
-        }
-
-        if (upazila.isEmpty()) {
-            val upRegex = Regex("""(?i)(?:উপজেলা|থানা|Upazila)[\s:.-]*([^,\n]+)""")
-            upRegex.find(cleanBack)?.let { upazila = it.groupValues[1].trim() }
-        }
-        if (district.isEmpty()) {
-            val distRegex = Regex("""(?i)(?:জেলা|District)[\s:.-]*([^,\n]+)""")
-            distRegex.find(cleanBack)?.let { district = it.groupValues[1].trim() }
-        }
-
-        // জ. সম্পূর্ণ ডিটেইলস (Full Details - বারকোড ও ব্যাকপার্টের সকল টেক্সট)
-        val fullDetailsBuilder = StringBuilder()
-        if (barcodeRaw.isNotBlank()) {
-            fullDetailsBuilder.append("--- BARCODE DATA ---\n").append(barcodeRaw.trim()).append("\n\n")
-        }
-        fullDetailsBuilder.append("--- BACK DETAILS ---\n")
-        val validBackLines = backRawText.split("\n")
-            .map { it.trim() }
-            .filter { it.isNotBlank() && !it.contains("সম্পত্তি") && !it.contains("অনুরোধ") && !it.contains("Sign", true) }
-        fullDetailsBuilder.append(validBackLines.joinToString("\n"))
-        val fullDetails = fullDetailsBuilder.toString().trim()
+        if (motherName == fatherName) motherName = ""
 
         val displayName = if (nameEn.isNotEmpty()) nameEn else nameBn
+        
+        // ব্যাকপার্ট টেক্সটটি পিএইচপিতে পাস করার জন্য প্রস্তুত করা হচ্ছে
+        val rawBackToPass = backRawText
 
         runOnUiThread {
             val safeName = JSONObject.quote(displayName)
@@ -1119,54 +1010,11 @@ class MainActivity : AppCompatActivity() {
             val safeMother = JSONObject.quote(motherName)
             val safeDob = JSONObject.quote(dobStr)
             val safeNid = JSONObject.quote(nidNo)
-            val safeDetails = JSONObject.quote(fullDetails)
             val safeFace = JSONObject.quote(facePhotoBase64)
+            val safeBackRawText = JSONObject.quote(rawBackToPass)
 
-            val safeHolding = JSONObject.quote(holding)
-            val safeVillage = JSONObject.quote(village)
-            val safePostOffice = JSONObject.quote(postOffice)
-            val safeZipCode = JSONObject.quote(zipCode)
-            val safeUpazila = JSONObject.quote(upazila)
-            val safeDistrict = JSONObject.quote(district)
-            val safeBloodGroup = JSONObject.quote(bloodGroup)
-            val safeBirthPlace = JSONObject.quote(birthPlace)
-            val safeIssueDate = JSONObject.quote(issueDate)
-
-            // সরাসরি DOM ফিল্ডগুলো শতভাগ নিখুঁতভাবে ইনজেক্ট করা
-            val domInjectionScript = """
-                if(document.getElementById('res_full_name')) document.getElementById('res_full_name').value = $safeName;
-                if(document.getElementById('res_father_name')) document.getElementById('res_father_name').value = $safeFather;
-                if(document.getElementById('res_mother_name')) document.getElementById('res_mother_name').value = $safeMother;
-                if(document.getElementById('res_dob')) document.getElementById('res_dob').value = $safeDob;
-                if(document.getElementById('res_doc_number')) document.getElementById('res_doc_number').value = $safeNid;
-
-                if(document.getElementById('res_holding')) document.getElementById('res_holding').value = $safeHolding;
-                if(document.getElementById('res_village')) document.getElementById('res_village').value = $safeVillage;
-                if(document.getElementById('res_post_office')) document.getElementById('res_post_office').value = $safePostOffice;
-                if(document.getElementById('res_zip_code')) document.getElementById('res_zip_code').value = $safeZipCode;
-                if(document.getElementById('res_upazila')) document.getElementById('res_upazila').value = $safeUpazila;
-                if(document.getElementById('res_district')) document.getElementById('res_district').value = $safeDistrict;
-
-                if(document.getElementById('res_blood_group')) document.getElementById('res_blood_group').value = $safeBloodGroup;
-                if(document.getElementById('res_birth_place')) document.getElementById('res_birth_place').value = $safeBirthPlace;
-                if(document.getElementById('res_issue_date')) document.getElementById('res_issue_date').value = $safeIssueDate;
-
-                if(document.getElementById('res_address')) document.getElementById('res_address').value = $safeDetails;
-
-                if(document.getElementById('display_doc_avatar') && $safeFace.length > 0) document.getElementById('display_doc_avatar').src = $safeFace;
-                if(document.getElementById('hidden_doc_face_b64') && $safeFace.length > 0) document.getElementById('hidden_doc_face_b64').value = $safeFace;
-                if(document.getElementById('kyc_user_avatar_preview') && $safeFace.length > 0) document.getElementById('kyc_user_avatar_preview').src = $safeFace;
-            """.trimIndent()
-
-            webView.evaluateJavascript(domInjectionScript, null)
-
-            // ওয়েবসাইটের কলব্যাক চালু রাখা
-            webView.evaluateJavascript("if(window.onFullNIDParsed) { window.onFullNIDParsed($safeName, $safeFather, $safeMother, $safeDob, $safeNid, $safeDetails, $safeFace); }", null)
-            webView.evaluateJavascript("if(window.onNIDFrontScanCompleted) { window.onNIDFrontScanCompleted($safeName, $safeFather, $safeMother, $safeDob, $safeNid, $safeFace); }", null)
-            if (fullDetails.isNotEmpty()) {
-                webView.evaluateJavascript("if(window.onNIDBackScanCompleted) { window.onNIDBackScanCompleted($safeDetails); }", null)
-            }
-
+            // কলব্যাক পাঠানো (php ফাইলে জাভাস্ক্রিপ্ট দিয়ে বাকি ঠিকানা পার্সিং করা হবে)
+            webView.evaluateJavascript("if(window.onFullNIDParsed) { window.onFullNIDParsed($safeName, $safeFather, $safeMother, $safeDob, $safeNid, $safeBackRawText, $safeFace); }", null)
             Toast.makeText(this, "এনআইডি স্ক্যান সফল হয়েছে!", Toast.LENGTH_SHORT).show()
         }
     }
@@ -1206,7 +1054,6 @@ class MainActivity : AppCompatActivity() {
             val safeFace = JSONObject.quote(facePhotoBase64)
 
             webView.evaluateJavascript("if(window.onFullPassportParsed) { window.onFullPassportParsed($safeName, $safeDocNo, $safeFace); }", null)
-            webView.evaluateJavascript("if(window.onScanCompleted) { window.onScanCompleted($safeName, $safeDocNo, $safeFace); }", null)
             Toast.makeText(this, "পাসপোর্ট স্ক্যান সফল!", Toast.LENGTH_SHORT).show()
         }
     }
