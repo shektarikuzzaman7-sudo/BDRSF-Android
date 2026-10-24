@@ -32,9 +32,12 @@ android {
 }
 
 dependencies {
-    implementation("androidx.core:core-ktx:1.12.0")
-    implementation("androidx.appcompat:appcompat:1.6.1")
-    implementation("com.google.android.material:material:1.11.0")
+    implementation("androidx.core:core-ktx:1.13.1")
+    implementation("androidx.appcompat:appcompat:1.7.0")
+    implementation("com.google.android.material:material:1.12.0")
+    
+    // --- HD Camera Image Rotation ও EXIF ডাটা ঠিক রাখার জন্য ---
+    implementation("androidx.exifinterface:exifinterface:1.3.7")
 
     // --- Google ML Kit QR Code Scanner (লাইভ এবং গ্যালারি কিউআর স্ক্যানের জন্য) ---
     implementation("com.google.mlkit:barcode-scanning:17.3.0")
@@ -44,7 +47,7 @@ dependencies {
     implementation("com.google.mlkit:text-recognition-devanagari:16.0.0")
     
     // --- CameraX (শুধুমাত্র লাইভ কিউআর স্ক্যানারের ক্যামেরা প্রিভিউ ও অ্যানালাইসিসের জন্য) ---
-    val cameraxVersion = "1.3.1"
+    val cameraxVersion = "1.3.4"
     implementation("androidx.camera:camera-core:$cameraxVersion")
     implementation("androidx.camera:camera-camera2:$cameraxVersion")
     implementation("androidx.camera:camera-lifecycle:$cameraxVersion")
