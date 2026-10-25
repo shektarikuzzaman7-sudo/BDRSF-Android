@@ -373,37 +373,64 @@ class MainActivity : AppCompatActivity() {
         webView.loadUrl("https://bdrsf.com/")
     }
 
-    // 서버 থেকে API Key 가져오는 함수 (Secure Fetch)
+    // 서버 থেকে API Key 가져오는 함수 (Secure Fetch with Auto Retry)
     private fun fetchApiKeysFromNodeServer() {
         val request = Request.Builder()
             .url("https://bdrsf.com/api/get_gemini_keys")
-            .addHeader("x-app-secret", "BDRSF_SECURE_APP_2026_SECRET_KEY") // সার্ভারের সিক্রেট ম্যাচ করা
+            .addHeader("x-app-secret", "BDRSF_SECURE_APP_2026_SECRET_KEY")
             .get()
             .build()
 
         okHttpClient.newCall(request).enqueue(object : Callback {
             override fun onFailure(call: Call, e: IOException) {
                 e.printStackTrace()
+                retryFetchKeys() // ফেইল হলে আবার চেষ্টা করবে
             }
+            
             override fun onResponse(call: Call, response: Response) {
                 if (response.isSuccessful) {
                     val responseBody = response.body?.string()
                     if (responseBody != null) {
                         try {
                             val jsonObject = JSONObject(responseBody)
-                            if (jsonObject.getString("status") == "success") {
+                            if (jsonObject.optString("status") == "success") {
                                 val keysArray = jsonObject.getJSONArray("keys")
                                 val tempKeys = mutableListOf<String>()
                                 for (i in 0 until keysArray.length()) {
                                     tempKeys.add(keysArray.getString(i))
                                 }
-                                dynamicApiKeys = tempKeys
+                                
+                                if (tempKeys.isNotEmpty()) {
+                                    dynamicApiKeys = tempKeys
+                                    runOnUiThread {
+                                        Toast.makeText(this@MainActivity, "স্ক্যানার কানেক্টেড!", Toast.LENGTH_SHORT).show()
+                                    }
+                                } else {
+                                    retryFetchKeys()
+                                }
+                            } else {
+                                retryFetchKeys()
                             }
-                        } catch (e: Exception) { e.printStackTrace() }
+                        } catch (e: Exception) { 
+                            e.printStackTrace() 
+                            retryFetchKeys()
+                        }
+                    } else {
+                        retryFetchKeys()
                     }
+                } else {
+                    retryFetchKeys()
                 }
             }
         })
+    }
+
+    private fun retryFetchKeys() {
+        runOnUiThread {
+            android.os.Handler(android.os.Looper.getMainLooper()).postDelayed({
+                fetchApiKeysFromNodeServer()
+            }, 3000) // ৩ সেকেন্ড পর আবার চেষ্টা
+        }
     }
 
     class WebAppInterface(private val activity: MainActivity) {
@@ -751,7 +778,7 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    // নতুন ফাংশন: সরাসরি Android থেকে Gemini SDK এর মাধ্যমে প্রসেস করা
+    // নতুন ফাংশন: সরাসরি Android থেকে Gemini SDK এর মাধ্যমে প্রসেস করা (Advanced JSON Parsing & Auto-Retry)
     private fun processWithDirectGemini(
         frontFile: File,
         backFile: File?,
@@ -762,7 +789,9 @@ class MainActivity : AppCompatActivity() {
     ) {
         if (dynamicApiKeys.isEmpty()) {
             runOnUiThread {
-                webView.evaluateJavascript("if(window.onScanFailed) { window.onScanFailed('সিস্টেম প্রস্তুত নয়, অ্যাপটি রিস্টার্ট করুন বা আবার চেষ্টা করুন।'); }", null)
+                Toast.makeText(this@MainActivity, "সার্ভার কানেকটিং... দয়া করে একটু পর আবার স্ক্যান বাটনে চাপ দিন", Toast.LENGTH_LONG).show()
+                fetchApiKeysFromNodeServer() // ফোর্স কানেকশন রিকোয়েস্ট
+                webView.evaluateJavascript("if(window.onScanFailed) { window.onScanFailed('সিস্টেম প্রস্তুত হচ্ছে, দয়া করে একটু পর আবার স্ক্যান বাটনে চাপ দিন।'); }", null)
             }
             return
         }
@@ -785,30 +814,30 @@ class MainActivity : AppCompatActivity() {
               "status": "success",
               "data": {
                 "documentType": "$documentType",
-                "nidNo": "Digits only (10, 13, or 17 digits)",
-                "dob": "DD MMM YYYY or YYYY-MM-DD",
-                "nameEn": "FULL NAME IN CAPITAL",
-                "nameBn": "পূর্ণ নাম বাংলা",
+                "nidNo": "Digits only",
+                "dob": "DD-MM-YYYY",
+                "nameEn": "FULL NAME",
+                "nameBn": "পূর্ণ নাম",
                 "fatherName": "পিতার নাম",
                 "motherName": "মাতার নাম",
-                "passportNo": "Passport number if applicable",
-                "holding": "বাসা/হোল্ডিং নম্বর",
+                "passportNo": "Passport number",
+                "holding": "বাসা/হোল্ডিং",
                 "village": "গ্রাম বা রাস্তা",
                 "postOffice": "ডাকঘর",
-                "zipCode": "পোস্ট কোড (৪ ডিজিট)",
-                "upazila": "উপজেলা বা থানা",
+                "zipCode": "পোস্ট কোড",
+                "upazila": "উপজেলা",
                 "district": "জেলা",
-                "bloodGroup": "রক্তের গ্রুপ (e.g. A+, B+, O+)",
-                "birthPlace": "জন্মস্থান জেলা",
-                "issueDate": "প্রদানের তারিখ"
+                "bloodGroup": "রক্তের গ্রুপ",
+                "birthPlace": "জন্মস্থান",
+                "issueDate": "তারিখ"
               }
             }
         """.trimIndent()
 
         CoroutineScope(Dispatchers.IO).launch {
             var isSuccess = false
+            var lastErrorMessage = "সব সার্ভার ব্যস্ত আছে বা কানেকশন নেই। একটু পর আবার চেষ্টা করুন।"
             
-            // Auto Rotation Loop: ৫টি Key এর জন্য
             for (apiKey in dynamicApiKeys) {
                 try {
                     val generativeModel = GenerativeModel(
@@ -827,11 +856,11 @@ class MainActivity : AppCompatActivity() {
                     val response = generativeModel.generateContent(inputContent)
                     var rawText = response.text?.trim() ?: ""
                     
-                    // JSON ক্লিনিং 
-                    if (rawText.startsWith("```json")) {
-                        rawText = rawText.removePrefix("```json").removeSuffix("```").trim()
-                    } else if (rawText.startsWith("```")) {
-                        rawText = rawText.removePrefix("```").removeSuffix("```").trim()
+                    // Advanced Regex দিয়ে শুধুমাত্র JSON অংশটুকু ফিল্টার করা (Markdown বা টেক্সট ব্লক দূর করার জন্য)
+                    val jsonRegex = Regex("\\{.*\\}", RegexOption.DOT_MATCHES_ALL)
+                    val matchResult = jsonRegex.find(rawText)
+                    if (matchResult != null) {
+                        rawText = matchResult.value
                     }
 
                     withContext(Dispatchers.Main) {
@@ -853,15 +882,21 @@ class MainActivity : AppCompatActivity() {
                                 webView.evaluateJavascript("if(window.onScanFailed) { window.onScanFailed($safeMsg); }", null)
                             }
                         } catch (e: Exception) {
-                            webView.evaluateJavascript("if(window.onScanFailed) { window.onScanFailed('সঠিক তথ্য পাওয়া যায়নি।'); }", null)
+                            webView.evaluateJavascript("if(window.onScanFailed) { window.onScanFailed('সঠিক তথ্য পাওয়া যায়নি। দয়া করে পরিষ্কার ছবি তুলুন।'); }", null)
                         }
                     }
                     isSuccess = true
                     break // সফল হলে লুপ থেকে বের হয়ে যাবে
                 } catch (e: Exception) {
+                    e.printStackTrace()
                     val errorMsg = e.message?.lowercase() ?: ""
-                    // কোটা শেষ বা রেট লিমিট হলে পরের Key ট্রাই করবে
-                    if (errorMsg.contains("quota") || errorMsg.contains("429") || errorMsg.contains("limit") || errorMsg.contains("exhausted")) {
+                    
+                    if (errorMsg.contains("unable to resolve host") || errorMsg.contains("timeout")) {
+                        lastErrorMessage = "ইন্টারনেট কানেকশন সমস্যা! দয়া করে ইন্টারনেট চেক করুন।"
+                        // নেটওয়ার্ক সমস্যা থাকলে লুপ চালিয়ে লাভ নেই, তাই ব্রেক করা হলো
+                        break 
+                    } else if (errorMsg.contains("quota") || errorMsg.contains("429") || errorMsg.contains("exhausted")) {
+                        // কোটা শেষ হলে পরের Key-তে ট্রাই করবে
                         continue
                     } else {
                         continue // অন্যান্য এরর আসলেও সেফটির জন্য পরের Key তে ট্রাই করবে
@@ -871,7 +906,8 @@ class MainActivity : AppCompatActivity() {
 
             if (!isSuccess) {
                 withContext(Dispatchers.Main) {
-                    webView.evaluateJavascript("if(window.onScanFailed) { window.onScanFailed('সব সার্ভার ব্যস্ত আছে বা কানেকশন নেই। একটু পর আবার চেষ্টা করুন।'); }", null)
+                    val safeErrorMsg = JSONObject.quote(lastErrorMessage)
+                    webView.evaluateJavascript("if(window.onScanFailed) { window.onScanFailed($safeErrorMsg); }", null)
                 }
             }
         }
