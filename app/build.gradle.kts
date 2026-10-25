@@ -36,19 +36,20 @@ dependencies {
     implementation("androidx.appcompat:appcompat:1.7.0")
     implementation("com.google.android.material:material:1.12.0")
     
-    // --- HD Camera Image Rotation ও EXIF ডাটা ঠিক রাখার জন্য ---
+    // --- ক্যামেরায় তোলা ডকুমেন্টের সঠিক ওরিয়েন্টেশন (Rotation) ঠিক রাখার জন্য ---
     implementation("androidx.exifinterface:exifinterface:1.3.7")
 
-    // --- Google ML Kit QR Code Scanner (লাইভ এবং গ্যালারি কিউআর স্ক্যানের জন্য) ---
+    // --- Google ML Kit Barcode/QR Scanner (গ্যালারি ও লাইভ কিউআর রিডের জন্য) ---
     implementation("com.google.mlkit:barcode-scanning:17.3.0")
     
-    // --- API Call, সার্ভার থেকে API Key আনা এবং Gemini REST API তে ছবি পাঠানোর জন্য OkHttp ---
-    implementation("com.squareup.okhttp3:okhttp:4.12.0")
-    
-    // --- CameraX (শুধুমাত্র লাইভ কিউআর স্ক্যানারের ক্যামেরা প্রিভিউ ও অ্যানালাইসিসের জন্য) ---
+    // --- CameraX লাইব্রেরি (লাইভ ভিউফাইন্ডার ফ্রেম, অটো-ক্যাপচার শার্পনেস অ্যানালাইসিস ও হাই-কোয়ালিটি ফটো তোলার জন্য) ---
     val cameraxVersion = "1.3.4"
     implementation("androidx.camera:camera-core:$cameraxVersion")
     implementation("androidx.camera:camera-camera2:$cameraxVersion")
     implementation("androidx.camera:camera-lifecycle:$cameraxVersion")
     implementation("androidx.camera:camera-view:$cameraxVersion")
+
+    // নোট: নতুন MainActivity-তে Gemini বা সার্ভার OCR API বাদ দেওয়া হয়েছে। 
+    // যদি প্রজেক্টের অন্য কোনো ফিচার বা ব্যাকএন্ড রিকোয়েস্টে OkHttp দরকার না হয়, তবে এটি পুরোপুরি বাদ দিতে পারেন।
+    implementation("com.squareup.okhttp3:okhttp:4.12.0")
 }
