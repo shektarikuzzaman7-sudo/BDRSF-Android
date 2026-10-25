@@ -66,10 +66,9 @@ import com.google.mlkit.vision.common.InputImage
 import okhttp3.Call
 import okhttp3.Callback
 import okhttp3.MediaType.Companion.toMediaTypeOrNull
-import okhttp3.MultipartBody
 import okhttp3.OkHttpClient
 import okhttp3.Request
-import okhttp3.RequestBody.Companion.asRequestBody
+import okhttp3.RequestBody.Companion.toRequestBody
 import okhttp3.Response
 import org.json.JSONObject
 import java.io.ByteArrayOutputStream
@@ -117,7 +116,7 @@ class MainActivity : AppCompatActivity() {
     // বারকোড স্ক্যানার
     private val barcodeScanner: BarcodeScanner by lazy { BarcodeScanning.getClient() }
 
-    // API কল করার জন্য OkHttpClient (ফায়ারওয়াল বাইপাস হেডার সহ)
+    // API কল করার জন্য OkHttpClient
     private val okHttpClient = OkHttpClient.Builder()
         .connectTimeout(60, TimeUnit.SECONDS)
         .writeTimeout(60, TimeUnit.SECONDS)
@@ -654,7 +653,7 @@ class MainActivity : AppCompatActivity() {
     }
 
     // =======================================================================
-    // হাইব্রিড স্ক্যানিং প্রসেস (অফলাইন বারকোড + অনলাইন সার্ভার এপিআই)
+    // হাইব্রিড স্ক্যানিং প্রসেস (অফলাইন বারকোড + অনলাইন সার্ভার JSON API)
     // =======================================================================
     private fun processSavedDocumentsHybrid(docType: String) {
         if (frontDocFile == null || !frontDocFile!!.exists()) {
@@ -689,55 +688,68 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    // সার্ভারে (ocr_scan.js) ছবি পাঠানোর ফাংশন (ফায়ারওয়াল বাইপাস হেডার সহ)
+    // সার্ভারে (ocr_scan.js) JSON Base64 হিসেবে ছবি পাঠানোর ফাংশন (ফায়ারওয়াল বাইপাস)
     private fun sendImageToServerForOCR(frontFile: File, backFile: File?, faceBase64: String, barcodeMap: Map<String, String>, barcodeRawText: String) {
-        val requestBodyBuilder = MultipartBody.Builder()
-            .setType(MultipartBody.FORM)
-            .addFormDataPart("action", "scan_document")
-            .addFormDataPart("document_image", frontFile.name, frontFile.asRequestBody("image/*".toMediaTypeOrNull()))
+        try {
+            val frontBytes = frontFile.readBytes()
+            val frontBase64 = "data:image/jpeg;base64," + Base64.encodeToString(frontBytes, Base64.NO_WRAP)
 
-        if (backFile != null && backFile.exists()) {
-            requestBodyBuilder.addFormDataPart("back_image", backFile.name, backFile.asRequestBody("image/*".toMediaTypeOrNull()))
-        }
-
-        val request = Request.Builder()
-            .url("https://bdrsf.com/api/ocr_scan")
-            .post(requestBodyBuilder.build())
-            .addHeader("Accept", "application/json")
-            .addHeader("User-Agent", "Mozilla/5.0 (Linux; Android 13; Mobile) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/114.0.0.0 Mobile Safari/537.36")
-            .build()
-
-        okHttpClient.newCall(request).enqueue(object : Callback {
-            override fun onFailure(call: Call, e: IOException) {
-                runOnUiThread {
-                    webView.evaluateJavascript("if(window.onScanFailed) { window.onScanFailed('সার্ভার কানেকশন ব্যর্থ হয়েছে। ইন্টারনেট চেক করুন।'); }", null)
+            val jsonBody = JSONObject().apply {
+                put("action", "scan_document")
+                put("front_image_base64", frontBase64)
+                if (backFile != null && backFile.exists()) {
+                    val backBytes = backFile.readBytes()
+                    val backBase64 = "data:image/jpeg;base64," + Base64.encodeToString(backBytes, Base64.NO_WRAP)
+                    put("back_image_base64", backBase64)
                 }
             }
 
-            override fun onResponse(call: Call, response: Response) {
-                val responseBody = response.body?.string()
-                if (response.isSuccessful && responseBody != null) {
-                    try {
-                        val json = JSONObject(responseBody)
-                        if (json.optString("status") == "success") {
-                            val data = json.getJSONObject("data")
-                            val rawBackText = json.optString("raw_text", "")
-                            
-                            // Cross-Matching & Injection
-                            handleServerResponse(data, rawBackText, barcodeMap, barcodeRawText, faceBase64)
-                        } else {
-                            val msg = json.optString("message", "স্ক্যান ব্যর্থ হয়েছে।")
-                            runOnUiThread { webView.evaluateJavascript("if(window.onScanFailed) { window.onScanFailed('$msg'); }", null) }
-                        }
-                    } catch (e: Exception) {
-                        runOnUiThread { webView.evaluateJavascript("if(window.onScanFailed) { window.onScanFailed('সার্ভার থেকে সঠিক তথ্য পাওয়া যায়নি।'); }", null) }
+            val body = jsonBody.toString().toRequestBody("application/json; charset=utf-8".toMediaTypeOrNull())
+
+            val request = Request.Builder()
+                .url("https://bdrsf.com/api/ocr_scan")
+                .post(body)
+                .addHeader("Accept", "application/json")
+                .addHeader("Content-Type", "application/json")
+                .addHeader("User-Agent", "Mozilla/5.0 (Linux; Android 13; Mobile) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/114.0.0.0 Mobile Safari/537.36")
+                .build()
+
+            okHttpClient.newCall(request).enqueue(object : Callback {
+                override fun onFailure(call: Call, e: IOException) {
+                    runOnUiThread {
+                        webView.evaluateJavascript("if(window.onScanFailed) { window.onScanFailed('সার্ভার কানেকশন ব্যর্থ হয়েছে। ইন্টারনেট চেক করুন।'); }", null)
                     }
-                } else {
-                    val code = response.code
-                    runOnUiThread { webView.evaluateJavascript("if(window.onScanFailed) { window.onScanFailed('সার্ভার এরর: HTTP $code'); }", null) }
                 }
+
+                override fun onResponse(call: Call, response: Response) {
+                    val responseBody = response.body?.string()
+                    if (response.isSuccessful && responseBody != null) {
+                        try {
+                            val json = JSONObject(responseBody)
+                            if (json.optString("status") == "success") {
+                                val data = json.getJSONObject("data")
+                                val rawBackText = json.optString("raw_text", "")
+                                
+                                // Cross-Matching & Injection
+                                handleServerResponse(data, rawBackText, barcodeMap, barcodeRawText, faceBase64)
+                            } else {
+                                val msg = json.optString("message", "স্ক্যান ব্যর্থ হয়েছে।")
+                                runOnUiThread { webView.evaluateJavascript("if(window.onScanFailed) { window.onScanFailed('$msg'); }", null) }
+                            }
+                        } catch (e: Exception) {
+                            runOnUiThread { webView.evaluateJavascript("if(window.onScanFailed) { window.onScanFailed('সার্ভার থেকে সঠিক তথ্য পাওয়া যায়নি।'); }", null) }
+                        }
+                    } else {
+                        val code = response.code
+                        runOnUiThread { webView.evaluateJavascript("if(window.onScanFailed) { window.onScanFailed('সার্ভার এরর: HTTP $code'); }", null) }
+                    }
+                }
+            })
+        } catch (e: Exception) {
+            runOnUiThread {
+                webView.evaluateJavascript("if(window.onScanFailed) { window.onScanFailed('ইমেজ প্রসেস করতে সমস্যা হয়েছে।'); }", null)
             }
-        })
+        }
     }
 
     // সার্ভারের ডাটা ও বারকোড ডাটা মিলিয়ে ফ্রেমে ইনজেক্ট করা
