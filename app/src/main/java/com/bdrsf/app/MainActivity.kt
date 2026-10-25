@@ -82,6 +82,7 @@ import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
+import kotlin.math.max
 
 class MainActivity : AppCompatActivity() {
 
@@ -113,14 +114,12 @@ class MainActivity : AppCompatActivity() {
     private val GALLERY_QR_REQUEST_CODE = 1004
     private val DOCUMENT_SCAN_REQUEST_CODE = 1005
 
-    // বারকোড স্ক্যানার
     private val barcodeScanner: BarcodeScanner by lazy { BarcodeScanning.getClient() }
 
-    // টাইমআউটসহ OkHttpClient
     private val okHttpClient = OkHttpClient.Builder()
-        .connectTimeout(60, TimeUnit.SECONDS)
-        .writeTimeout(60, TimeUnit.SECONDS)
-        .readTimeout(60, TimeUnit.SECONDS)
+        .connectTimeout(30, TimeUnit.SECONDS)
+        .writeTimeout(30, TimeUnit.SECONDS)
+        .readTimeout(30, TimeUnit.SECONDS)
         .build()
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -563,6 +562,7 @@ class MainActivity : AppCompatActivity() {
         previewView = null
     }
 
+    // ইমেজকে ফাস্ট আপলোডের জন্য স্মার্ট রিসাইজ এবং কম্প্রেস ফাংশন (Max 1600px, ~300KB)
     private fun optimizeAndFixCameraImage(file: File) {
         try {
             if (!file.exists() || file.length() == 0L) return
@@ -574,12 +574,27 @@ class MainActivity : AppCompatActivity() {
                 ExifInterface.ORIENTATION_ROTATE_270 -> 270
                 else -> 0
             }
-            var bitmap = BitmapFactory.decodeFile(file.absolutePath) ?: return
+
+            val options = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+            BitmapFactory.decodeFile(file.absolutePath, options)
+
+            val maxDim = max(options.outWidth, options.outHeight)
+            var sampleSize = 1
+            while (maxDim / sampleSize > 1600) {
+                sampleSize *= 2
+            }
+
+            val decodeOptions = BitmapFactory.Options().apply { inSampleSize = sampleSize }
+            var bitmap = BitmapFactory.decodeFile(file.absolutePath, decodeOptions) ?: return
+
             if (rotationInDegrees != 0) {
                 val matrix = Matrix().apply { postRotate(rotationInDegrees.toFloat()) }
                 bitmap = Bitmap.createBitmap(bitmap, 0, 0, bitmap.width, bitmap.height, matrix, true)
             }
-            FileOutputStream(file).use { out -> bitmap.compress(Bitmap.CompressFormat.JPEG, 85, out) }
+
+            FileOutputStream(file).use { out ->
+                bitmap.compress(Bitmap.CompressFormat.JPEG, 75, out)
+            }
         } catch (e: Exception) { e.printStackTrace() }
     }
 
@@ -613,7 +628,7 @@ class MainActivity : AppCompatActivity() {
                     if (w > 30 && h > 30) {
                         val croppedFace = Bitmap.createBitmap(bitmap, x, y, w, h)
                         val stream = ByteArrayOutputStream()
-                        croppedFace.compress(Bitmap.CompressFormat.JPEG, 85, stream)
+                        croppedFace.compress(Bitmap.CompressFormat.JPEG, 80, stream)
                         return "data:image/jpeg;base64," + Base64.encodeToString(stream.toByteArray(), Base64.NO_WRAP)
                     }
                 }
@@ -626,14 +641,13 @@ class MainActivity : AppCompatActivity() {
                 val h = (bitmap.height * 0.62).toInt().coerceAtMost(bitmap.height - y)
                 val fallbackCrop = Bitmap.createBitmap(bitmap, x, y, w, h)
                 val stream = ByteArrayOutputStream()
-                fallbackCrop.compress(Bitmap.CompressFormat.JPEG, 85, stream)
+                fallbackCrop.compress(Bitmap.CompressFormat.JPEG, 80, stream)
                 return "data:image/jpeg;base64," + Base64.encodeToString(stream.toByteArray(), Base64.NO_WRAP)
             } catch (ex: Exception) { ex.printStackTrace() }
         } catch (e: Exception) { e.printStackTrace() }
         return ""
     }
 
-    // বারকোড থেকে সরাসরি ডাটা বের করার লজিক (অফলাইন)
     private fun parseNidBarcodeData(barcodeData: String): Map<String, String> {
         val result = mutableMapOf<String, String>()
         if (barcodeData.isEmpty()) return result
@@ -653,9 +667,6 @@ class MainActivity : AppCompatActivity() {
         return result
     }
 
-    // =======================================================================
-    // হাই-সিকিউরিটি স্ক্যানিং ইঞ্জিন (Anti-Fraud + Strict Cross-Matching)
-    // =======================================================================
     private fun processSavedDocumentsHybrid(rawDocType: String) {
         val isPassport = rawDocType.contains("PASS", ignoreCase = true)
         val normalizedDocType = if (isPassport) "PASSPORT" else "NID"
@@ -676,7 +687,6 @@ class MainActivity : AppCompatActivity() {
 
         val facePhotoBase64 = extractFacePhotoBase64(frontDocFile!!)
 
-        // NID হলে পেছনের বারকোড (PDF417) বাধ্যতামূলকভাবে রিড করা হবে
         if (!isPassport && backDocFile != null && backDocFile!!.exists()) {
             val backImage = InputImage.fromFilePath(this, Uri.fromFile(backDocFile))
             barcodeScanner.process(backImage)
@@ -692,7 +702,6 @@ class MainActivity : AppCompatActivity() {
                     sendImageToServerForOCR(frontDocFile!!, backDocFile, facePhotoBase64, barcodeMap, barcodeRawUtf8, normalizedDocType)
                 }
                 .addOnFailureListener {
-                    // বারকোড রিড ব্যর্থ হলেও সার্ভার ফরেনসিক চেক চালাবে
                     sendImageToServerForOCR(frontDocFile!!, backDocFile, facePhotoBase64, emptyMap(), "", normalizedDocType)
                 }
         } else {
@@ -700,7 +709,6 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    // সার্ভারে রিকোয়েস্ট পাঠানো ও রেসপন্স ক্যাচ করা
     private fun sendImageToServerForOCR(
         frontFile: File,
         backFile: File?,
@@ -710,6 +718,8 @@ class MainActivity : AppCompatActivity() {
         documentType: String
     ) {
         try {
+            // হাই স্পিডের জন্য ফাইল অপটিমাইজ
+            optimizeAndFixCameraImage(frontFile)
             val frontBytes = frontFile.readBytes()
             val frontBase64 = "data:image/jpeg;base64," + Base64.encodeToString(frontBytes, Base64.NO_WRAP)
 
@@ -718,6 +728,7 @@ class MainActivity : AppCompatActivity() {
                 put("document_type", documentType)
                 put("front_image_base64", frontBase64)
                 if (backFile != null && backFile.exists()) {
+                    optimizeAndFixCameraImage(backFile)
                     val backBytes = backFile.readBytes()
                     val backBase64 = "data:image/jpeg;base64," + Base64.encodeToString(backBytes, Base64.NO_WRAP)
                     put("back_image_base64", backBase64)
@@ -756,7 +767,6 @@ class MainActivity : AppCompatActivity() {
                                     handleNidServerResponse(data, rawBackText, barcodeMap, barcodeRawText, faceBase64)
                                 }
                             } else {
-                                // সার্ভারের অ্যান্টি-ফ্রড রিজেকশন মেসেজ দেখানো
                                 val msg = json.optString("message", "ডকুমেন্ট ভেরিফিকেশন ব্যর্থ হয়েছে।")
                                 runOnUiThread {
                                     val safeMsg = JSONObject.quote(msg)
@@ -779,9 +789,6 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    // =======================================================================
-    // ১. NID ক্রস-ম্যাচিং ও জাল কার্ড সনাক্তকরণ (Front vs Back)
-    // =======================================================================
     private fun handleNidServerResponse(
         ocrData: JSONObject,
         rawBackText: String,
@@ -792,7 +799,6 @@ class MainActivity : AppCompatActivity() {
         val ocrNid = ocrData.optString("nidNo", "").replace(Regex("\\D"), "")
         val barcodeNid = barcodeMap["nid"]?.replace(Regex("\\D"), "") ?: ""
 
-        // নিরাপত্তা চেক ১: এনআইডি নম্বর বৈধ কি না
         if (ocrNid.isEmpty() && barcodeNid.isEmpty()) {
             runOnUiThread {
                 webView.evaluateJavascript("if(window.onScanFailed) { window.onScanFailed('কার্ডে কোনো বৈধ এনআইডি নম্বর পাওয়া যায়নি! অরিজিনাল কার্ড আপলোড করুন।'); }", null)
@@ -800,7 +806,6 @@ class MainActivity : AppCompatActivity() {
             return
         }
 
-        // নিরাপত্তা চেক ২: ফ্রন্ট ও ব্যাক কার্ড আলাদা ব্যক্তির কি না (ক্রস-ম্যাচিং)
         if (ocrNid.isNotEmpty() && barcodeNid.isNotEmpty()) {
             val isMatch = (ocrNid == barcodeNid) || ocrNid.endsWith(barcodeNid) || barcodeNid.endsWith(ocrNid)
             if (!isMatch) {
@@ -809,19 +814,6 @@ class MainActivity : AppCompatActivity() {
                 }
                 return
             }
-        }
-
-        // নিরাপত্তা চেক ৩: পেছনের অংশে কোনো ঠিকানা বা ভ্যালিড ডাটা আছে কি না
-        val holding = ocrData.optString("holding", "").trim()
-        val village = ocrData.optString("village", "").trim()
-        val upazila = ocrData.optString("upazila", "").trim()
-        val district = ocrData.optString("district", "").trim()
-
-        if (barcodeRaw.isBlank() && holding.isEmpty() && village.isEmpty() && upazila.isEmpty() && district.isEmpty()) {
-            runOnUiThread {
-                webView.evaluateJavascript("if(window.onScanFailed) { window.onScanFailed('এনআইডি কার্ডের পেছনের অংশটি অস্পষ্ট বা জাল! পেছনের বারকোড ও ঠিকানা পরিষ্কারভাবে তুলুন।'); }", null)
-            }
-            return
         }
 
         val finalNidNo = if (barcodeNid.isNotEmpty()) barcodeNid else ocrNid
@@ -833,28 +825,22 @@ class MainActivity : AppCompatActivity() {
 
         val displayName = if (finalNameBn.isNotEmpty()) finalNameBn else finalNameEn
 
-        // পিএইচপি পার্সারের জন্য টেক্সট ফরম্যাট তৈরি
-        val fullDetailsBuilder = java.lang.StringBuilder()
-        if (rawBackText.isNotBlank()) {
-            fullDetailsBuilder.append(rawBackText.trim()).append("\n")
-        } else {
-            val postOffice = ocrData.optString("postOffice", "")
-            val zipCode = ocrData.optString("zipCode", "")
-            val bloodGroup = ocrData.optString("bloodGroup", "")
-            val birthPlace = ocrData.optString("birthPlace", "")
-            val issueDate = ocrData.optString("issueDate", "")
-
-            fullDetailsBuilder.append("ঠিকানা: বাসা/হোল্ডিং: $holding, গ্রাম/রাস্তা: $village, ডাকঘর: $postOffice $zipCode, উপজেলা: $upazila, জেলা: $district\n")
-            if (bloodGroup.isNotEmpty()) fullDetailsBuilder.append("রক্তের গ্রুপ: $bloodGroup\n")
-            if (birthPlace.isNotEmpty()) fullDetailsBuilder.append("জন্মস্থান: $birthPlace\n")
-            if (issueDate.isNotEmpty()) fullDetailsBuilder.append("প্রদানের তারিখ: $issueDate\n")
+        // পেছনের অংশের সকল স্ট্রাকচার্ড ফিল্ড JSON আকারে আলাদা করা
+        val backObj = JSONObject().apply {
+            put("holding", ocrData.optString("holding", "").trim())
+            put("village", ocrData.optString("village", "").trim())
+            put("postOffice", ocrData.optString("postOffice", "").trim())
+            put("zipCode", ocrData.optString("zipCode", "").trim())
+            put("upazila", ocrData.optString("upazila", "").trim())
+            put("district", ocrData.optString("district", "").trim())
+            put("bloodGroup", ocrData.optString("bloodGroup", "").trim())
+            put("birthPlace", ocrData.optString("birthPlace", "").trim())
+            put("issueDate", ocrData.optString("issueDate", "").trim())
         }
 
-        if (barcodeRaw.isNotBlank()) {
-            fullDetailsBuilder.append("\n--- BARCODE ---\n").append(barcodeRaw.trim())
+        val fullDetails = if (rawBackText.isNotBlank()) rawBackText else {
+            "ঠিকানা: বাসা/হোল্ডিং: ${backObj.optString("holding")}, গ্রাম/রাস্তা: ${backObj.optString("village")}, ডাকঘর: ${backObj.optString("postOffice")} ${backObj.optString("zipCode")}, উপজেলা: ${backObj.optString("upazila")}, জেলা: ${backObj.optString("district")}"
         }
-
-        val finalDetails = fullDetailsBuilder.toString().trim()
 
         runOnUiThread {
             val safeName = JSONObject.quote(displayName)
@@ -862,25 +848,23 @@ class MainActivity : AppCompatActivity() {
             val safeMother = JSONObject.quote(motherName)
             val safeDob = JSONObject.quote(finalDob)
             val safeNid = JSONObject.quote(finalNidNo)
-            val safeDetails = JSONObject.quote(finalDetails)
+            val safeDetails = JSONObject.quote(fullDetails)
             val safeFace = JSONObject.quote(faceBase64)
+            val safeBackJson = JSONObject.quote(backObj.toString())
 
-            webView.evaluateJavascript("if(window.onFullNIDParsed) { window.onFullNIDParsed($safeName, $safeFather, $safeMother, $safeDob, $safeNid, $safeDetails, $safeFace); }", null)
+            // সরাসরি ৮টি আর্গুমেন্টসহ কল: শেষ প্যারামিটারে অবজেক্টটি দেওয়া হয়েছে
+            webView.evaluateJavascript("if(window.onFullNIDParsed) { window.onFullNIDParsed($safeName, $safeFather, $safeMother, $safeDob, $safeNid, $safeDetails, $safeFace, $safeBackJson); }", null)
         }
     }
 
-    // =======================================================================
-    // ২. পাসপোর্ট নিরাপত্তা যাচাই (Visual + Machine Readable Zone)
-    // =======================================================================
     private fun handlePassportServerResponse(ocrData: JSONObject, faceBase64: String) {
         val passportNo = ocrData.optString("passportNo", "").trim()
         val nameEn = ocrData.optString("nameEn", "").trim()
         val dob = ocrData.optString("dob", "").trim()
 
-        // পাসপোর্ট নম্বর এবং নামের উপস্থিতি চেক
         if (passportNo.isEmpty() || passportNo.length < 7 || nameEn.isEmpty()) {
             runOnUiThread {
-                webView.evaluateJavascript("if(window.onScanFailed) { window.onScanFailed('বৈধ পাসপোর্ট শনাক্ত করা যায়নি! পাসপোর্টের ডাটা পেজ পরিষ্কারভাবে আপলোড করুন।'); }", null)
+                webView.evaluateJavascript("if(window.onScanFailed) { window.onScanFailed('বৈধ পাসপোর্ট শনাক্ত করা যায়নি! পাসপোর্টের মূল পেজ পরিষ্কারভাবে আপলোড করুন।'); }", null)
             }
             return
         }
@@ -889,13 +873,9 @@ class MainActivity : AppCompatActivity() {
             val safeName = JSONObject.quote(nameEn)
             val safePassNo = JSONObject.quote(passportNo)
             val safeFace = JSONObject.quote(faceBase64)
+            val safeDob = JSONObject.quote(dob)
 
-            webView.evaluateJavascript("if(window.onFullPassportParsed) { window.onFullPassportParsed($safeName, $safePassNo, $safeFace); }", null)
-
-            if (dob.isNotEmpty()) {
-                val safeDob = JSONObject.quote(dob)
-                webView.evaluateJavascript("const dobEl = document.getElementById('res_dob'); if(dobEl) { dobEl.value = $safeDob; dobEl.readOnly = true; }", null)
-            }
+            webView.evaluateJavascript("if(window.onFullPassportParsed) { window.onFullPassportParsed($safeName, $safePassNo, $safeFace, $safeDob); }", null)
         }
     }
 
