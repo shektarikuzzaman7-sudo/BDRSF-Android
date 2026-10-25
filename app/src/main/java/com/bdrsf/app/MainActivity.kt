@@ -74,7 +74,6 @@ import okhttp3.Callback
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.Response
-import org.json.JSONArray
 import org.json.JSONObject
 import java.io.ByteArrayOutputStream
 import java.io.File
@@ -119,8 +118,8 @@ class MainActivity : AppCompatActivity() {
     private val GALLERY_QR_REQUEST_CODE = 1004
     private val DOCUMENT_SCAN_REQUEST_CODE = 1005
 
-    // ডায়নামিক API Keys রাখার লিস্ট
-    private var dynamicApiKeys: List<String> = emptyList()
+    // সিঙ্গেল API Key রাখার ভেরিয়েবল
+    private var dynamicApiKey: String = ""
 
     private val barcodeScanner: BarcodeScanner by lazy { BarcodeScanning.getClient() }
 
@@ -148,7 +147,7 @@ class MainActivity : AppCompatActivity() {
             e.printStackTrace()
         }
 
-        // অ্যাপ চালু হলেই ব্যাকগ্রাউন্ডে সার্ভার থেকে API Key গুলো ফেচ করবে
+        // অ্যাপ চালু হলেই ব্যাকগ্রাউন্ডে সার্ভার থেকে সিঙ্গেল API Key ফেচ করবে
         fetchApiKeysFromNodeServer()
 
         mainLayout = RelativeLayout(this).apply {
@@ -373,7 +372,7 @@ class MainActivity : AppCompatActivity() {
         webView.loadUrl("https://bdrsf.com/")
     }
 
-    // 서버 থেকে API Key 가져오는 함수 (Secure Fetch with Auto Retry)
+    // 서버 থেকে Single API Key 가져오는 함수
     private fun fetchApiKeysFromNodeServer() {
         val request = Request.Builder()
             .url("https://bdrsf.com/api/get_gemini_keys")
@@ -394,14 +393,11 @@ class MainActivity : AppCompatActivity() {
                         try {
                             val jsonObject = JSONObject(responseBody)
                             if (jsonObject.optString("status") == "success") {
-                                val keysArray = jsonObject.getJSONArray("keys")
-                                val tempKeys = mutableListOf<String>()
-                                for (i in 0 until keysArray.length()) {
-                                    tempKeys.add(keysArray.getString(i))
-                                }
+                                // Array এর বদলে সরাসরি স্ট্রিং Key রিসিভ করা হচ্ছে
+                                val key = jsonObject.optString("key", "")
                                 
-                                if (tempKeys.isNotEmpty()) {
-                                    dynamicApiKeys = tempKeys
+                                if (key.isNotEmpty()) {
+                                    dynamicApiKey = key
                                     runOnUiThread {
                                         Toast.makeText(this@MainActivity, "স্ক্যানার কানেক্টেড!", Toast.LENGTH_SHORT).show()
                                     }
@@ -778,7 +774,7 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    // নতুন ফাংশন: সরাসরি Android থেকে Gemini SDK এর মাধ্যমে প্রসেস করা (Advanced JSON Parsing & Auto-Retry)
+    // নতুন ফাংশন: সিঙ্গেল API Key ব্যবহার করে সরাসরি Android থেকে Gemini SDK এর মাধ্যমে প্রসেস করা 
     private fun processWithDirectGemini(
         frontFile: File,
         backFile: File?,
@@ -787,11 +783,11 @@ class MainActivity : AppCompatActivity() {
         barcodeRawText: String,
         documentType: String
     ) {
-        if (dynamicApiKeys.isEmpty()) {
+        if (dynamicApiKey.isEmpty()) {
             runOnUiThread {
                 Toast.makeText(this@MainActivity, "সার্ভার কানেকটিং... দয়া করে একটু পর আবার স্ক্যান বাটনে চাপ দিন", Toast.LENGTH_LONG).show()
                 fetchApiKeysFromNodeServer() // ফোর্স কানেকশন রিকোয়েস্ট
-                webView.evaluateJavascript("if(window.onScanFailed) { window.onScanFailed('সিস্টেম প্রস্তুত হচ্ছে, দয়া করে একটু পর আবার স্ক্যান বাটনে চাপ দিন।'); }", null)
+                webView.evaluateJavascript("if(window.onScanFailed) { window.onScanFailed('সিস্টেম প্রস্তুত হচ্ছে, দয়া করে একটু পর আবার চেষ্টা করুন।'); }", null)
             }
             return
         }
@@ -835,76 +831,64 @@ class MainActivity : AppCompatActivity() {
         """.trimIndent()
 
         CoroutineScope(Dispatchers.IO).launch {
-            var isSuccess = false
-            var lastErrorMessage = "সব সার্ভার ব্যস্ত আছে বা কানেকশন নেই। একটু পর আবার চেষ্টা করুন।"
-            
-            for (apiKey in dynamicApiKeys) {
-                try {
-                    val generativeModel = GenerativeModel(
-                        modelName = "gemini-1.5-flash",
-                        apiKey = apiKey
-                    )
+            try {
+                // লুপ বাদ দিয়ে সরাসরি সিগেল Key ব্যবহার করা হচ্ছে
+                val generativeModel = GenerativeModel(
+                    modelName = "gemini-1.5-flash",
+                    apiKey = dynamicApiKey
+                )
 
-                    val inputContent = content {
-                        text(fastPrompt)
-                        image(frontBitmap)
-                        if (backBitmap != null) {
-                            image(backBitmap)
-                        }
-                    }
-
-                    val response = generativeModel.generateContent(inputContent)
-                    var rawText = response.text?.trim() ?: ""
-                    
-                    // Advanced Regex দিয়ে শুধুমাত্র JSON অংশটুকু ফিল্টার করা (Markdown বা টেক্সট ব্লক দূর করার জন্য)
-                    val jsonRegex = Regex("\\{.*\\}", RegexOption.DOT_MATCHES_ALL)
-                    val matchResult = jsonRegex.find(rawText)
-                    if (matchResult != null) {
-                        rawText = matchResult.value
-                    }
-
-                    withContext(Dispatchers.Main) {
-                        try {
-                            val json = JSONObject(rawText)
-                            if (json.optString("status") == "success") {
-                                val data = json.getJSONObject("data")
-                                
-                                val rawBackTextConstructed = "ঠিকানা: বাসা/হোল্ডিং: ${data.optString("holding")}, গ্রাম/রাস্তা: ${data.optString("village")}, ডাকঘর: ${data.optString("postOffice")} ${data.optString("zipCode")}, উপজেলা: ${data.optString("upazila")}, জেলা: ${data.optString("district")}"
-                                
-                                if (documentType == "PASSPORT") {
-                                    handlePassportServerResponse(data, faceBase64)
-                                } else {
-                                    handleNidServerResponse(data, rawBackTextConstructed, barcodeMap, barcodeRawText, faceBase64)
-                                }
-                            } else {
-                                val msg = json.optString("message", "ডকুমেন্ট ভেরিফিকেশন ব্যর্থ হয়েছে।")
-                                val safeMsg = JSONObject.quote(msg)
-                                webView.evaluateJavascript("if(window.onScanFailed) { window.onScanFailed($safeMsg); }", null)
-                            }
-                        } catch (e: Exception) {
-                            webView.evaluateJavascript("if(window.onScanFailed) { window.onScanFailed('সঠিক তথ্য পাওয়া যায়নি। দয়া করে পরিষ্কার ছবি তুলুন।'); }", null)
-                        }
-                    }
-                    isSuccess = true
-                    break // সফল হলে লুপ থেকে বের হয়ে যাবে
-                } catch (e: Exception) {
-                    e.printStackTrace()
-                    val errorMsg = e.message?.lowercase() ?: ""
-                    
-                    if (errorMsg.contains("unable to resolve host") || errorMsg.contains("timeout")) {
-                        lastErrorMessage = "ইন্টারনেট কানেকশন সমস্যা! দয়া করে ইন্টারনেট চেক করুন।"
-                        // নেটওয়ার্ক সমস্যা থাকলে লুপ চালিয়ে লাভ নেই, তাই ব্রেক করা হলো
-                        break 
-                    } else if (errorMsg.contains("quota") || errorMsg.contains("429") || errorMsg.contains("exhausted")) {
-                        // কোটা শেষ হলে পরের Key-তে ট্রাই করবে
-                        continue
-                    } else {
-                        continue // অন্যান্য এরর আসলেও সেফটির জন্য পরের Key তে ট্রাই করবে
+                val inputContent = content {
+                    text(fastPrompt)
+                    image(frontBitmap)
+                    if (backBitmap != null) {
+                        image(backBitmap)
                     }
                 }
-            }
 
-            if (!isSuccess) {
+                val response = generativeModel.generateContent(inputContent)
+                var rawText = response.text?.trim() ?: ""
+                
+                // Advanced Regex দিয়ে শুধুমাত্র JSON অংশটুকু ফিল্টার করা 
+                val jsonRegex = Regex("\\{.*\\}", RegexOption.DOT_MATCHES_ALL)
+                val matchResult = jsonRegex.find(rawText)
+                if (matchResult != null) {
+                    rawText = matchResult.value
+                }
+
+                withContext(Dispatchers.Main) {
+                    try {
+                        val json = JSONObject(rawText)
+                        if (json.optString("status") == "success") {
+                            val data = json.getJSONObject("data")
+                            
+                            val rawBackTextConstructed = "ঠিকানা: বাসা/হোল্ডিং: ${data.optString("holding")}, গ্রাম/রাস্তা: ${data.optString("village")}, ডাকঘর: ${data.optString("postOffice")} ${data.optString("zipCode")}, উপজেলা: ${data.optString("upazila")}, জেলা: ${data.optString("district")}"
+                            
+                            if (documentType == "PASSPORT") {
+                                handlePassportServerResponse(data, faceBase64)
+                            } else {
+                                handleNidServerResponse(data, rawBackTextConstructed, barcodeMap, barcodeRawText, faceBase64)
+                            }
+                        } else {
+                            val msg = json.optString("message", "ডকুমেন্ট ভেরিফিকেশন ব্যর্থ হয়েছে।")
+                            val safeMsg = JSONObject.quote(msg)
+                            webView.evaluateJavascript("if(window.onScanFailed) { window.onScanFailed($safeMsg); }", null)
+                        }
+                    } catch (e: Exception) {
+                        webView.evaluateJavascript("if(window.onScanFailed) { window.onScanFailed('সঠিক তথ্য পাওয়া যায়নি। দয়া করে পরিষ্কার ছবি তুলুন।'); }", null)
+                    }
+                }
+            } catch (e: Exception) {
+                e.printStackTrace()
+                val errorMsg = e.message?.lowercase() ?: ""
+                var lastErrorMessage = "সার্ভার ব্যস্ত আছে বা কানেকশন নেই। একটু পর আবার চেষ্টা করুন।"
+                
+                if (errorMsg.contains("unable to resolve host") || errorMsg.contains("timeout")) {
+                    lastErrorMessage = "ইন্টারনেট কানেকশন সমস্যা! দয়া করে ইন্টারনেট চেক করুন।"
+                } else if (errorMsg.contains("quota") || errorMsg.contains("429") || errorMsg.contains("exhausted")) {
+                    lastErrorMessage = "এপিআই লিমিট শেষ হয়ে গেছে। দয়া করে এডমিনকে জানান।"
+                }
+                
                 withContext(Dispatchers.Main) {
                     val safeErrorMsg = JSONObject.quote(lastErrorMessage)
                     webView.evaluateJavascript("if(window.onScanFailed) { window.onScanFailed($safeErrorMsg); }", null)
