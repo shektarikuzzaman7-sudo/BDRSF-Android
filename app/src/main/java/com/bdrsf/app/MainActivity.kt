@@ -60,16 +60,21 @@ import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
 import androidx.exifinterface.media.ExifInterface
+import com.google.ai.client.generativeai.GenerativeModel
+import com.google.ai.client.generativeai.type.content
 import com.google.mlkit.vision.barcode.BarcodeScanner
 import com.google.mlkit.vision.barcode.BarcodeScanning
 import com.google.mlkit.vision.common.InputImage
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import okhttp3.Call
 import okhttp3.Callback
-import okhttp3.MediaType.Companion.toMediaTypeOrNull
 import okhttp3.OkHttpClient
 import okhttp3.Request
-import okhttp3.RequestBody.Companion.toRequestBody
 import okhttp3.Response
+import org.json.JSONArray
 import org.json.JSONObject
 import java.io.ByteArrayOutputStream
 import java.io.File
@@ -114,6 +119,9 @@ class MainActivity : AppCompatActivity() {
     private val GALLERY_QR_REQUEST_CODE = 1004
     private val DOCUMENT_SCAN_REQUEST_CODE = 1005
 
+    // ডায়নামিক API Keys রাখার লিস্ট
+    private var dynamicApiKeys: List<String> = emptyList()
+
     private val barcodeScanner: BarcodeScanner by lazy { BarcodeScanning.getClient() }
 
     private val okHttpClient = OkHttpClient.Builder()
@@ -139,6 +147,9 @@ class MainActivity : AppCompatActivity() {
         } catch (e: Exception) {
             e.printStackTrace()
         }
+
+        // অ্যাপ চালু হলেই ব্যাকগ্রাউন্ডে সার্ভার থেকে API Key গুলো ফেচ করবে
+        fetchApiKeysFromNodeServer()
 
         mainLayout = RelativeLayout(this).apply {
             layoutParams = RelativeLayout.LayoutParams(
@@ -362,6 +373,39 @@ class MainActivity : AppCompatActivity() {
         webView.loadUrl("https://bdrsf.com/")
     }
 
+    // 서버 থেকে API Key 가져오는 함수 (Secure Fetch)
+    private fun fetchApiKeysFromNodeServer() {
+        val request = Request.Builder()
+            .url("https://bdrsf.com/api/get_gemini_keys")
+            .addHeader("x-app-secret", "BDRSF_SECURE_APP_2026_SECRET_KEY") // সার্ভারের সিক্রেট ম্যাচ করা
+            .get()
+            .build()
+
+        okHttpClient.newCall(request).enqueue(object : Callback {
+            override fun onFailure(call: Call, e: IOException) {
+                e.printStackTrace()
+            }
+            override fun onResponse(call: Call, response: Response) {
+                if (response.isSuccessful) {
+                    val responseBody = response.body?.string()
+                    if (responseBody != null) {
+                        try {
+                            val jsonObject = JSONObject(responseBody)
+                            if (jsonObject.getString("status") == "success") {
+                                val keysArray = jsonObject.getJSONArray("keys")
+                                val tempKeys = mutableListOf<String>()
+                                for (i in 0 until keysArray.length()) {
+                                    tempKeys.add(keysArray.getString(i))
+                                }
+                                dynamicApiKeys = tempKeys
+                            }
+                        } catch (e: Exception) { e.printStackTrace() }
+                    }
+                }
+            }
+        })
+    }
+
     class WebAppInterface(private val activity: MainActivity) {
         @JavascriptInterface
         fun startNativeMLKitScanner() {
@@ -562,7 +606,6 @@ class MainActivity : AppCompatActivity() {
         previewView = null
     }
 
-    // ইমেজকে ফাস্ট আপলোডের জন্য স্মার্ট রিসাইজ এবং কম্প্রেস ফাংশন (Max 1600px, ~300KB)
     private fun optimizeAndFixCameraImage(file: File) {
         try {
             if (!file.exists() || file.length() == 0L) return
@@ -598,7 +641,6 @@ class MainActivity : AppCompatActivity() {
         } catch (e: Exception) { e.printStackTrace() }
     }
 
-    // মুখমণ্ডল (Face) ক্রপ করে বের করার ফাংশন
     private fun extractFacePhotoBase64(file: File): String {
         try {
             if (!file.exists() || file.length() == 0L) return ""
@@ -688,7 +730,7 @@ class MainActivity : AppCompatActivity() {
         val facePhotoBase64 = extractFacePhotoBase64(frontDocFile!!)
 
         if (!isPassport && backDocFile != null && backDocFile!!.exists()) {
-            val backImage = InputImage.fromFilePath(this, Uri.fromFile(backDocFile))
+            val backImage = InputImage.fromFilePath(this, Uri.fromFile(backDocFile!!))
             barcodeScanner.process(backImage)
                 .addOnSuccessListener { barcodes ->
                     var barcodeRawUtf8 = ""
@@ -699,17 +741,18 @@ class MainActivity : AppCompatActivity() {
                         if (decoded.isNotEmpty()) barcodeRawUtf8 += "$decoded\n"
                     }
                     val barcodeMap = parseNidBarcodeData(barcodeRawUtf8)
-                    sendImageToServerForOCR(frontDocFile!!, backDocFile, facePhotoBase64, barcodeMap, barcodeRawUtf8, normalizedDocType)
+                    processWithDirectGemini(frontDocFile!!, backDocFile, facePhotoBase64, barcodeMap, barcodeRawUtf8, normalizedDocType)
                 }
                 .addOnFailureListener {
-                    sendImageToServerForOCR(frontDocFile!!, backDocFile, facePhotoBase64, emptyMap(), "", normalizedDocType)
+                    processWithDirectGemini(frontDocFile!!, backDocFile, facePhotoBase64, emptyMap(), "", normalizedDocType)
                 }
         } else {
-            sendImageToServerForOCR(frontDocFile!!, null, facePhotoBase64, emptyMap(), "", normalizedDocType)
+            processWithDirectGemini(frontDocFile!!, null, facePhotoBase64, emptyMap(), "", normalizedDocType)
         }
     }
 
-    private fun sendImageToServerForOCR(
+    // নতুন ফাংশন: সরাসরি Android থেকে Gemini SDK এর মাধ্যমে প্রসেস করা
+    private fun processWithDirectGemini(
         frontFile: File,
         backFile: File?,
         faceBase64: String,
@@ -717,74 +760,119 @@ class MainActivity : AppCompatActivity() {
         barcodeRawText: String,
         documentType: String
     ) {
-        try {
-            // হাই স্পিডের জন্য ফাইল অপটিমাইজ
-            optimizeAndFixCameraImage(frontFile)
-            val frontBytes = frontFile.readBytes()
-            val frontBase64 = "data:image/jpeg;base64," + Base64.encodeToString(frontBytes, Base64.NO_WRAP)
-
-            val jsonBody = JSONObject().apply {
-                put("action", "scan_document")
-                put("document_type", documentType)
-                put("front_image_base64", frontBase64)
-                if (backFile != null && backFile.exists()) {
-                    optimizeAndFixCameraImage(backFile)
-                    val backBytes = backFile.readBytes()
-                    val backBase64 = "data:image/jpeg;base64," + Base64.encodeToString(backBytes, Base64.NO_WRAP)
-                    put("back_image_base64", backBase64)
-                }
+        if (dynamicApiKeys.isEmpty()) {
+            runOnUiThread {
+                webView.evaluateJavascript("if(window.onScanFailed) { window.onScanFailed('সিস্টেম প্রস্তুত নয়, অ্যাপটি রিস্টার্ট করুন বা আবার চেষ্টা করুন।'); }", null)
             }
+            return
+        }
 
-            val body = jsonBody.toString().toRequestBody("application/json; charset=utf-8".toMediaTypeOrNull())
+        optimizeAndFixCameraImage(frontFile)
+        val frontBitmap = BitmapFactory.decodeFile(frontFile.absolutePath)
+        
+        var backBitmap: Bitmap? = null
+        if (backFile != null && backFile.exists()) {
+            optimizeAndFixCameraImage(backFile)
+            backBitmap = BitmapFactory.decodeFile(backFile.absolutePath)
+        }
 
-            val request = Request.Builder()
-                .url("https://bdrsf.com/api/ocr_scan")
-                .post(body)
-                .addHeader("Accept", "application/json")
-                .addHeader("Content-Type", "application/json")
-                .addHeader("User-Agent", "Mozilla/5.0 (Linux; Android 13; Mobile) AppleWebKit/537.36")
-                .build()
+        val fastPrompt = """
+            You are a high-speed KYC document parser for Bangladeshi ID (NID) and Passports.
+            Expected document: "$documentType".
+            Verify if the provided images are authentic $documentType. If fake, selfie, or wrong, set "status": "error" and provide a "message" in Bengali.
+            If valid, extract all available data accurately. Return strictly raw JSON format without markdown ticks:
+            {
+              "status": "success",
+              "data": {
+                "documentType": "$documentType",
+                "nidNo": "Digits only (10, 13, or 17 digits)",
+                "dob": "DD MMM YYYY or YYYY-MM-DD",
+                "nameEn": "FULL NAME IN CAPITAL",
+                "nameBn": "পূর্ণ নাম বাংলা",
+                "fatherName": "পিতার নাম",
+                "motherName": "মাতার নাম",
+                "passportNo": "Passport number if applicable",
+                "holding": "বাসা/হোল্ডিং নম্বর",
+                "village": "গ্রাম বা রাস্তা",
+                "postOffice": "ডাকঘর",
+                "zipCode": "পোস্ট কোড (৪ ডিজিট)",
+                "upazila": "উপজেলা বা থানা",
+                "district": "জেলা",
+                "bloodGroup": "রক্তের গ্রুপ (e.g. A+, B+, O+)",
+                "birthPlace": "জন্মস্থান জেলা",
+                "issueDate": "প্রদানের তারিখ"
+              }
+            }
+        """.trimIndent()
 
-            okHttpClient.newCall(request).enqueue(object : Callback {
-                override fun onFailure(call: Call, e: IOException) {
-                    runOnUiThread {
-                        webView.evaluateJavascript("if(window.onScanFailed) { window.onScanFailed('সার্ভার কানেকশন ব্যর্থ হয়েছে। ইন্টারনেট সংযোগ চেক করুন।'); }", null)
+        CoroutineScope(Dispatchers.IO).launch {
+            var isSuccess = false
+            
+            // Auto Rotation Loop: ৫টি Key এর জন্য
+            for (apiKey in dynamicApiKeys) {
+                try {
+                    val generativeModel = GenerativeModel(
+                        modelName = "gemini-1.5-flash",
+                        apiKey = apiKey
+                    )
+
+                    val inputContent = content {
+                        text(fastPrompt)
+                        image(frontBitmap)
+                        if (backBitmap != null) {
+                            image(backBitmap)
+                        }
                     }
-                }
 
-                override fun onResponse(call: Call, response: Response) {
-                    val responseBody = response.body?.string()
-                    if (response.isSuccessful && responseBody != null) {
+                    val response = generativeModel.generateContent(inputContent)
+                    var rawText = response.text?.trim() ?: ""
+                    
+                    // JSON ক্লিনিং 
+                    if (rawText.startsWith("```json")) {
+                        rawText = rawText.removePrefix("```json").removeSuffix("```").trim()
+                    } else if (rawText.startsWith("```")) {
+                        rawText = rawText.removePrefix("```").removeSuffix("```").trim()
+                    }
+
+                    withContext(Dispatchers.Main) {
                         try {
-                            val json = JSONObject(responseBody)
+                            val json = JSONObject(rawText)
                             if (json.optString("status") == "success") {
                                 val data = json.getJSONObject("data")
-                                val rawBackText = json.optString("raw_text", "")
-
+                                
+                                val rawBackTextConstructed = "ঠিকানা: বাসা/হোল্ডিং: ${data.optString("holding")}, গ্রাম/রাস্তা: ${data.optString("village")}, ডাকঘর: ${data.optString("postOffice")} ${data.optString("zipCode")}, উপজেলা: ${data.optString("upazila")}, জেলা: ${data.optString("district")}"
+                                
                                 if (documentType == "PASSPORT") {
                                     handlePassportServerResponse(data, faceBase64)
                                 } else {
-                                    handleNidServerResponse(data, rawBackText, barcodeMap, barcodeRawText, faceBase64)
+                                    handleNidServerResponse(data, rawBackTextConstructed, barcodeMap, barcodeRawText, faceBase64)
                                 }
                             } else {
                                 val msg = json.optString("message", "ডকুমেন্ট ভেরিফিকেশন ব্যর্থ হয়েছে।")
-                                runOnUiThread {
-                                    val safeMsg = JSONObject.quote(msg)
-                                    webView.evaluateJavascript("if(window.onScanFailed) { window.onScanFailed($safeMsg); }", null)
-                                }
+                                val safeMsg = JSONObject.quote(msg)
+                                webView.evaluateJavascript("if(window.onScanFailed) { window.onScanFailed($safeMsg); }", null)
                             }
                         } catch (e: Exception) {
-                            runOnUiThread { webView.evaluateJavascript("if(window.onScanFailed) { window.onScanFailed('সার্ভার থেকে সঠিক তথ্য পাওয়া যায়নি।'); }", null) }
+                            webView.evaluateJavascript("if(window.onScanFailed) { window.onScanFailed('সঠিক তথ্য পাওয়া যায়নি।'); }", null)
                         }
+                    }
+                    isSuccess = true
+                    break // সফল হলে লুপ থেকে বের হয়ে যাবে
+                } catch (e: Exception) {
+                    val errorMsg = e.message?.lowercase() ?: ""
+                    // কোটা শেষ বা রেট লিমিট হলে পরের Key ট্রাই করবে
+                    if (errorMsg.contains("quota") || errorMsg.contains("429") || errorMsg.contains("limit") || errorMsg.contains("exhausted")) {
+                        continue
                     } else {
-                        val code = response.code
-                        runOnUiThread { webView.evaluateJavascript("if(window.onScanFailed) { window.onScanFailed('সার্ভার এরর: HTTP $code'); }", null) }
+                        continue // অন্যান্য এরর আসলেও সেফটির জন্য পরের Key তে ট্রাই করবে
                     }
                 }
-            })
-        } catch (e: Exception) {
-            runOnUiThread {
-                webView.evaluateJavascript("if(window.onScanFailed) { window.onScanFailed('ইমেজ প্রসেস করতে সমস্যা হয়েছে।'); }", null)
+            }
+
+            if (!isSuccess) {
+                withContext(Dispatchers.Main) {
+                    webView.evaluateJavascript("if(window.onScanFailed) { window.onScanFailed('সব সার্ভার ব্যস্ত আছে বা কানেকশন নেই। একটু পর আবার চেষ্টা করুন।'); }", null)
+                }
             }
         }
     }
@@ -825,7 +913,6 @@ class MainActivity : AppCompatActivity() {
 
         val displayName = if (finalNameBn.isNotEmpty()) finalNameBn else finalNameEn
 
-        // পেছনের অংশের সকল স্ট্রাকচার্ড ফিল্ড JSON আকারে আলাদা করা
         val backObj = JSONObject().apply {
             put("holding", ocrData.optString("holding", "").trim())
             put("village", ocrData.optString("village", "").trim())
@@ -838,7 +925,7 @@ class MainActivity : AppCompatActivity() {
             put("issueDate", ocrData.optString("issueDate", "").trim())
         }
 
-        val fullDetails = if (rawBackText.isNotBlank()) rawBackText else {
+        val fullDetails = if (rawBackText.isNotBlank() && rawBackText != "ঠিকানা: বাসা/হোল্ডিং: , গ্রাম/রাস্তা: , ডাকঘর:  , উপজেলা: , জেলা: ") rawBackText else {
             "ঠিকানা: বাসা/হোল্ডিং: ${backObj.optString("holding")}, গ্রাম/রাস্তা: ${backObj.optString("village")}, ডাকঘর: ${backObj.optString("postOffice")} ${backObj.optString("zipCode")}, উপজেলা: ${backObj.optString("upazila")}, জেলা: ${backObj.optString("district")}"
         }
 
@@ -852,7 +939,6 @@ class MainActivity : AppCompatActivity() {
             val safeFace = JSONObject.quote(faceBase64)
             val safeBackJson = JSONObject.quote(backObj.toString())
 
-            // সরাসরি ৮টি আর্গুমেন্টসহ কল: শেষ প্যারামিটারে অবজেক্টটি দেওয়া হয়েছে
             webView.evaluateJavascript("if(window.onFullNIDParsed) { window.onFullNIDParsed($safeName, $safeFather, $safeMother, $safeDob, $safeNid, $safeDetails, $safeFace, $safeBackJson); }", null)
         }
     }
