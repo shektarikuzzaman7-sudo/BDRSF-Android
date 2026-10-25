@@ -63,13 +63,6 @@ import androidx.exifinterface.media.ExifInterface
 import com.google.mlkit.vision.barcode.BarcodeScanner
 import com.google.mlkit.vision.barcode.BarcodeScanning
 import com.google.mlkit.vision.common.InputImage
-import okhttp3.Call
-import okhttp3.Callback
-import okhttp3.MediaType.Companion.toMediaTypeOrNull
-import okhttp3.OkHttpClient
-import okhttp3.Request
-import okhttp3.RequestBody.Companion.toRequestBody
-import okhttp3.Response
 import org.json.JSONObject
 import java.io.ByteArrayOutputStream
 import java.io.File
@@ -80,7 +73,6 @@ import java.util.Date
 import java.util.Locale
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
-import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 import kotlin.math.max
 
@@ -115,12 +107,6 @@ class MainActivity : AppCompatActivity() {
     private val DOCUMENT_SCAN_REQUEST_CODE = 1005
 
     private val barcodeScanner: BarcodeScanner by lazy { BarcodeScanning.getClient() }
-
-    private val okHttpClient = OkHttpClient.Builder()
-        .connectTimeout(30, TimeUnit.SECONDS)
-        .writeTimeout(30, TimeUnit.SECONDS)
-        .readTimeout(30, TimeUnit.SECONDS)
-        .build()
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -562,7 +548,6 @@ class MainActivity : AppCompatActivity() {
         previewView = null
     }
 
-    // ইমেজকে ফাস্ট আপলোডের জন্য স্মার্ট রিসাইজ এবং কম্প্রেস ফাংশন (Max 1600px, ~300KB)
     private fun optimizeAndFixCameraImage(file: File) {
         try {
             if (!file.exists() || file.length() == 0L) return
@@ -598,7 +583,6 @@ class MainActivity : AppCompatActivity() {
         } catch (e: Exception) { e.printStackTrace() }
     }
 
-    // মুখমণ্ডল (Face) ক্রপ করে বের করার ফাংশন
     private fun extractFacePhotoBase64(file: File): String {
         try {
             if (!file.exists() || file.length() == 0L) return ""
@@ -685,10 +669,16 @@ class MainActivity : AppCompatActivity() {
             return
         }
 
+        // 1. ফেস ক্রপ করা
         val facePhotoBase64 = extractFacePhotoBase64(frontDocFile!!)
 
+        // 2. সামনের ছবি কম্প্রেস করে Base64 করা
+        optimizeAndFixCameraImage(frontDocFile!!)
+        val frontBase64 = "data:image/jpeg;base64," + Base64.encodeToString(frontDocFile!!.readBytes(), Base64.NO_WRAP)
+
+        // 3. পেছনের ছবি ও বারকোড প্রসেস করা
         if (!isPassport && backDocFile != null && backDocFile!!.exists()) {
-            val backImage = InputImage.fromFilePath(this, Uri.fromFile(backDocFile))
+            val backImage = InputImage.fromFilePath(this, Uri.fromFile(backDocFile!!))
             barcodeScanner.process(backImage)
                 .addOnSuccessListener { barcodes ->
                     var barcodeRawUtf8 = ""
@@ -699,183 +689,42 @@ class MainActivity : AppCompatActivity() {
                         if (decoded.isNotEmpty()) barcodeRawUtf8 += "$decoded\n"
                     }
                     val barcodeMap = parseNidBarcodeData(barcodeRawUtf8)
-                    sendImageToServerForOCR(frontDocFile!!, backDocFile, facePhotoBase64, barcodeMap, barcodeRawUtf8, normalizedDocType)
+                    
+                    optimizeAndFixCameraImage(backDocFile!!)
+                    val backBase64 = "data:image/jpeg;base64," + Base64.encodeToString(backDocFile!!.readBytes(), Base64.NO_WRAP)
+                    
+                    passDataToWebView(normalizedDocType, frontBase64, backBase64, facePhotoBase64, barcodeMap, barcodeRawUtf8)
                 }
                 .addOnFailureListener {
-                    sendImageToServerForOCR(frontDocFile!!, backDocFile, facePhotoBase64, emptyMap(), "", normalizedDocType)
+                    optimizeAndFixCameraImage(backDocFile!!)
+                    val backBase64 = "data:image/jpeg;base64," + Base64.encodeToString(backDocFile!!.readBytes(), Base64.NO_WRAP)
+                    passDataToWebView(normalizedDocType, frontBase64, backBase64, facePhotoBase64, emptyMap(), "")
                 }
         } else {
-            sendImageToServerForOCR(frontDocFile!!, null, facePhotoBase64, emptyMap(), "", normalizedDocType)
+            passDataToWebView(normalizedDocType, frontBase64, "", facePhotoBase64, emptyMap(), "")
         }
     }
 
-    private fun sendImageToServerForOCR(
-        frontFile: File,
-        backFile: File?,
-        faceBase64: String,
-        barcodeMap: Map<String, String>,
-        barcodeRawText: String,
-        documentType: String
+    private fun passDataToWebView(
+        docType: String, 
+        frontB64: String, 
+        backB64: String, 
+        faceB64: String, 
+        barcodeMap: Map<String, String>, 
+        barcodeRaw: String
     ) {
-        try {
-            // হাই স্পিডের জন্য ফাইল অপটিমাইজ
-            optimizeAndFixCameraImage(frontFile)
-            val frontBytes = frontFile.readBytes()
-            val frontBase64 = "data:image/jpeg;base64," + Base64.encodeToString(frontBytes, Base64.NO_WRAP)
-
-            val jsonBody = JSONObject().apply {
-                put("action", "scan_document")
-                put("document_type", documentType)
-                put("front_image_base64", frontBase64)
-                if (backFile != null && backFile.exists()) {
-                    optimizeAndFixCameraImage(backFile)
-                    val backBytes = backFile.readBytes()
-                    val backBase64 = "data:image/jpeg;base64," + Base64.encodeToString(backBytes, Base64.NO_WRAP)
-                    put("back_image_base64", backBase64)
-                }
-            }
-
-            val body = jsonBody.toString().toRequestBody("application/json; charset=utf-8".toMediaTypeOrNull())
-
-            val request = Request.Builder()
-                .url("https://bdrsf.com/api/ocr_scan")
-                .post(body)
-                .addHeader("Accept", "application/json")
-                .addHeader("Content-Type", "application/json")
-                .addHeader("User-Agent", "Mozilla/5.0 (Linux; Android 13; Mobile) AppleWebKit/537.36")
-                .build()
-
-            okHttpClient.newCall(request).enqueue(object : Callback {
-                override fun onFailure(call: Call, e: IOException) {
-                    runOnUiThread {
-                        webView.evaluateJavascript("if(window.onScanFailed) { window.onScanFailed('সার্ভার কানেকশন ব্যর্থ হয়েছে। ইন্টারনেট সংযোগ চেক করুন।'); }", null)
-                    }
-                }
-
-                override fun onResponse(call: Call, response: Response) {
-                    val responseBody = response.body?.string()
-                    if (response.isSuccessful && responseBody != null) {
-                        try {
-                            val json = JSONObject(responseBody)
-                            if (json.optString("status") == "success") {
-                                val data = json.getJSONObject("data")
-                                val rawBackText = json.optString("raw_text", "")
-
-                                if (documentType == "PASSPORT") {
-                                    handlePassportServerResponse(data, faceBase64)
-                                } else {
-                                    handleNidServerResponse(data, rawBackText, barcodeMap, barcodeRawText, faceBase64)
-                                }
-                            } else {
-                                val msg = json.optString("message", "ডকুমেন্ট ভেরিফিকেশন ব্যর্থ হয়েছে।")
-                                runOnUiThread {
-                                    val safeMsg = JSONObject.quote(msg)
-                                    webView.evaluateJavascript("if(window.onScanFailed) { window.onScanFailed($safeMsg); }", null)
-                                }
-                            }
-                        } catch (e: Exception) {
-                            runOnUiThread { webView.evaluateJavascript("if(window.onScanFailed) { window.onScanFailed('সার্ভার থেকে সঠিক তথ্য পাওয়া যায়নি।'); }", null) }
-                        }
-                    } else {
-                        val code = response.code
-                        runOnUiThread { webView.evaluateJavascript("if(window.onScanFailed) { window.onScanFailed('সার্ভার এরর: HTTP $code'); }", null) }
-                    }
-                }
-            })
-        } catch (e: Exception) {
-            runOnUiThread {
-                webView.evaluateJavascript("if(window.onScanFailed) { window.onScanFailed('ইমেজ প্রসেস করতে সমস্যা হয়েছে।'); }", null)
-            }
-        }
-    }
-
-    private fun handleNidServerResponse(
-        ocrData: JSONObject,
-        rawBackText: String,
-        barcodeMap: Map<String, String>,
-        barcodeRaw: String,
-        faceBase64: String
-    ) {
-        val ocrNid = ocrData.optString("nidNo", "").replace(Regex("\\D"), "")
-        val barcodeNid = barcodeMap["nid"]?.replace(Regex("\\D"), "") ?: ""
-
-        if (ocrNid.isEmpty() && barcodeNid.isEmpty()) {
-            runOnUiThread {
-                webView.evaluateJavascript("if(window.onScanFailed) { window.onScanFailed('কার্ডে কোনো বৈধ এনআইডি নম্বর পাওয়া যায়নি! অরিজিনাল কার্ড আপলোড করুন।'); }", null)
-            }
-            return
-        }
-
-        if (ocrNid.isNotEmpty() && barcodeNid.isNotEmpty()) {
-            val isMatch = (ocrNid == barcodeNid) || ocrNid.endsWith(barcodeNid) || barcodeNid.endsWith(ocrNid)
-            if (!isMatch) {
-                runOnUiThread {
-                    webView.evaluateJavascript("if(window.onScanFailed) { window.onScanFailed('প্রতারণা সনাক্ত হয়েছে! সামনের অংশ এবং পেছনের অংশ একই এনআইডি কার্ডের নয়।'); }", null)
-                }
-                return
-            }
-        }
-
-        val finalNidNo = if (barcodeNid.isNotEmpty()) barcodeNid else ocrNid
-        val finalDob = barcodeMap["dob"]?.takeIf { it.isNotEmpty() } ?: ocrData.optString("dob", "")
-        val finalNameBn = barcodeMap["name_bn"]?.takeIf { it.isNotEmpty() } ?: ocrData.optString("nameBn", "")
-        val finalNameEn = barcodeMap["name"]?.takeIf { it.isNotEmpty() } ?: ocrData.optString("nameEn", "")
-        val fatherName = barcodeMap["father"]?.takeIf { it.isNotEmpty() } ?: ocrData.optString("fatherName", "")
-        val motherName = barcodeMap["mother"]?.takeIf { it.isNotEmpty() } ?: ocrData.optString("motherName", "")
-
-        val displayName = if (finalNameBn.isNotEmpty()) finalNameBn else finalNameEn
-
-        // পেছনের অংশের সকল স্ট্রাকচার্ড ফিল্ড JSON আকারে আলাদা করা
-        val backObj = JSONObject().apply {
-            put("holding", ocrData.optString("holding", "").trim())
-            put("village", ocrData.optString("village", "").trim())
-            put("postOffice", ocrData.optString("postOffice", "").trim())
-            put("zipCode", ocrData.optString("zipCode", "").trim())
-            put("upazila", ocrData.optString("upazila", "").trim())
-            put("district", ocrData.optString("district", "").trim())
-            put("bloodGroup", ocrData.optString("bloodGroup", "").trim())
-            put("birthPlace", ocrData.optString("birthPlace", "").trim())
-            put("issueDate", ocrData.optString("issueDate", "").trim())
-        }
-
-        val fullDetails = if (rawBackText.isNotBlank()) rawBackText else {
-            "ঠিকানা: বাসা/হোল্ডিং: ${backObj.optString("holding")}, গ্রাম/রাস্তা: ${backObj.optString("village")}, ডাকঘর: ${backObj.optString("postOffice")} ${backObj.optString("zipCode")}, উপজেলা: ${backObj.optString("upazila")}, জেলা: ${backObj.optString("district")}"
-        }
-
+        val barcodeJson = JSONObject(barcodeMap as Map<*, *>).toString()
+        
         runOnUiThread {
-            val safeName = JSONObject.quote(displayName)
-            val safeFather = JSONObject.quote(fatherName)
-            val safeMother = JSONObject.quote(motherName)
-            val safeDob = JSONObject.quote(finalDob)
-            val safeNid = JSONObject.quote(finalNidNo)
-            val safeDetails = JSONObject.quote(fullDetails)
-            val safeFace = JSONObject.quote(faceBase64)
-            val safeBackJson = JSONObject.quote(backObj.toString())
-
-            // সরাসরি ৮টি আর্গুমেন্টসহ কল: শেষ প্যারামিটারে অবজেক্টটি দেওয়া হয়েছে
-            webView.evaluateJavascript("if(window.onFullNIDParsed) { window.onFullNIDParsed($safeName, $safeFather, $safeMother, $safeDob, $safeNid, $safeDetails, $safeFace, $safeBackJson); }", null)
-        }
-    }
-
-    private fun handlePassportServerResponse(ocrData: JSONObject, faceBase64: String) {
-        val passportNo = ocrData.optString("passportNo", "").trim()
-        val nameEn = ocrData.optString("nameEn", "").trim()
-        val dob = ocrData.optString("dob", "").trim()
-
-        if (passportNo.isEmpty() || passportNo.length < 7 || nameEn.isEmpty()) {
-            runOnUiThread {
-                webView.evaluateJavascript("if(window.onScanFailed) { window.onScanFailed('বৈধ পাসপোর্ট শনাক্ত করা যায়নি! পাসপোর্টের মূল পেজ পরিষ্কারভাবে আপলোড করুন।'); }", null)
-            }
-            return
-        }
-
-        runOnUiThread {
-            val safeName = JSONObject.quote(nameEn)
-            val safePassNo = JSONObject.quote(passportNo)
-            val safeFace = JSONObject.quote(faceBase64)
-            val safeDob = JSONObject.quote(dob)
-
-            webView.evaluateJavascript("if(window.onFullPassportParsed) { window.onFullPassportParsed($safeName, $safePassNo, $safeFace, $safeDob); }", null)
+            val safeDoc = JSONObject.quote(docType)
+            val safeFront = JSONObject.quote(frontB64)
+            val safeBack = JSONObject.quote(backB64)
+            val safeFace = JSONObject.quote(faceB64)
+            val safeBarcodeMap = JSONObject.quote(barcodeJson)
+            val safeBarcodeRaw = JSONObject.quote(barcodeRaw)
+            
+            // পিএইচপি (WebView)-তে সরাসরি ডাটা হ্যান্ডওভার করা হচ্ছে
+            webView.evaluateJavascript("if(window.onImagesReadyForInternalProcessing) { window.onImagesReadyForInternalProcessing($safeDoc, $safeFront, $safeBack, $safeFace, $safeBarcodeMap, $safeBarcodeRaw); }", null)
         }
     }
 
