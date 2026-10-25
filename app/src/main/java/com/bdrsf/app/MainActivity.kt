@@ -583,7 +583,7 @@ class MainActivity : AppCompatActivity() {
         } catch (e: Exception) { e.printStackTrace() }
     }
 
-    // মুখমণ্ডল (Face) কেটে বের করার ফাংশন
+    // মুখমণ্ডল (Face) ক্রপ করে বের করার ফাংশন
     private fun extractFacePhotoBase64(file: File): String {
         try {
             if (!file.exists() || file.length() == 0L) return ""
@@ -618,11 +618,13 @@ class MainActivity : AppCompatActivity() {
                     }
                 }
             } catch (e: Exception) { e.printStackTrace() }
+
             try {
+                // ফলব্যাক আইডি ফটো ক্রপ
                 val x = (bitmap.width * 0.03).toInt()
-                val y = (bitmap.height * 0.20).toInt()
-                val w = (bitmap.width * 0.35).toInt().coerceAtMost(bitmap.width - x)
-                val h = (bitmap.height * 0.60).toInt().coerceAtMost(bitmap.height - y)
+                val y = (bitmap.height * 0.18).toInt()
+                val w = (bitmap.width * 0.38).toInt().coerceAtMost(bitmap.width - x)
+                val h = (bitmap.height * 0.62).toInt().coerceAtMost(bitmap.height - y)
                 val fallbackCrop = Bitmap.createBitmap(bitmap, x, y, w, h)
                 val stream = ByteArrayOutputStream()
                 fallbackCrop.compress(Bitmap.CompressFormat.JPEG, 85, stream)
@@ -653,19 +655,30 @@ class MainActivity : AppCompatActivity() {
     }
 
     // =======================================================================
-    // হাইব্রিড স্ক্যানিং প্রসেস (অফলাইন বারকোড + অনলাইন সার্ভার JSON API)
+    // হাইব্রিড স্ক্যানিং ইঞ্জিন (NID ও Passport উভয়টির জন্য নির্ভুল হ্যান্ডলিং)
     // =======================================================================
-    private fun processSavedDocumentsHybrid(docType: String) {
+    private fun processSavedDocumentsHybrid(rawDocType: String) {
+        val isPassport = rawDocType.contains("PASS", ignoreCase = true)
+        val normalizedDocType = if (isPassport) "PASSPORT" else "NID"
+
         if (frontDocFile == null || !frontDocFile!!.exists()) {
-            Toast.makeText(this, "সামনের অংশের ছবি পাওয়া যায়নি", Toast.LENGTH_SHORT).show()
-            webView.evaluateJavascript("if(window.onScanFailed) { window.onScanFailed('সামনের অংশের ছবি পাওয়া যায়নি'); }", null)
+            val missingMsg = if (isPassport) "পাসপোর্টের ছবি পাওয়া যায়নি" else "এনআইডির সামনের অংশের ছবি পাওয়া যায়নি"
+            Toast.makeText(this, missingMsg, Toast.LENGTH_SHORT).show()
+            webView.evaluateJavascript("if(window.onScanFailed) { window.onScanFailed('$missingMsg'); }", null)
+            return
+        }
+
+        if (!isPassport && (backDocFile == null || !backDocFile!!.exists())) {
+            val backMissingMsg = "এনআইডি কার্ডের পেছনের অংশের ছবি পাওয়া যায়নি।"
+            Toast.makeText(this, backMissingMsg, Toast.LENGTH_SHORT).show()
+            webView.evaluateJavascript("if(window.onScanFailed) { window.onScanFailed('$backMissingMsg'); }", null)
             return
         }
 
         val facePhotoBase64 = extractFacePhotoBase64(frontDocFile!!)
 
-        // পেছনের অংশের অফলাইন বারকোড রিড করা
-        if (docType.equals("NID", ignoreCase = true) && backDocFile != null && backDocFile!!.exists()) {
+        // NID হলে পেছনের বারকোড পড়া এবং ব্যাক পার্ট ভ্যালিডেশন
+        if (!isPassport && backDocFile != null && backDocFile!!.exists()) {
             val backImage = InputImage.fromFilePath(this, Uri.fromFile(backDocFile))
             barcodeScanner.process(backImage)
                 .addOnSuccessListener { barcodes ->
@@ -677,25 +690,34 @@ class MainActivity : AppCompatActivity() {
                         if (decoded.isNotEmpty()) barcodeRawUtf8 += "$decoded\n"
                     }
                     val barcodeMap = parseNidBarcodeData(barcodeRawUtf8)
-                    sendImageToServerForOCR(frontDocFile!!, backDocFile, facePhotoBase64, barcodeMap, barcodeRawUtf8)
+                    sendImageToServerForOCR(frontDocFile!!, backDocFile, facePhotoBase64, barcodeMap, barcodeRawUtf8, normalizedDocType)
                 }
                 .addOnFailureListener {
-                    // বারকোড ফেইল হলেও সার্ভারে পাঠানো হবে
-                    sendImageToServerForOCR(frontDocFile!!, backDocFile, facePhotoBase64, emptyMap(), "")
+                    // বারকোড পরিষ্কার না থাকলেও সার্ভারের ভিশন এআই দিয়ে সম্পূর্ণ ডেটা এক্সট্র্যাক্ট করা হবে
+                    sendImageToServerForOCR(frontDocFile!!, backDocFile, facePhotoBase64, emptyMap(), "", normalizedDocType)
                 }
         } else {
-            sendImageToServerForOCR(frontDocFile!!, backDocFile, facePhotoBase64, emptyMap(), "")
+            // পাসপোর্টের ক্ষেত্রে শুধুমাত্র একটি পৃষ্ঠা
+            sendImageToServerForOCR(frontDocFile!!, null, facePhotoBase64, emptyMap(), "", normalizedDocType)
         }
     }
 
-    // সার্ভারে (ocr_scan.js) JSON Base64 হিসেবে ছবি পাঠানোর ফাংশন (ফায়ারওয়াল বাইপাস)
-    private fun sendImageToServerForOCR(frontFile: File, backFile: File?, faceBase64: String, barcodeMap: Map<String, String>, barcodeRawText: String) {
+    // সার্ভারে রিকোয়েস্ট পাঠানো (ডকুমেন্ট টাইপসহ)
+    private fun sendImageToServerForOCR(
+        frontFile: File,
+        backFile: File?,
+        faceBase64: String,
+        barcodeMap: Map<String, String>,
+        barcodeRawText: String,
+        documentType: String
+    ) {
         try {
             val frontBytes = frontFile.readBytes()
             val frontBase64 = "data:image/jpeg;base64," + Base64.encodeToString(frontBytes, Base64.NO_WRAP)
 
             val jsonBody = JSONObject().apply {
                 put("action", "scan_document")
+                put("document_type", documentType)
                 put("front_image_base64", frontBase64)
                 if (backFile != null && backFile.exists()) {
                     val backBytes = backFile.readBytes()
@@ -711,7 +733,7 @@ class MainActivity : AppCompatActivity() {
                 .post(body)
                 .addHeader("Accept", "application/json")
                 .addHeader("Content-Type", "application/json")
-                .addHeader("User-Agent", "Mozilla/5.0 (Linux; Android 13; Mobile) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/114.0.0.0 Mobile Safari/537.36")
+                .addHeader("User-Agent", "Mozilla/5.0 (Linux; Android 13; Mobile) AppleWebKit/537.36")
                 .build()
 
             okHttpClient.newCall(request).enqueue(object : Callback {
@@ -729,9 +751,12 @@ class MainActivity : AppCompatActivity() {
                             if (json.optString("status") == "success") {
                                 val data = json.getJSONObject("data")
                                 val rawBackText = json.optString("raw_text", "")
-                                
-                                // Cross-Matching & Injection
-                                handleServerResponse(data, rawBackText, barcodeMap, barcodeRawText, faceBase64)
+
+                                if (documentType == "PASSPORT") {
+                                    handlePassportServerResponse(data, faceBase64)
+                                } else {
+                                    handleNidServerResponse(data, rawBackText, barcodeMap, barcodeRawText, faceBase64)
+                                }
                             } else {
                                 val msg = json.optString("message", "স্ক্যান ব্যর্থ হয়েছে।")
                                 runOnUiThread { webView.evaluateJavascript("if(window.onScanFailed) { window.onScanFailed('$msg'); }", null) }
@@ -752,38 +777,64 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    // সার্ভারের ডাটা ও বারকোড ডাটা মিলিয়ে ফ্রেমে ইনজেক্ট করা
-    private fun handleServerResponse(ocrData: JSONObject, rawBackText: String, barcodeMap: Map<String, String>, barcodeRaw: String, faceBase64: String) {
-        // বারকোডকে সবসময় বেশি অগ্রাধিকার দেওয়া হবে
-        val finalNidNo = barcodeMap["nid"]?.takeIf { it.isNotEmpty() } ?: ocrData.optString("nidNo", "")
-        val finalDob = barcodeMap["dob"]?.takeIf { it.isNotEmpty() } ?: ocrData.optString("dob", "")
-        var finalNameEn = barcodeMap["name"]?.takeIf { it.isNotEmpty() } ?: ocrData.optString("nameEn", "")
-        val finalNameBn = barcodeMap["name_bn"]?.takeIf { it.isNotEmpty() } ?: ocrData.optString("nameBn", "")
-        val fatherName = barcodeMap["father"]?.takeIf { it.isNotEmpty() } ?: ocrData.optString("fatherName", "")
-        val motherName = barcodeMap["mother"]?.takeIf { it.isNotEmpty() } ?: ocrData.optString("motherName", "")
+    // =======================================================================
+    // ১. NID রেসপন্স ও ক্রস-ম্যাচিং হ্যান্ডলার (Front + Back)
+    // =======================================================================
+    private fun handleNidServerResponse(
+        ocrData: JSONObject,
+        rawBackText: String,
+        barcodeMap: Map<String, String>,
+        barcodeRaw: String,
+        faceBase64: String
+    ) {
+        val ocrNid = ocrData.optString("nidNo", "").replace(Regex("\\D"), "")
+        val barcodeNid = barcodeMap["nid"]?.replace(Regex("\\D"), "") ?: ""
 
-        val ocrNid = ocrData.optString("nidNo", "")
-        
-        // ক্রস-ম্যাচ ভেরিফিকেশন (Cross-Match)
-        if (ocrNid.isNotEmpty() && barcodeMap["nid"]?.isNotEmpty() == true) {
-            if (ocrNid != barcodeMap["nid"] && !ocrNid.contains(barcodeMap["nid"]!!) && !barcodeMap["nid"]!!.contains(ocrNid)) {
+        // সামনের ও পেছনের ক্রস-ম্যাচিং ভেরিফিকেশন
+        if (ocrNid.isNotEmpty() && barcodeNid.isNotEmpty()) {
+            if (ocrNid != barcodeNid && !ocrNid.contains(barcodeNid) && !barcodeNid.contains(ocrNid)) {
                 runOnUiThread {
-                    webView.evaluateJavascript("if(window.onScanFailed) { window.onScanFailed('ক্রস-ম্যাচ ফেইল! সামনের এবং পেছনের অংশ একই কার্ডের নয়।'); }", null)
+                    webView.evaluateJavascript("if(window.onScanFailed) { window.onScanFailed('ক্রস-ম্যাচ ব্যর্থ! সামনের এবং পেছনের অংশ একই এনআইডির নয়।'); }", null)
                 }
                 return
             }
         }
 
-        val displayName = if (finalNameEn.isNotEmpty()) finalNameEn else finalNameBn
+        val finalNidNo = if (barcodeNid.isNotEmpty()) barcodeNid else ocrNid
+        val finalDob = barcodeMap["dob"]?.takeIf { it.isNotEmpty() } ?: ocrData.optString("dob", "")
+        val finalNameBn = barcodeMap["name_bn"]?.takeIf { it.isNotEmpty() } ?: ocrData.optString("nameBn", "")
+        val finalNameEn = barcodeMap["name"]?.takeIf { it.isNotEmpty() } ?: ocrData.optString("nameEn", "")
+        val fatherName = barcodeMap["father"]?.takeIf { it.isNotEmpty() } ?: ocrData.optString("fatherName", "")
+        val motherName = barcodeMap["mother"]?.takeIf { it.isNotEmpty() } ?: ocrData.optString("motherName", "")
 
+        val displayName = if (finalNameBn.isNotEmpty()) finalNameBn else finalNameEn
+
+        // পেছনের অংশের পূর্ণাঙ্গ ডাটা টেক্সট নির্মাণ (PHP-র parseBackPartTextDetails এর উপযোগী)
         val fullDetailsBuilder = java.lang.StringBuilder()
-        if (barcodeRaw.isNotBlank()) {
-            fullDetailsBuilder.append("--- BARCODE DATA ---\n").append(barcodeRaw.trim()).append("\n\n")
-        }
+
         if (rawBackText.isNotBlank()) {
-            val backLines = rawBackText.split("\n").map { it.trim() }.filter { it.isNotBlank() && !it.contains("সম্পত্তি") && !it.contains("অনুরোধ") && !it.contains("Sign", true) }
-            fullDetailsBuilder.append("--- BACK DETAILS ---\n").append(backLines.joinToString("\n"))
+            fullDetailsBuilder.append(rawBackText.trim()).append("\n")
+        } else {
+            val holding = ocrData.optString("holding", "")
+            val village = ocrData.optString("village", "")
+            val postOffice = ocrData.optString("postOffice", "")
+            val zipCode = ocrData.optString("zipCode", "")
+            val upazila = ocrData.optString("upazila", "")
+            val district = ocrData.optString("district", "")
+            val bloodGroup = ocrData.optString("bloodGroup", "")
+            val birthPlace = ocrData.optString("birthPlace", "")
+            val issueDate = ocrData.optString("issueDate", "")
+
+            fullDetailsBuilder.append("ঠিকানা: বাসা/হোল্ডিং: $holding, গ্রাম/রাস্তা: $village, ডাকঘর: $postOffice $zipCode, উপজেলা: $upazila, জেলা: $district\n")
+            if (bloodGroup.isNotEmpty()) fullDetailsBuilder.append("রক্তের গ্রুপ: $bloodGroup\n")
+            if (birthPlace.isNotEmpty()) fullDetailsBuilder.append("জন্মস্থান: $birthPlace\n")
+            if (issueDate.isNotEmpty()) fullDetailsBuilder.append("প্রদানের তারিখ: $issueDate\n")
         }
+
+        if (barcodeRaw.isNotBlank()) {
+            fullDetailsBuilder.append("\n--- BARCODE ---\n").append(barcodeRaw.trim())
+        }
+
         val finalDetails = fullDetailsBuilder.toString().trim()
 
         runOnUiThread {
@@ -796,6 +847,37 @@ class MainActivity : AppCompatActivity() {
             val safeFace = JSONObject.quote(faceBase64)
 
             webView.evaluateJavascript("if(window.onFullNIDParsed) { window.onFullNIDParsed($safeName, $safeFather, $safeMother, $safeDob, $safeNid, $safeDetails, $safeFace); }", null)
+        }
+    }
+
+    // =======================================================================
+    // ২. পাসপোর্ট রেসপন্স ও ক্রস-ম্যাচিং হ্যান্ডলার (Visual + MRZ)
+    // =======================================================================
+    private fun handlePassportServerResponse(ocrData: JSONObject, faceBase64: String) {
+        val passportNo = ocrData.optString("passportNo", "").trim()
+        val nameEn = ocrData.optString("nameEn", "").trim()
+        val dob = ocrData.optString("dob", "").trim()
+
+        if (passportNo.isEmpty()) {
+            runOnUiThread {
+                webView.evaluateJavascript("if(window.onScanFailed) { window.onScanFailed('পাসপোর্ট নম্বর সনাক্ত করা যায়নি। ছবি পরিষ্কার করে তুলুন।'); }", null)
+            }
+            return
+        }
+
+        runOnUiThread {
+            val safeName = JSONObject.quote(nameEn)
+            val safePassNo = JSONObject.quote(passportNo)
+            val safeFace = JSONObject.quote(faceBase64)
+
+            // পাসপোর্ট পেজের জন্য ডেটা ইনজেকশন
+            webView.evaluateJavascript("if(window.onFullPassportParsed) { window.onFullPassportParsed($safeName, $safePassNo, $safeFace); }", null)
+
+            // অতিরিক্ত সেফটি: DOB ফিল্ড থাকলে সরাসরি পূরণ করা
+            if (dob.isNotEmpty()) {
+                val safeDob = JSONObject.quote(dob)
+                webView.evaluateJavascript("const dobEl = document.getElementById('res_dob'); if(dobEl) { dobEl.value = $safeDob; dobEl.readOnly = true; }", null)
+            }
         }
     }
 
