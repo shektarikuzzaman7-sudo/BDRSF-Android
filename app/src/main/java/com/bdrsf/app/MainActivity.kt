@@ -63,6 +63,9 @@ import androidx.exifinterface.media.ExifInterface
 import com.google.mlkit.vision.barcode.BarcodeScanner
 import com.google.mlkit.vision.barcode.BarcodeScanning
 import com.google.mlkit.vision.common.InputImage
+import com.google.mlkit.vision.text.TextRecognition
+import com.google.mlkit.vision.text.TextRecognizer
+import com.google.mlkit.vision.text.latin.TextRecognizerOptions
 import okhttp3.Call
 import okhttp3.Callback
 import okhttp3.MediaType.Companion.toMediaTypeOrNull
@@ -99,10 +102,14 @@ class MainActivity : AppCompatActivity() {
     private var isFirstPageLoad = true
 
     private var currentScanDocType = "nid_front"
+
     private var frontDocFile: File? = null
     private var backDocFile: File? = null
     private var tempDocumentFile: File? = null
     private var tempDocumentUri: Uri? = null
+
+    // ফ্রন্ট পার্টের টেক্সট থেকে পড়া এনআইডি নম্বর
+    private var cachedFrontNidNumber: String = ""
 
     private var filePathCallback: ValueCallback<Array<Uri>>? = null
     private var cameraImageFile: File? = null
@@ -113,7 +120,9 @@ class MainActivity : AppCompatActivity() {
     private val GALLERY_QR_REQUEST_CODE = 1004
     private val DOCUMENT_SCAN_REQUEST_CODE = 1005
 
+    // এমএল কিট: বারকোড এবং টেক্সট রিকগনিশন ক্লায়েন্ট
     private val barcodeScanner: BarcodeScanner by lazy { BarcodeScanning.getClient() }
+    private val textRecognizer: TextRecognizer by lazy { TextRecognition.getClient(TextRecognizerOptions.DEFAULT_OPTIONS) }
 
     private val okHttpClient = OkHttpClient.Builder()
         .connectTimeout(30, TimeUnit.SECONDS)
@@ -561,7 +570,8 @@ class MainActivity : AppCompatActivity() {
         previewView = null
     }
 
-    private fun optimizeAndFixCameraImage(file: File) {
+    // ইমেজ কোনোরূপ ক্রপ হবে না — শুধু রোটেশন ও সাইজ ফিক্স (Original Aspect Ratio)
+    private fun fixOrientationAndCompress(file: File) {
         try {
             if (!file.exists() || file.length() == 0L) return
             val exif = ExifInterface(file.absolutePath)
@@ -591,11 +601,12 @@ class MainActivity : AppCompatActivity() {
             }
 
             FileOutputStream(file).use { out ->
-                bitmap.compress(Bitmap.CompressFormat.JPEG, 75, out)
+                bitmap.compress(Bitmap.CompressFormat.JPEG, 85, out)
             }
         } catch (e: Exception) { e.printStackTrace() }
     }
 
+    // মুখমণ্ডল (Face) ক্রপ
     private fun extractFacePhotoBase64(file: File): String {
         try {
             if (!file.exists() || file.length() == 0L) return ""
@@ -664,6 +675,75 @@ class MainActivity : AppCompatActivity() {
         return result
     }
 
+    // ==============================================================
+    // ১. ফ্রন্ট পার্ট টেক্সট ও ব্যাক পার্ট বারকোড যাচাই
+    // ==============================================================
+    private fun analyzeFrontImageText(file: File) {
+        val image = InputImage.fromFilePath(this, Uri.fromFile(file))
+        textRecognizer.process(image)
+            .addOnSuccessListener { visionText ->
+                val fullText = visionText.text
+                // ১০, ১৩ বা ১৭ ডিজিটের এনআইডি নম্বর রিড
+                val match = Regex("\\b([0-9]{10}|[0-9]{13}|[0-9]{17})\\b").find(fullText)
+                cachedFrontNidNumber = match?.groupValues?.getOrNull(1) ?: ""
+            }
+            .addOnFailureListener {
+                cachedFrontNidNumber = ""
+            }
+    }
+
+    private fun verifyBackImageWithFront(file: File) {
+        val image = InputImage.fromFilePath(this, Uri.fromFile(file))
+        barcodeScanner.process(image)
+            .addOnSuccessListener { barcodes ->
+                var barcodeRawUtf8 = ""
+                for (b in barcodes) {
+                    val decoded = b.rawBytes?.let { bytes ->
+                        try { String(bytes, Charsets.UTF_8) } catch (e: Exception) { b.rawValue ?: "" }
+                    } ?: (b.rawValue ?: "")
+                    if (decoded.isNotEmpty()) barcodeRawUtf8 += "$decoded\n"
+                }
+
+                val barcodeMap = parseNidBarcodeData(barcodeRawUtf8)
+                val backPin = barcodeMap["nid"]?.replace(Regex("\\D"), "") ?: ""
+
+                // যদি পেছনের অংশে বারকোড একেবারেই না পাওয়া যায়
+                if (backPin.isEmpty()) {
+                    backDocFile = null
+                    val msg = "রং ডকুমেন্ট! এনআইডি কার্ডের পেছনের বারকোড পড়া যায়নি। পরিষ্কার ছবি দিন।"
+                    Toast.makeText(this, msg, Toast.LENGTH_LONG).show()
+                    webView.evaluateJavascript("if(window.onScanFailed) { window.onScanFailed('$msg'); }", null)
+                    return@addOnSuccessListener
+                }
+
+                // সামনের পার্টের নম্বরের সাথে পেছনের বারকোডের পিন মিলানো
+                if (cachedFrontNidNumber.isNotEmpty()) {
+                    val isMatch = (cachedFrontNidNumber == backPin || 
+                                   cachedFrontNidNumber.endsWith(backPin) || 
+                                   backPin.endsWith(cachedFrontNidNumber))
+
+                    if (!isMatch) {
+                        backDocFile = null
+                        val mismatchMsg = "রং ডকুমেন্ট! সামনের অংশের এনআইডি নম্বরের সাথে পেছনের বারকোডের কোনো মিল নেই।"
+                        Toast.makeText(this, mismatchMsg, Toast.LENGTH_LONG).show()
+                        webView.evaluateJavascript("if(window.onScanFailed) { window.onScanFailed('$mismatchMsg'); }", null)
+                        return@addOnSuccessListener
+                    }
+                }
+
+                Toast.makeText(this, "উভয় পাশ সফলভাবে যাচাই হয়েছে!", Toast.LENGTH_SHORT).show()
+            }
+            .addOnFailureListener {
+                backDocFile = null
+                val failMsg = "পেছনের বারকোড স্ক্যান ব্যর্থ হয়েছে। পুনরায় আপলোড করুন।"
+                Toast.makeText(this, failMsg, Toast.LENGTH_SHORT).show()
+                webView.evaluateJavascript("if(window.onScanFailed) { window.onScanFailed('$failMsg'); }", null)
+            }
+    }
+
+    // ==============================================================
+    // ২. নেক্সট স্টেপে এপিআই কল (তথ্য এক্সট্র্যাক্ট করে পাঠানো)
+    // ==============================================================
     private fun processSavedDocumentsHybrid(rawDocType: String) {
         val isPassport = rawDocType.contains("PASS", ignoreCase = true)
         val normalizedDocType = if (isPassport) "PASSPORT" else "NID"
@@ -684,6 +764,7 @@ class MainActivity : AppCompatActivity() {
 
         val facePhotoBase64 = extractFacePhotoBase64(frontDocFile!!)
 
+        // পেছনের বারকোড টেক্সট সহ এপিআই-তে পাঠানো
         if (!isPassport && backDocFile != null && backDocFile!!.exists()) {
             val backImage = InputImage.fromFilePath(this, Uri.fromFile(backDocFile))
             barcodeScanner.process(backImage)
@@ -715,7 +796,6 @@ class MainActivity : AppCompatActivity() {
         documentType: String
     ) {
         try {
-            optimizeAndFixCameraImage(frontFile)
             val frontBytes = frontFile.readBytes()
             val frontBase64 = "data:image/jpeg;base64," + Base64.encodeToString(frontBytes, Base64.NO_WRAP)
 
@@ -724,7 +804,6 @@ class MainActivity : AppCompatActivity() {
                 put("document_type", documentType)
                 put("front_image_base64", frontBase64)
                 if (backFile != null && backFile.exists()) {
-                    optimizeAndFixCameraImage(backFile)
                     val backBytes = backFile.readBytes()
                     val backBase64 = "data:image/jpeg;base64," + Base64.encodeToString(backBytes, Base64.NO_WRAP)
                     put("back_image_base64", backBase64)
@@ -785,7 +864,6 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    // যেকোনো অমিল বা খালি পাওয়ার কারণে আটকে রাখা সম্পূর্ণ তুলে দেওয়া হয়েছে
     private fun handleNidServerResponse(
         ocrData: JSONObject,
         rawBackText: String,
@@ -796,8 +874,7 @@ class MainActivity : AppCompatActivity() {
         val ocrNid = ocrData.optString("nidNo", "").replace(Regex("\\D"), "")
         val barcodeNid = barcodeMap["nid"]?.replace(Regex("\\D"), "") ?: ""
 
-        // যেকোনো একটি থেকে NID পেলেই তা গ্রহণ করবে, কোনো ব্লকিং চেক নেই
-        val finalNidNo = if (ocrNid.isNotEmpty()) ocrNid else barcodeNid
+        val finalNidNo = if (ocrNid.isNotEmpty()) ocrNid else (if (barcodeNid.isNotEmpty()) barcodeNid else cachedFrontNidNumber)
         val finalDob = ocrData.optString("dob", "").takeIf { it.isNotEmpty() } ?: (barcodeMap["dob"] ?: "")
         val finalNameBn = ocrData.optString("nameBn", "").takeIf { it.isNotEmpty() } ?: (barcodeMap["name_bn"] ?: "")
         val finalNameEn = ocrData.optString("nameEn", "").takeIf { it.isNotEmpty() } ?: (barcodeMap["name"] ?: "")
@@ -905,21 +982,26 @@ class MainActivity : AppCompatActivity() {
                         contentResolver.openInputStream(data.data!!)?.use { input ->
                             FileOutputStream(file).use { output -> input.copyTo(output) }
                         }
-                        optimizeAndFixCameraImage(file)
+                        fixOrientationAndCompress(file)
                         file
                     } catch (e: Exception) { null }
                 } else if (tempDocumentFile != null && tempDocumentFile!!.exists()) {
-                    optimizeAndFixCameraImage(tempDocumentFile!!)
+                    fixOrientationAndCompress(tempDocumentFile!!)
                     tempDocumentFile
                 } else null
 
                 if (selectedFile != null && selectedFile.exists()) {
                     if (currentScanDocType == "nid_front" || currentScanDocType == "passport") {
                         frontDocFile = selectedFile
+                        // সামনের অংশের টেক্সট থেকে এনআইডি নম্বর রিড করা
+                        analyzeFrontImageText(selectedFile)
                     } else if (currentScanDocType == "nid_back") {
                         backDocFile = selectedFile
+                        // পেছনের অংশ আসার সাথে সাথে ব্যাক বারকোডের সাথে ফ্রন্ট নম্বরের মিল পরীক্ষা
+                        verifyBackImageWithFront(selectedFile)
                     }
 
+                    // কোনো ক্রপ ছাড়াই মূল ইমেজ প্রিভিউ হিসেবে দেখানো
                     try {
                         val bmp = BitmapFactory.decodeFile(selectedFile.absolutePath)
                         if (bmp != null) {
@@ -941,7 +1023,7 @@ class MainActivity : AppCompatActivity() {
             if (resultCode == Activity.RESULT_OK) {
                 if (data?.data != null) results = arrayOf(data.data!!)
                 else if (cameraImageUri != null) {
-                    cameraImageFile?.let { optimizeAndFixCameraImage(it) }
+                    cameraImageFile?.let { fixOrientationAndCompress(it) }
                     results = arrayOf(cameraImageUri!!)
                 }
             }
@@ -981,6 +1063,7 @@ class MainActivity : AppCompatActivity() {
         super.onDestroy()
         try {
             barcodeScanner.close()
+            textRecognizer.close()
             if (::cameraExecutor.isInitialized) cameraExecutor.shutdown()
         } catch (e: Exception) { e.printStackTrace() }
     }
