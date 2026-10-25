@@ -767,7 +767,6 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    // Google Gemini SDK পুরোপুরি বাদ দিয়ে শুধুমাত্র OkHttp REST API ব্যবহার করা হয়েছে
     private fun processWithDirectGemini(
         frontFile: File,
         backFile: File?,
@@ -851,11 +850,12 @@ class MainActivity : AppCompatActivity() {
 
                 val body = requestBodyJson.toString().toRequestBody("application/json; charset=utf-8".toMediaTypeOrNull())
                 
-                // সঠিক লেটেস্ট মডেল পাথ (gemini-1.5-flash-latest) যা 404 এরর এড়িয়ে যাবে
+                // cURL অনুযায়ী URL এবং Header আপডেট করা হয়েছে
                 val request = Request.Builder()
-                    .url("https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash-latest:generateContent?key=${dynamicApiKey.trim()}")
+                    .url("https://generativelanguage.googleapis.com/v1beta/models/gemini-flash-latest:generateContent")
                     .post(body)
                     .addHeader("Content-Type", "application/json")
+                    .addHeader("X-goog-api-key", dynamicApiKey.trim())
                     .build()
 
                 val geminiClient = okHttpClient.newBuilder()
@@ -961,7 +961,7 @@ class MainActivity : AppCompatActivity() {
             val isMatch = (ocrNid == barcodeNid) || ocrNid.endsWith(barcodeNid) || barcodeNid.endsWith(ocrNid)
             if (!isMatch) {
                 runOnUiThread {
-                    webView.evaluateJavascript("if(window.onScanFailed) { window.onScanFailed('প্রতারণা সনাক্ত হয়েছে! সামনের অংশ এবং পেছনের অংশ একই এনআইডি কার্ডের নয়।'); }", null)
+                    webView.evaluateJavascript("if(window.onScanFailed) { window.onScanFailed('প্রতারণা সনাক্ত হয়েছে! সামনের অংশ এবং পেছনের অংশ একই এনআইডি কার্ডের নয়।'); }", null)
                 }
                 return
             }
