@@ -106,7 +106,6 @@ class MainActivity : AppCompatActivity() {
     private var tempDocumentFile: File? = null
     private var tempDocumentUri: Uri? = null
 
-    // Zero-Wait Pre-cached Memory Variables
     @Volatile private var cachedFrontBase64: String = ""
     @Volatile private var cachedBackBase64: String = ""
     @Volatile private var cachedFaceBase64: String = ""
@@ -127,9 +126,9 @@ class MainActivity : AppCompatActivity() {
     private val barcodeScanner: BarcodeScanner by lazy { BarcodeScanning.getClient() }
 
     private val okHttpClient = OkHttpClient.Builder()
-        .connectTimeout(20, TimeUnit.SECONDS)
-        .writeTimeout(20, TimeUnit.SECONDS)
-        .readTimeout(25, TimeUnit.SECONDS)
+        .connectTimeout(45, TimeUnit.SECONDS)
+        .writeTimeout(45, TimeUnit.SECONDS)
+        .readTimeout(45, TimeUnit.SECONDS)
         .retryOnConnectionFailure(true)
         .build()
 
@@ -577,7 +576,6 @@ class MainActivity : AppCompatActivity() {
         previewView = null
     }
 
-    // আল্ট্রা-ফাস্ট রিসাইজ: Max 1150px এবং 65% JPEG (মাত্র ~120KB পেলোড, দ্রুততম আপলোড)
     private fun optimizeAndCompressToBase64(file: File): Pair<Bitmap?, String> {
         try {
             if (!file.exists() || file.length() == 0L) return Pair(null, "")
@@ -607,7 +605,6 @@ class MainActivity : AppCompatActivity() {
                 bitmap = Bitmap.createBitmap(bitmap, 0, 0, bitmap.width, bitmap.height, matrix, true)
             }
 
-            // স্কেল করে 1150px এর নিচে রাখা
             val currentMax = max(bitmap.width, bitmap.height)
             if (currentMax > 1150) {
                 val ratio = 1150f / currentMax
@@ -692,7 +689,6 @@ class MainActivity : AppCompatActivity() {
         return result
     }
 
-    // ইউজার ছবি সিলেক্ট করার সাথে সাথে ব্যাকগ্রাউন্ডে প্রি-প্রসেসিং করে রাখা
     private fun preProcessDocumentInBackground(slot: String, file: File) {
         if (slot == "nid_front" || slot == "passport") {
             isFrontProcessing.set(true)
@@ -755,7 +751,6 @@ class MainActivity : AppCompatActivity() {
         val isPassport = rawDocType.contains("PASS", ignoreCase = true)
         val normalizedDocType = if (isPassport) "PASSPORT" else "NID"
 
-        // ব্যাকগ্রাউন্ড প্রি-প্রসেসিং চলমান থাকলে সামান্য অপেক্ষা করা (সর্বোচ্চ ২ সেকেন্ড)
         var waitCycles = 0
         while ((isFrontProcessing.get() || (!isPassport && isBackProcessing.get())) && waitCycles < 40) {
             Thread.sleep(50)
@@ -780,7 +775,6 @@ class MainActivity : AppCompatActivity() {
             return
         }
 
-        // সরাসরি মেমোরি থেকে রেডি থাকা ক্যাশ ডাটা সার্ভারে পাঠানো (Zero-Wait!)
         sendPreCachedDataToServerForOCR(
             frontBase64 = cachedFrontBase64,
             backBase64 = if (isPassport) null else cachedBackBase64,
@@ -1003,7 +997,6 @@ class MainActivity : AppCompatActivity() {
                 val rawUri = data?.data
                 val capturedFile = tempDocumentFile
 
-                // সম্পূর্ণ ফাইল কপি ও কম্প্রেশন ব্যাকগ্রাউন্ড থ্রেডে পাঠানো হলো (UI 100% Smooth থাকবে)
                 bgProcessingExecutor.execute {
                     val selectedFile: File? = if (rawUri != null) {
                         try {
