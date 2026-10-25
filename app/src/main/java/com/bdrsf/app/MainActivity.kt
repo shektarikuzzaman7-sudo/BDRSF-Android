@@ -144,7 +144,6 @@ class MainActivity : AppCompatActivity() {
             e.printStackTrace()
         }
 
-        // অ্যাপ চালু হলেই ব্যাকগ্রাউন্ডে সার্ভার থেকে সিঙ্গেল API Key ফেচ করবে
         fetchApiKeysFromNodeServer()
 
         mainLayout = RelativeLayout(this).apply {
@@ -369,7 +368,6 @@ class MainActivity : AppCompatActivity() {
         webView.loadUrl("https://bdrsf.com/")
     }
 
-    // 서버 থেকে Single API Key 가져오는 함수
     private fun fetchApiKeysFromNodeServer() {
         val request = Request.Builder()
             .url("https://bdrsf.com/api/get_gemini_keys")
@@ -380,7 +378,7 @@ class MainActivity : AppCompatActivity() {
         okHttpClient.newCall(request).enqueue(object : Callback {
             override fun onFailure(call: Call, e: IOException) {
                 e.printStackTrace()
-                retryFetchKeys() // ফেইল হলে আবার চেষ্টা করবে
+                retryFetchKeys() 
             }
             
             override fun onResponse(call: Call, response: Response) {
@@ -769,7 +767,7 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    // 완전히 OkHttp REST API 기반으로 재작성된 (Gemini SDK 제거) OCR 함수
+    // Google Gemini SDK পুরোপুরি বাদ দিয়ে শুধুমাত্র OkHttp REST API ব্যবহার করা হয়েছে
     private fun processWithDirectGemini(
         frontFile: File,
         backFile: File?,
@@ -781,7 +779,7 @@ class MainActivity : AppCompatActivity() {
         if (dynamicApiKey.isEmpty()) {
             runOnUiThread {
                 Toast.makeText(this@MainActivity, "সার্ভার কানেকটিং... দয়া করে একটু পর আবার স্ক্যান বাটনে চাপ দিন", Toast.LENGTH_LONG).show()
-                fetchApiKeysFromNodeServer() 
+                fetchApiKeysFromNodeServer()
                 webView.evaluateJavascript("if(window.onScanFailed) { window.onScanFailed('সিস্টেম প্রস্তুত হচ্ছে, দয়া করে একটু পর আবার চেষ্টা করুন।'); }", null)
             }
             return
@@ -816,122 +814,130 @@ class MainActivity : AppCompatActivity() {
             }
         """.trimIndent()
 
-        try {
-            optimizeAndFixCameraImage(frontFile)
-            val frontBytes = frontFile.readBytes()
-            val frontBase64Str = Base64.encodeToString(frontBytes, Base64.NO_WRAP)
+        Thread {
+            try {
+                optimizeAndFixCameraImage(frontFile)
+                val frontBytes = frontFile.readBytes()
+                val frontBase64Str = Base64.encodeToString(frontBytes, Base64.NO_WRAP)
 
-            val partsArray = JSONArray()
-            partsArray.put(JSONObject().apply { put("text", fastPrompt) })
-            partsArray.put(JSONObject().apply {
-                put("inline_data", JSONObject().apply {
-                    put("mime_type", "image/jpeg")
-                    put("data", frontBase64Str)
-                })
-            })
-
-            if (backFile != null && backFile.exists()) {
-                optimizeAndFixCameraImage(backFile)
-                val backBytes = backFile.readBytes()
-                val backBase64Str = Base64.encodeToString(backBytes, Base64.NO_WRAP)
+                val partsArray = JSONArray()
+                partsArray.put(JSONObject().apply { put("text", fastPrompt) })
                 partsArray.put(JSONObject().apply {
-                    put("inline_data", JSONObject().apply {
-                        put("mime_type", "image/jpeg")
-                        put("data", backBase64Str)
+                    put("inlineData", JSONObject().apply {
+                        put("mimeType", "image/jpeg")
+                        put("data", frontBase64Str)
                     })
                 })
-            }
 
-            val contentsArray = JSONArray().put(JSONObject().apply { put("parts", partsArray) })
-            val requestBodyJson = JSONObject().apply {
-                put("contents", contentsArray)
-                put("generationConfig", JSONObject().apply {
-                    put("response_mime_type", "application/json")
-                })
-            }
-
-            val body = requestBodyJson.toString().toRequestBody("application/json; charset=utf-8".toMediaTypeOrNull())
-            
-            // OkHttp দিয়ে সরাসরি Gemini এর REST API তে হিট (SDK ছাড়া)
-            val request = Request.Builder()
-                .url("https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=$dynamicApiKey")
-                .post(body)
-                .build()
-
-            // ছবি আপলোডের জন্য একটু বেশি টাইমআউট (৬০ সেকেন্ড) দেওয়া হলো
-            val geminiClient = okHttpClient.newBuilder()
-                .connectTimeout(60, TimeUnit.SECONDS)
-                .readTimeout(60, TimeUnit.SECONDS)
-                .writeTimeout(60, TimeUnit.SECONDS)
-                .build()
-
-            geminiClient.newCall(request).enqueue(object : Callback {
-                override fun onFailure(call: Call, e: IOException) {
-                    e.printStackTrace()
-                    runOnUiThread {
-                        val safeErrorMsg = JSONObject.quote("ইন্টারনেট কানেকশন সমস্যা! দয়া করে ইন্টারনেট চেক করুন।")
-                        webView.evaluateJavascript("if(window.onScanFailed) { window.onScanFailed($safeErrorMsg); }", null)
-                    }
+                if (backFile != null && backFile.exists()) {
+                    optimizeAndFixCameraImage(backFile)
+                    val backBytes = backFile.readBytes()
+                    val backBase64Str = Base64.encodeToString(backBytes, Base64.NO_WRAP)
+                    partsArray.put(JSONObject().apply {
+                        put("inlineData", JSONObject().apply {
+                            put("mimeType", "image/jpeg")
+                            put("data", backBase64Str)
+                        })
+                    })
                 }
 
-                override fun onResponse(call: Call, response: Response) {
-                    val responseBody = response.body?.string() ?: ""
-                    if (response.isSuccessful) {
-                        try {
-                            val jsonResp = JSONObject(responseBody)
-                            val candidates = jsonResp.optJSONArray("candidates")
-                            if (candidates != null && candidates.length() > 0) {
-                                val content = candidates.getJSONObject(0).optJSONObject("content")
-                                val parts = content?.optJSONArray("parts")
-                                val rawText = parts?.getJSONObject(0)?.optString("text", "") ?: ""
-                                
-                                val geminiData = JSONObject(rawText)
-                                
-                                if (geminiData.optString("status") == "success") {
-                                    val data = geminiData.getJSONObject("data")
-                                    val rawBackTextConstructed = "ঠিকানা: বাসা/হোল্ডিং: ${data.optString("holding")}, গ্রাম/রাস্তা: ${data.optString("village")}, ডাকঘর: ${data.optString("postOffice")} ${data.optString("zipCode")}, উপজেলা: ${data.optString("upazila")}, জেলা: ${data.optString("district")}"
-                                    
-                                    if (documentType == "PASSPORT") {
-                                        handlePassportServerResponse(data, faceBase64)
-                                    } else {
-                                        handleNidServerResponse(data, rawBackTextConstructed, barcodeMap, barcodeRawText, faceBase64)
-                                    }
-                                } else {
-                                    val msg = geminiData.optString("message", "ডকুমেন্ট ভেরিফিকেশন ব্যর্থ হয়েছে।")
-                                    runOnUiThread {
-                                        val safeMsg = JSONObject.quote(msg)
-                                        webView.evaluateJavascript("if(window.onScanFailed) { window.onScanFailed($safeMsg); }", null)
-                                    }
-                                }
-                            }
-                        } catch (e: Exception) {
-                            e.printStackTrace()
-                            runOnUiThread {
-                                val safeErrorMsg = JSONObject.quote("সঠিক তথ্য পাওয়া যায়নি। দয়া করে পরিষ্কার ছবি তুলুন।")
-                                webView.evaluateJavascript("if(window.onScanFailed) { window.onScanFailed($safeErrorMsg); }", null)
-                            }
-                        }
-                    } else {
+                val contentsArray = JSONArray().put(JSONObject().apply { put("parts", partsArray) })
+                val requestBodyJson = JSONObject().apply {
+                    put("contents", contentsArray)
+                    put("generationConfig", JSONObject().apply {
+                        put("responseMimeType", "application/json")
+                    })
+                }
+
+                val body = requestBodyJson.toString().toRequestBody("application/json; charset=utf-8".toMediaTypeOrNull())
+                
+                // সঠিক লেটেস্ট মডেল পাথ (gemini-1.5-flash-latest) যা 404 এরর এড়িয়ে যাবে
+                val request = Request.Builder()
+                    .url("https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash-latest:generateContent?key=${dynamicApiKey.trim()}")
+                    .post(body)
+                    .addHeader("Content-Type", "application/json")
+                    .build()
+
+                val geminiClient = okHttpClient.newBuilder()
+                    .connectTimeout(60, TimeUnit.SECONDS)
+                    .readTimeout(60, TimeUnit.SECONDS)
+                    .writeTimeout(60, TimeUnit.SECONDS)
+                    .build()
+
+                geminiClient.newCall(request).enqueue(object : Callback {
+                    override fun onFailure(call: Call, e: IOException) {
+                        e.printStackTrace()
                         runOnUiThread {
-                            var errMsg = "সার্ভার ব্যস্ত আছে বা কানেকশন নেই। একটু পর আবার চেষ্টা করুন।"
-                            if (response.code == 429 || response.code == 403) {
-                                errMsg = "এপিআই লিমিট শেষ বা এক্সেস নেই। দয়া করে এডমিনকে জানান।"
-                            } else if (response.code == 400) {
-                                errMsg = "API Key বা রিকোয়েস্ট ভুল হয়েছে।"
-                            }
-                            val safeErrorMsg = JSONObject.quote("$errMsg (Code: ${response.code})")
+                            val safeErrorMsg = JSONObject.quote("ইন্টারনেট কানেকশন সমস্যা! দয়া করে ইন্টারনেট চেক করুন।")
                             webView.evaluateJavascript("if(window.onScanFailed) { window.onScanFailed($safeErrorMsg); }", null)
                         }
                     }
+
+                    override fun onResponse(call: Call, response: Response) {
+                        val responseBody = response.body?.string() ?: ""
+                        if (response.isSuccessful) {
+                            try {
+                                val jsonResp = JSONObject(responseBody)
+                                val candidates = jsonResp.optJSONArray("candidates")
+                                if (candidates != null && candidates.length() > 0) {
+                                    val content = candidates.getJSONObject(0).optJSONObject("content")
+                                    val parts = content?.optJSONArray("parts")
+                                    val rawText = parts?.getJSONObject(0)?.optString("text", "") ?: ""
+                                    
+                                    val jsonRegex = Regex("\\{.*\\}", RegexOption.DOT_MATCHES_ALL)
+                                    val matchResult = jsonRegex.find(rawText)
+                                    val cleanJsonText = matchResult?.value ?: rawText
+                                    
+                                    val geminiData = JSONObject(cleanJsonText)
+                                    
+                                    if (geminiData.optString("status") == "success") {
+                                        val data = geminiData.getJSONObject("data")
+                                        val rawBackTextConstructed = "ঠিকানা: বাসা/হোল্ডিং: ${data.optString("holding")}, গ্রাম/রাস্তা: ${data.optString("village")}, ডাকঘর: ${data.optString("postOffice")} ${data.optString("zipCode")}, উপজেলা: ${data.optString("upazila")}, জেলা: ${data.optString("district")}"
+                                        
+                                        if (documentType == "PASSPORT") {
+                                            handlePassportServerResponse(data, faceBase64)
+                                        } else {
+                                            handleNidServerResponse(data, rawBackTextConstructed, barcodeMap, barcodeRawText, faceBase64)
+                                        }
+                                    } else {
+                                        val msg = geminiData.optString("message", "ডকুমেন্ট ভেরিফিকেশন ব্যর্থ হয়েছে।")
+                                        runOnUiThread {
+                                            val safeMsg = JSONObject.quote(msg)
+                                            webView.evaluateJavascript("if(window.onScanFailed) { window.onScanFailed($safeMsg); }", null)
+                                        }
+                                    }
+                                }
+                            } catch (e: Exception) {
+                                e.printStackTrace()
+                                runOnUiThread {
+                                    val safeErrorMsg = JSONObject.quote("সঠিক তথ্য পাওয়া যায়নি। দয়া করে পরিষ্কার ছবি তুলুন।")
+                                    webView.evaluateJavascript("if(window.onScanFailed) { window.onScanFailed($safeErrorMsg); }", null)
+                                }
+                            }
+                        } else {
+                            runOnUiThread {
+                                var errMsg = "সার্ভার ব্যস্ত আছে বা কানেকশন নেই। একটু পর আবার চেষ্টা করুন।"
+                                if (response.code == 429 || response.code == 403) {
+                                    errMsg = "এপিআই লিমিট শেষ বা এক্সেস নেই। দয়া করে এডমিনকে জানান।"
+                                } else if (response.code == 404) {
+                                    errMsg = "ভুল এপিআই কি (API Key) বা সার্ভার পাথ।"
+                                } else if (response.code == 400) {
+                                    errMsg = "API Key বা রিকোয়েস্ট ভুল হয়েছে।"
+                                }
+                                val safeErrorMsg = JSONObject.quote("$errMsg (Code: ${response.code})")
+                                webView.evaluateJavascript("if(window.onScanFailed) { window.onScanFailed($safeErrorMsg); }", null)
+                            }
+                        }
+                    }
+                })
+            } catch (e: Exception) {
+                e.printStackTrace()
+                runOnUiThread {
+                    val safeErrorMsg = JSONObject.quote("ইমেজ প্রসেস করতে সমস্যা হয়েছে।")
+                    webView.evaluateJavascript("if(window.onScanFailed) { window.onScanFailed($safeErrorMsg); }", null)
                 }
-            })
-        } catch (e: Exception) {
-            e.printStackTrace()
-            runOnUiThread {
-                val safeErrorMsg = JSONObject.quote("ইমেজ প্রসেস করতে সমস্যা হয়েছে।")
-                webView.evaluateJavascript("if(window.onScanFailed) { window.onScanFailed($safeErrorMsg); }", null)
             }
-        }
+        }.start()
     }
 
     private fun handleNidServerResponse(
