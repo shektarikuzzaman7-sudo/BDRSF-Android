@@ -36,16 +36,13 @@ dependencies {
     implementation("androidx.appcompat:appcompat:1.7.0")
     implementation("com.google.android.material:material:1.12.0")
     
-    // ক্যামেরায় তোলা ছবির রোটেশন ও EXIF তথ্য ঠিক রাখার জন্য
+    // ছবির রোটেশন ও ওরিয়েন্টেশন ফিক্সের জন্য
     implementation("androidx.exifinterface:exifinterface:1.3.7")
 
-    // এনআইডি কার্ডের পেছনের বারকোড ও কিউআর কোড স্ক্যানার (ML Kit)
+    // বারকোড/কিউআর স্ক্যানার
     implementation("com.google.mlkit:barcode-scanning:17.3.0")
     
-    // আপনার MainActivity থেকে এপিআই রিকোয়েস্ট পাঠানোর জন্য OkHttp
-    implementation("com.squareup.okhttp3:okhttp:4.12.0")
-    
-    // ক্যামেরা লাইভ প্রিভিউ ও ইমেজ বিশ্লেষণের জন্য CameraX
+    // ক্যামেরা ফ্রেম, অটো-ক্যাপচার ও অ্যানালাইসিসের জন্য CameraX
     val cameraxVersion = "1.3.4"
     implementation("androidx.camera:camera-core:$cameraxVersion")
     implementation("androidx.camera:camera-camera2:$cameraxVersion")
