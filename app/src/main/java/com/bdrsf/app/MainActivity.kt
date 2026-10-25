@@ -63,9 +63,6 @@ import androidx.exifinterface.media.ExifInterface
 import com.google.mlkit.vision.barcode.BarcodeScanner
 import com.google.mlkit.vision.barcode.BarcodeScanning
 import com.google.mlkit.vision.common.InputImage
-import com.google.mlkit.vision.text.TextRecognition
-import com.google.mlkit.vision.text.TextRecognizer
-import com.google.mlkit.vision.text.latin.TextRecognizerOptions
 import okhttp3.Call
 import okhttp3.Callback
 import okhttp3.MediaType.Companion.toMediaTypeOrNull
@@ -97,6 +94,7 @@ class MainActivity : AppCompatActivity() {
     private var previewView: PreviewView? = null
     private var cameraProvider: ProcessCameraProvider? = null
     private lateinit var cameraExecutor: ExecutorService
+    private lateinit var bgProcessingExecutor: ExecutorService
     private var isScanningActive = false
     private val isQRProcessed = AtomicBoolean(false)
     private var isFirstPageLoad = true
@@ -108,8 +106,14 @@ class MainActivity : AppCompatActivity() {
     private var tempDocumentFile: File? = null
     private var tempDocumentUri: Uri? = null
 
-    // ফ্রন্ট পার্টের টেক্সট থেকে পড়া এনআইডি নম্বর
-    private var cachedFrontNidNumber: String = ""
+    // Zero-Wait Pre-cached Memory Variables
+    @Volatile private var cachedFrontBase64: String = ""
+    @Volatile private var cachedBackBase64: String = ""
+    @Volatile private var cachedFaceBase64: String = ""
+    @Volatile private var cachedBarcodeMap: Map<String, String> = emptyMap()
+    @Volatile private var cachedBarcodeRaw: String = ""
+    private val isFrontProcessing = AtomicBoolean(false)
+    private val isBackProcessing = AtomicBoolean(false)
 
     private var filePathCallback: ValueCallback<Array<Uri>>? = null
     private var cameraImageFile: File? = null
@@ -120,14 +124,13 @@ class MainActivity : AppCompatActivity() {
     private val GALLERY_QR_REQUEST_CODE = 1004
     private val DOCUMENT_SCAN_REQUEST_CODE = 1005
 
-    // এমএল কিট: বারকোড এবং টেক্সট রিকগনিশন ক্লায়েন্ট
     private val barcodeScanner: BarcodeScanner by lazy { BarcodeScanning.getClient() }
-    private val textRecognizer: TextRecognizer by lazy { TextRecognition.getClient(TextRecognizerOptions.DEFAULT_OPTIONS) }
 
     private val okHttpClient = OkHttpClient.Builder()
-        .connectTimeout(30, TimeUnit.SECONDS)
-        .writeTimeout(30, TimeUnit.SECONDS)
-        .readTimeout(30, TimeUnit.SECONDS)
+        .connectTimeout(20, TimeUnit.SECONDS)
+        .writeTimeout(20, TimeUnit.SECONDS)
+        .readTimeout(25, TimeUnit.SECONDS)
+        .retryOnConnectionFailure(true)
         .build()
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -203,6 +206,8 @@ class MainActivity : AppCompatActivity() {
         setContentView(mainLayout)
 
         cameraExecutor = Executors.newSingleThreadExecutor()
+        bgProcessingExecutor = Executors.newFixedThreadPool(2)
+
         requestAllRequiredPermissions()
         hideSystemNavigationBar()
 
@@ -388,7 +393,9 @@ class MainActivity : AppCompatActivity() {
         }
         @JavascriptInterface
         fun triggerFullDocumentProcessing(docType: String) {
-            activity.runOnUiThread { activity.processSavedDocumentsHybrid(docType) }
+            activity.bgProcessingExecutor.execute {
+                activity.processSavedDocumentsHybrid(docType)
+            }
         }
         @JavascriptInterface
         fun startNativeGalleryPicker() {
@@ -570,10 +577,10 @@ class MainActivity : AppCompatActivity() {
         previewView = null
     }
 
-    // ইমেজ কোনোরূপ ক্রপ হবে না — শুধু রোটেশন ও সাইজ ফিক্স (Original Aspect Ratio)
-    private fun fixOrientationAndCompress(file: File) {
+    // আল্ট্রা-ফাস্ট রিসাইজ: Max 1150px এবং 65% JPEG (মাত্র ~120KB পেলোড, দ্রুততম আপলোড)
+    private fun optimizeAndCompressToBase64(file: File): Pair<Bitmap?, String> {
         try {
-            if (!file.exists() || file.length() == 0L) return
+            if (!file.exists() || file.length() == 0L) return Pair(null, "")
             val exif = ExifInterface(file.absolutePath)
             val orientation = exif.getAttributeInt(ExifInterface.TAG_ORIENTATION, ExifInterface.ORIENTATION_NORMAL)
             val rotationInDegrees = when (orientation) {
@@ -588,72 +595,82 @@ class MainActivity : AppCompatActivity() {
 
             val maxDim = max(options.outWidth, options.outHeight)
             var sampleSize = 1
-            while (maxDim / sampleSize > 1600) {
+            while (maxDim / sampleSize > 1150) {
                 sampleSize *= 2
             }
 
             val decodeOptions = BitmapFactory.Options().apply { inSampleSize = sampleSize }
-            var bitmap = BitmapFactory.decodeFile(file.absolutePath, decodeOptions) ?: return
+            var bitmap = BitmapFactory.decodeFile(file.absolutePath, decodeOptions) ?: return Pair(null, "")
 
             if (rotationInDegrees != 0) {
                 val matrix = Matrix().apply { postRotate(rotationInDegrees.toFloat()) }
                 bitmap = Bitmap.createBitmap(bitmap, 0, 0, bitmap.width, bitmap.height, matrix, true)
             }
 
-            FileOutputStream(file).use { out ->
-                bitmap.compress(Bitmap.CompressFormat.JPEG, 85, out)
+            // স্কেল করে 1150px এর নিচে রাখা
+            val currentMax = max(bitmap.width, bitmap.height)
+            if (currentMax > 1150) {
+                val ratio = 1150f / currentMax
+                val newW = (bitmap.width * ratio).toInt()
+                val newH = (bitmap.height * ratio).toInt()
+                bitmap = Bitmap.createScaledBitmap(bitmap, newW, newH, true)
             }
-        } catch (e: Exception) { e.printStackTrace() }
+
+            val stream = ByteArrayOutputStream()
+            bitmap.compress(Bitmap.CompressFormat.JPEG, 68, stream)
+            val bytes = stream.toByteArray()
+
+            FileOutputStream(file).use { it.write(bytes) }
+            val base64Str = "data:image/jpeg;base64," + Base64.encodeToString(bytes, Base64.NO_WRAP)
+            return Pair(bitmap, base64Str)
+        } catch (e: Exception) {
+            e.printStackTrace()
+            return Pair(null, "")
+        }
     }
 
-    // মুখমণ্ডল (Face) ক্রপ
-    private fun extractFacePhotoBase64(file: File): String {
+    private fun extractFaceFromBitmap(bitmap: Bitmap?): String {
+        if (bitmap == null) return ""
         try {
-            if (!file.exists() || file.length() == 0L) return ""
-            val bitmap = BitmapFactory.decodeFile(file.absolutePath) ?: return ""
+            val width = if (bitmap.width % 2 == 0) bitmap.width else bitmap.width - 1
+            val height = bitmap.height
+            val bmp565 = bitmap.copy(Bitmap.Config.RGB_565, false)
+            val detector = FaceDetector(width, height, 1)
+            val faces = arrayOfNulls<FaceDetector.Face>(1)
+            val count = detector.findFaces(bmp565, faces)
 
-            try {
-                val width = if (bitmap.width % 2 == 0) bitmap.width else bitmap.width - 1
-                val height = bitmap.height
-                val bmp565 = bitmap.copy(Bitmap.Config.RGB_565, true)
-                val detector = FaceDetector(width, height, 1)
-                val faces = arrayOfNulls<FaceDetector.Face>(1)
-                val count = detector.findFaces(bmp565, faces)
+            if (count > 0 && faces[0] != null) {
+                val face = faces[0]!!
+                val midPoint = PointF()
+                face.getMidPoint(midPoint)
+                val eyeDistance = face.eyesDistance()
 
-                if (count > 0 && faces[0] != null) {
-                    val face = faces[0]!!
-                    val midPoint = PointF()
-                    face.getMidPoint(midPoint)
-                    val eyeDistance = face.eyesDistance()
+                val faceWidth = (eyeDistance * 2.8f).toInt()
+                val faceHeight = (eyeDistance * 3.4f).toInt()
+                val x = (midPoint.x - faceWidth / 2).toInt().coerceIn(0, bitmap.width - 1)
+                val y = (midPoint.y - faceHeight / 2.2f).toInt().coerceIn(0, bitmap.height - 1)
+                val w = faceWidth.coerceAtMost(bitmap.width - x)
+                val h = faceHeight.coerceAtMost(bitmap.height - y)
 
-                    val faceWidth = (eyeDistance * 2.8f).toInt()
-                    val faceHeight = (eyeDistance * 3.4f).toInt()
-                    val x = (midPoint.x - faceWidth / 2).toInt().coerceIn(0, bitmap.width - 1)
-                    val y = (midPoint.y - faceHeight / 2.2f).toInt().coerceIn(0, bitmap.height - 1)
-                    val w = faceWidth.coerceAtMost(bitmap.width - x)
-                    val h = faceHeight.coerceAtMost(bitmap.height - y)
-
-                    if (w > 30 && h > 30) {
-                        val croppedFace = Bitmap.createBitmap(bitmap, x, y, w, h)
-                        val stream = ByteArrayOutputStream()
-                        croppedFace.compress(Bitmap.CompressFormat.JPEG, 80, stream)
-                        return "data:image/jpeg;base64," + Base64.encodeToString(stream.toByteArray(), Base64.NO_WRAP)
-                    }
+                if (w > 30 && h > 30) {
+                    val croppedFace = Bitmap.createBitmap(bitmap, x, y, w, h)
+                    val stream = ByteArrayOutputStream()
+                    croppedFace.compress(Bitmap.CompressFormat.JPEG, 78, stream)
+                    return "data:image/jpeg;base64," + Base64.encodeToString(stream.toByteArray(), Base64.NO_WRAP)
                 }
-            } catch (e: Exception) { e.printStackTrace() }
-
-            try {
-                val x = (bitmap.width * 0.03).toInt()
-                val y = (bitmap.height * 0.18).toInt()
-                val w = (bitmap.width * 0.38).toInt().coerceAtMost(bitmap.width - x)
-                val h = (bitmap.height * 0.62).toInt().coerceAtMost(bitmap.height - y)
-                val fallbackCrop = Bitmap.createBitmap(bitmap, x, y, w, h)
-                val stream = ByteArrayOutputStream()
-                fallbackCrop.compress(Bitmap.CompressFormat.JPEG, 80, stream)
-                return "data:image/jpeg;base64," + Base64.encodeToString(stream.toByteArray(), Base64.NO_WRAP)
-            } catch (ex: Exception) { ex.printStackTrace() }
+            }
         } catch (e: Exception) { e.printStackTrace() }
-        return ""
+
+        return try {
+            val x = (bitmap.width * 0.03).toInt()
+            val y = (bitmap.height * 0.18).toInt()
+            val w = (bitmap.width * 0.38).toInt().coerceAtMost(bitmap.width - x)
+            val h = (bitmap.height * 0.62).toInt().coerceAtMost(bitmap.height - y)
+            val fallbackCrop = Bitmap.createBitmap(bitmap, x, y, w, h)
+            val stream = ByteArrayOutputStream()
+            fallbackCrop.compress(Bitmap.CompressFormat.JPEG, 78, stream)
+            "data:image/jpeg;base64," + Base64.encodeToString(stream.toByteArray(), Base64.NO_WRAP)
+        } catch (ex: Exception) { "" }
     }
 
     private fun parseNidBarcodeData(barcodeData: String): Map<String, String> {
@@ -675,137 +692,119 @@ class MainActivity : AppCompatActivity() {
         return result
     }
 
-    // ==============================================================
-    // ১. ফ্রন্ট পার্ট টেক্সট ও ব্যাক পার্ট বারকোড যাচাই
-    // ==============================================================
-    private fun analyzeFrontImageText(file: File) {
-        val image = InputImage.fromFilePath(this, Uri.fromFile(file))
-        textRecognizer.process(image)
-            .addOnSuccessListener { visionText ->
-                val fullText = visionText.text
-                // ১০, ১৩ বা ১৭ ডিজিটের এনআইডি নম্বর রিড
-                val match = Regex("\\b([0-9]{10}|[0-9]{13}|[0-9]{17})\\b").find(fullText)
-                cachedFrontNidNumber = match?.groupValues?.getOrNull(1) ?: ""
-            }
-            .addOnFailureListener {
-                cachedFrontNidNumber = ""
-            }
-    }
-
-    private fun verifyBackImageWithFront(file: File) {
-        val image = InputImage.fromFilePath(this, Uri.fromFile(file))
-        barcodeScanner.process(image)
-            .addOnSuccessListener { barcodes ->
-                var barcodeRawUtf8 = ""
-                for (b in barcodes) {
-                    val decoded = b.rawBytes?.let { bytes ->
-                        try { String(bytes, Charsets.UTF_8) } catch (e: Exception) { b.rawValue ?: "" }
-                    } ?: (b.rawValue ?: "")
-                    if (decoded.isNotEmpty()) barcodeRawUtf8 += "$decoded\n"
-                }
-
-                val barcodeMap = parseNidBarcodeData(barcodeRawUtf8)
-                val backPin = barcodeMap["nid"]?.replace(Regex("\\D"), "") ?: ""
-
-                // যদি পেছনের অংশে বারকোড একেবারেই না পাওয়া যায়
-                if (backPin.isEmpty()) {
-                    backDocFile = null
-                    val msg = "রং ডকুমেন্ট! এনআইডি কার্ডের পেছনের বারকোড পড়া যায়নি। পরিষ্কার ছবি দিন।"
-                    Toast.makeText(this, msg, Toast.LENGTH_LONG).show()
-                    webView.evaluateJavascript("if(window.onScanFailed) { window.onScanFailed('$msg'); }", null)
-                    return@addOnSuccessListener
-                }
-
-                // সামনের পার্টের নম্বরের সাথে পেছনের বারকোডের পিন মিলানো
-                if (cachedFrontNidNumber.isNotEmpty()) {
-                    val isMatch = (cachedFrontNidNumber == backPin || 
-                                   cachedFrontNidNumber.endsWith(backPin) || 
-                                   backPin.endsWith(cachedFrontNidNumber))
-
-                    if (!isMatch) {
-                        backDocFile = null
-                        val mismatchMsg = "রং ডকুমেন্ট! সামনের অংশের এনআইডি নম্বরের সাথে পেছনের বারকোডের কোনো মিল নেই।"
-                        Toast.makeText(this, mismatchMsg, Toast.LENGTH_LONG).show()
-                        webView.evaluateJavascript("if(window.onScanFailed) { window.onScanFailed('$mismatchMsg'); }", null)
-                        return@addOnSuccessListener
+    // ইউজার ছবি সিলেক্ট করার সাথে সাথে ব্যাকগ্রাউন্ডে প্রি-প্রসেসিং করে রাখা
+    private fun preProcessDocumentInBackground(slot: String, file: File) {
+        if (slot == "nid_front" || slot == "passport") {
+            isFrontProcessing.set(true)
+            bgProcessingExecutor.execute {
+                try {
+                    val (bmp, b64) = optimizeAndCompressToBase64(file)
+                    cachedFrontBase64 = b64
+                    runOnUiThread {
+                        val safeSlot = JSONObject.quote(slot)
+                        val safeB64 = JSONObject.quote(b64)
+                        webView.evaluateJavascript("if(window.onImageSelectedPreview) { window.onImageSelectedPreview($safeSlot, $safeB64); }", null)
                     }
+                    cachedFaceBase64 = extractFaceFromBitmap(bmp)
+                } finally {
+                    isFrontProcessing.set(false)
                 }
-
-                Toast.makeText(this, "উভয় পাশ সফলভাবে যাচাই হয়েছে!", Toast.LENGTH_SHORT).show()
             }
-            .addOnFailureListener {
-                backDocFile = null
-                val failMsg = "পেছনের বারকোড স্ক্যান ব্যর্থ হয়েছে। পুনরায় আপলোড করুন।"
-                Toast.makeText(this, failMsg, Toast.LENGTH_SHORT).show()
-                webView.evaluateJavascript("if(window.onScanFailed) { window.onScanFailed('$failMsg'); }", null)
+        } else if (slot == "nid_back") {
+            isBackProcessing.set(true)
+            bgProcessingExecutor.execute {
+                try {
+                    val (bmp, b64) = optimizeAndCompressToBase64(file)
+                    cachedBackBase64 = b64
+                    runOnUiThread {
+                        val safeSlot = JSONObject.quote(slot)
+                        val safeB64 = JSONObject.quote(b64)
+                        webView.evaluateJavascript("if(window.onImageSelectedPreview) { window.onImageSelectedPreview($safeSlot, $safeB64); }", null)
+                    }
+                    if (bmp != null) {
+                        val inputImg = InputImage.fromBitmap(bmp, 0)
+                        barcodeScanner.process(inputImg)
+                            .addOnSuccessListener { barcodes ->
+                                var rawUtf8 = ""
+                                for (b in barcodes) {
+                                    val decoded = b.rawBytes?.let { bytes ->
+                                        try { String(bytes, Charsets.UTF_8) } catch (e: Exception) { b.rawValue ?: "" }
+                                    } ?: (b.rawValue ?: "")
+                                    if (decoded.isNotEmpty()) rawUtf8 += "$decoded\n"
+                                }
+                                cachedBarcodeRaw = rawUtf8
+                                cachedBarcodeMap = parseNidBarcodeData(rawUtf8)
+                                isBackProcessing.set(false)
+                            }
+                            .addOnFailureListener {
+                                cachedBarcodeRaw = ""
+                                cachedBarcodeMap = emptyMap()
+                                isBackProcessing.set(false)
+                            }
+                    } else {
+                        isBackProcessing.set(false)
+                    }
+                } catch (e: Exception) {
+                    isBackProcessing.set(false)
+                }
             }
+        }
     }
 
-    // ==============================================================
-    // ২. নেক্সট স্টেপে এপিআই কল (তথ্য এক্সট্র্যাক্ট করে পাঠানো)
-    // ==============================================================
     private fun processSavedDocumentsHybrid(rawDocType: String) {
         val isPassport = rawDocType.contains("PASS", ignoreCase = true)
         val normalizedDocType = if (isPassport) "PASSPORT" else "NID"
 
-        if (frontDocFile == null || !frontDocFile!!.exists()) {
+        // ব্যাকগ্রাউন্ড প্রি-প্রসেসিং চলমান থাকলে সামান্য অপেক্ষা করা (সর্বোচ্চ ২ সেকেন্ড)
+        var waitCycles = 0
+        while ((isFrontProcessing.get() || (!isPassport && isBackProcessing.get())) && waitCycles < 40) {
+            Thread.sleep(50)
+            waitCycles++
+        }
+
+        if (cachedFrontBase64.isEmpty()) {
             val missingMsg = if (isPassport) "পাসপোর্টের ছবি পাওয়া যায়নি!" else "এনআইডির সামনের অংশের ছবি পাওয়া যায়নি!"
-            Toast.makeText(this, missingMsg, Toast.LENGTH_SHORT).show()
-            webView.evaluateJavascript("if(window.onScanFailed) { window.onScanFailed('$missingMsg'); }", null)
+            runOnUiThread {
+                Toast.makeText(this, missingMsg, Toast.LENGTH_SHORT).show()
+                webView.evaluateJavascript("if(window.onScanFailed) { window.onScanFailed('$missingMsg'); }", null)
+            }
             return
         }
 
-        if (!isPassport && (backDocFile == null || !backDocFile!!.exists())) {
+        if (!isPassport && cachedBackBase64.isEmpty()) {
             val backMissingMsg = "এনআইডি কার্ডের পেছনের অংশের ছবি পাওয়া যায়নি!"
-            Toast.makeText(this, backMissingMsg, Toast.LENGTH_SHORT).show()
-            webView.evaluateJavascript("if(window.onScanFailed) { window.onScanFailed('$backMissingMsg'); }", null)
+            runOnUiThread {
+                Toast.makeText(this, backMissingMsg, Toast.LENGTH_SHORT).show()
+                webView.evaluateJavascript("if(window.onScanFailed) { window.onScanFailed('$backMissingMsg'); }", null)
+            }
             return
         }
 
-        val facePhotoBase64 = extractFacePhotoBase64(frontDocFile!!)
-
-        // পেছনের বারকোড টেক্সট সহ এপিআই-তে পাঠানো
-        if (!isPassport && backDocFile != null && backDocFile!!.exists()) {
-            val backImage = InputImage.fromFilePath(this, Uri.fromFile(backDocFile))
-            barcodeScanner.process(backImage)
-                .addOnSuccessListener { barcodes ->
-                    var barcodeRawUtf8 = ""
-                    for (b in barcodes) {
-                        val decoded = b.rawBytes?.let { bytes ->
-                            try { String(bytes, Charsets.UTF_8) } catch (e: Exception) { b.rawValue ?: "" }
-                        } ?: (b.rawValue ?: "")
-                        if (decoded.isNotEmpty()) barcodeRawUtf8 += "$decoded\n"
-                    }
-                    val barcodeMap = parseNidBarcodeData(barcodeRawUtf8)
-                    sendImageToServerForOCR(frontDocFile!!, backDocFile, facePhotoBase64, barcodeMap, barcodeRawUtf8, normalizedDocType)
-                }
-                .addOnFailureListener {
-                    sendImageToServerForOCR(frontDocFile!!, backDocFile, facePhotoBase64, emptyMap(), "", normalizedDocType)
-                }
-        } else {
-            sendImageToServerForOCR(frontDocFile!!, null, facePhotoBase64, emptyMap(), "", normalizedDocType)
-        }
+        // সরাসরি মেমোরি থেকে রেডি থাকা ক্যাশ ডাটা সার্ভারে পাঠানো (Zero-Wait!)
+        sendPreCachedDataToServerForOCR(
+            frontBase64 = cachedFrontBase64,
+            backBase64 = if (isPassport) null else cachedBackBase64,
+            faceBase64 = cachedFaceBase64,
+            barcodeMap = cachedBarcodeMap,
+            barcodeRawText = cachedBarcodeRaw,
+            documentType = normalizedDocType
+        )
     }
 
-    private fun sendImageToServerForOCR(
-        frontFile: File,
-        backFile: File?,
+    private fun sendPreCachedDataToServerForOCR(
+        frontBase64: String,
+        backBase64: String?,
         faceBase64: String,
         barcodeMap: Map<String, String>,
         barcodeRawText: String,
         documentType: String
     ) {
         try {
-            val frontBytes = frontFile.readBytes()
-            val frontBase64 = "data:image/jpeg;base64," + Base64.encodeToString(frontBytes, Base64.NO_WRAP)
-
             val jsonBody = JSONObject().apply {
                 put("action", "scan_document")
                 put("document_type", documentType)
                 put("front_image_base64", frontBase64)
-                if (backFile != null && backFile.exists()) {
-                    val backBytes = backFile.readBytes()
-                    val backBase64 = "data:image/jpeg;base64," + Base64.encodeToString(backBytes, Base64.NO_WRAP)
+                if (!backBase64.isNullOrEmpty()) {
                     put("back_image_base64", backBase64)
                 }
             }
@@ -874,12 +873,29 @@ class MainActivity : AppCompatActivity() {
         val ocrNid = ocrData.optString("nidNo", "").replace(Regex("\\D"), "")
         val barcodeNid = barcodeMap["nid"]?.replace(Regex("\\D"), "") ?: ""
 
-        val finalNidNo = if (ocrNid.isNotEmpty()) ocrNid else (if (barcodeNid.isNotEmpty()) barcodeNid else cachedFrontNidNumber)
-        val finalDob = ocrData.optString("dob", "").takeIf { it.isNotEmpty() } ?: (barcodeMap["dob"] ?: "")
-        val finalNameBn = ocrData.optString("nameBn", "").takeIf { it.isNotEmpty() } ?: (barcodeMap["name_bn"] ?: "")
-        val finalNameEn = ocrData.optString("nameEn", "").takeIf { it.isNotEmpty() } ?: (barcodeMap["name"] ?: "")
-        val fatherName = ocrData.optString("fatherName", "").takeIf { it.isNotEmpty() } ?: (barcodeMap["father"] ?: "")
-        val motherName = ocrData.optString("motherName", "").takeIf { it.isNotEmpty() } ?: (barcodeMap["mother"] ?: "")
+        if (ocrNid.isEmpty() && barcodeNid.isEmpty()) {
+            runOnUiThread {
+                webView.evaluateJavascript("if(window.onScanFailed) { window.onScanFailed('কার্ডে কোনো বৈধ এনআইডি নম্বর পাওয়া যায়নি! অরিজিনাল কার্ড আপলোড করুন।'); }", null)
+            }
+            return
+        }
+
+        if (ocrNid.isNotEmpty() && barcodeNid.isNotEmpty()) {
+            val isMatch = (ocrNid == barcodeNid) || ocrNid.endsWith(barcodeNid) || barcodeNid.endsWith(ocrNid)
+            if (!isMatch) {
+                runOnUiThread {
+                    webView.evaluateJavascript("if(window.onScanFailed) { window.onScanFailed('প্রতারণা সনাক্ত হয়েছে! সামনের অংশ এবং পেছনের অংশ একই এনআইডি কার্ডের নয়।'); }", null)
+                }
+                return
+            }
+        }
+
+        val finalNidNo = if (barcodeNid.isNotEmpty()) barcodeNid else ocrNid
+        val finalDob = barcodeMap["dob"]?.takeIf { it.isNotEmpty() } ?: ocrData.optString("dob", "")
+        val finalNameBn = barcodeMap["name_bn"]?.takeIf { it.isNotEmpty() } ?: ocrData.optString("nameBn", "")
+        val finalNameEn = barcodeMap["name"]?.takeIf { it.isNotEmpty() } ?: ocrData.optString("nameEn", "")
+        val fatherName = barcodeMap["father"]?.takeIf { it.isNotEmpty() } ?: ocrData.optString("fatherName", "")
+        val motherName = barcodeMap["mother"]?.takeIf { it.isNotEmpty() } ?: ocrData.optString("motherName", "")
 
         val displayName = if (finalNameBn.isNotEmpty()) finalNameBn else finalNameEn
 
@@ -917,6 +933,13 @@ class MainActivity : AppCompatActivity() {
         val passportNo = ocrData.optString("passportNo", "").trim()
         val nameEn = ocrData.optString("nameEn", "").trim()
         val dob = ocrData.optString("dob", "").trim()
+
+        if (passportNo.isEmpty() || passportNo.length < 7 || nameEn.isEmpty()) {
+            runOnUiThread {
+                webView.evaluateJavascript("if(window.onScanFailed) { window.onScanFailed('বৈধ পাসপোর্ট শনাক্ত করা যায়নি! পাসপোর্টের মূল পেজ পরিষ্কারভাবে আপলোড করুন।'); }", null)
+            }
+            return
+        }
 
         runOnUiThread {
             val safeName = JSONObject.quote(nameEn)
@@ -976,43 +999,32 @@ class MainActivity : AppCompatActivity() {
             }
         } else if (requestCode == DOCUMENT_SCAN_REQUEST_CODE) {
             if (resultCode == Activity.RESULT_OK) {
-                val selectedFile: File? = if (data?.data != null) {
-                    try {
-                        val file = createImageFile()
-                        contentResolver.openInputStream(data.data!!)?.use { input ->
-                            FileOutputStream(file).use { output -> input.copyTo(output) }
-                        }
-                        fixOrientationAndCompress(file)
-                        file
-                    } catch (e: Exception) { null }
-                } else if (tempDocumentFile != null && tempDocumentFile!!.exists()) {
-                    fixOrientationAndCompress(tempDocumentFile!!)
-                    tempDocumentFile
-                } else null
+                val targetSlot = currentScanDocType
+                val rawUri = data?.data
+                val capturedFile = tempDocumentFile
 
-                if (selectedFile != null && selectedFile.exists()) {
-                    if (currentScanDocType == "nid_front" || currentScanDocType == "passport") {
-                        frontDocFile = selectedFile
-                        // সামনের অংশের টেক্সট থেকে এনআইডি নম্বর রিড করা
-                        analyzeFrontImageText(selectedFile)
-                    } else if (currentScanDocType == "nid_back") {
-                        backDocFile = selectedFile
-                        // পেছনের অংশ আসার সাথে সাথে ব্যাক বারকোডের সাথে ফ্রন্ট নম্বরের মিল পরীক্ষা
-                        verifyBackImageWithFront(selectedFile)
+                // সম্পূর্ণ ফাইল কপি ও কম্প্রেশন ব্যাকগ্রাউন্ড থ্রেডে পাঠানো হলো (UI 100% Smooth থাকবে)
+                bgProcessingExecutor.execute {
+                    val selectedFile: File? = if (rawUri != null) {
+                        try {
+                            val file = createImageFile()
+                            contentResolver.openInputStream(rawUri)?.use { input ->
+                                FileOutputStream(file).use { output -> input.copyTo(output) }
+                            }
+                            file
+                        } catch (e: Exception) { null }
+                    } else if (capturedFile != null && capturedFile.exists()) {
+                        capturedFile
+                    } else null
+
+                    if (selectedFile != null && selectedFile.exists()) {
+                        if (targetSlot == "nid_front" || targetSlot == "passport") {
+                            frontDocFile = selectedFile
+                        } else if (targetSlot == "nid_back") {
+                            backDocFile = selectedFile
+                        }
+                        preProcessDocumentInBackground(targetSlot, selectedFile)
                     }
-
-                    // কোনো ক্রপ ছাড়াই মূল ইমেজ প্রিভিউ হিসেবে দেখানো
-                    try {
-                        val bmp = BitmapFactory.decodeFile(selectedFile.absolutePath)
-                        if (bmp != null) {
-                            val stream = ByteArrayOutputStream()
-                            bmp.compress(Bitmap.CompressFormat.JPEG, 70, stream)
-                            val base64 = "data:image/jpeg;base64," + Base64.encodeToString(stream.toByteArray(), Base64.NO_WRAP)
-                            val safeSlot = JSONObject.quote(currentScanDocType)
-                            val safeB64 = JSONObject.quote(base64)
-                            webView.evaluateJavascript("if(window.onImageSelectedPreview) { window.onImageSelectedPreview($safeSlot, $safeB64); }", null)
-                        }
-                    } catch (e: Exception) { e.printStackTrace() }
                 }
             }
             tempDocumentFile = null
@@ -1023,7 +1035,7 @@ class MainActivity : AppCompatActivity() {
             if (resultCode == Activity.RESULT_OK) {
                 if (data?.data != null) results = arrayOf(data.data!!)
                 else if (cameraImageUri != null) {
-                    cameraImageFile?.let { fixOrientationAndCompress(it) }
+                    cameraImageFile?.let { optimizeAndCompressToBase64(it) }
                     results = arrayOf(cameraImageUri!!)
                 }
             }
@@ -1063,8 +1075,8 @@ class MainActivity : AppCompatActivity() {
         super.onDestroy()
         try {
             barcodeScanner.close()
-            textRecognizer.close()
             if (::cameraExecutor.isInitialized) cameraExecutor.shutdown()
+            if (::bgProcessingExecutor.isInitialized) bgProcessingExecutor.shutdown()
         } catch (e: Exception) { e.printStackTrace() }
     }
 
