@@ -1,9 +1,9 @@
 package com.bdrsf.app
 
-import android.content.Context
 import android.net.Uri
 import android.webkit.CookieManager
 import android.webkit.WebSettings
+import android.webkit.WebView
 import java.util.Locale
 
 object AppSecurityConfig {
@@ -16,14 +16,14 @@ object AppSecurityConfig {
         "www.bdrsf.com"
     )
 
-    val TRUSTED_SCHEMES = setOf(
-        "https",
-        "about",
-        "data",
-        "file"
+    val EXTERNAL_SCHEMES = setOf(
+        "tel",
+        "mailto",
+        "whatsapp",
+        "intent"
     )
 
-    const val DEFAULT_TIMEOUT_MS = 30_000L
+    const val DEFAULT_TIMEOUT_MS = 45_000L
 
     fun isTrustedHost(host: String?): Boolean {
         if (host.isNullOrBlank()) return false
@@ -35,48 +35,50 @@ object AppSecurityConfig {
         if (url.isNullOrBlank()) return false
         return try {
             val uri = Uri.parse(url)
-            val scheme = uri.scheme?.lowercase(Locale.US)
+            val scheme = uri.scheme?.lowercase(Locale.US) ?: return false
+
+            // বাহ্যিক অ্যাপ স্কিম (tel, mailto, whatsapp ইত্যাদি হোস্ট ছাড়াও অনুমোদিত)
+            if (EXTERNAL_SCHEMES.contains(scheme)) {
+                return true
+            }
+
             val host = uri.host?.lowercase(Locale.US)
-
-            if (scheme == null || host == null) return false
-
-            if (isTrustedHost(host)) {
+            if (host != null && isTrustedHost(host)) {
                 return scheme == "https" || scheme == "about" || scheme == "data"
             }
 
-            when (scheme) {
-                "tel", "mailto", "whatsapp", "intent" -> true
-                else -> false
-            }
-        } catch (e: Exception) {
+            false
+        } catch (_: Exception) {
             false
         }
     }
 
     fun configureWebSettings(webSettings: WebSettings) {
-        webSettings.javaScriptEnabled = true
-        webSettings.domStorageEnabled = true
-        webSettings.databaseEnabled = true
-        webSettings.setSupportZoom(false)
-        webSettings.builtInZoomControls = false
-        webSettings.displayZoomControls = false
-        webSettings.cacheMode = WebSettings.LOAD_DEFAULT
-        webSettings.loadWithOverviewMode = true
-        webSettings.useWideViewPort = true
-        webSettings.allowFileAccess = true
-        webSettings.allowContentAccess = true
-        webSettings.allowUniversalAccessFromFileURLs = false
-        webSettings.allowFileAccessFromFileURLs = false
-        webSettings.mixedContentMode = WebSettings.MIXED_CONTENT_NEVER_ALLOW
-        webSettings.safeBrowsingEnabled = true
-        webSettings.savePassword = false
-        webSettings.setSupportMultipleWindows(false)
-        webSettings.javaScriptCanOpenWindowsAutomatically = false
+        webSettings.apply {
+            javaScriptEnabled = true
+            domStorageEnabled = true
+            databaseEnabled = true
+            setSupportZoom(false)
+            builtInZoomControls = false
+            displayZoomControls = false
+            cacheMode = WebSettings.LOAD_DEFAULT
+            loadWithOverviewMode = true
+            useWideViewPort = true
+            allowFileAccess = true
+            allowContentAccess = true
+            allowUniversalAccessFromFileURLs = false
+            allowFileAccessFromFileURLs = false
+            mixedContentMode = WebSettings.MIXED_CONTENT_NEVER_ALLOW
+            safeBrowsingEnabled = true
+            savePassword = false
+            setSupportMultipleWindows(false)
+            javaScriptCanOpenWindowsAutomatically = false
+        }
     }
 
-    fun configureCookiePolicy(context: Context, cookieManager: CookieManager) {
+    fun configureCookiePolicy(webView: WebView, cookieManager: CookieManager) {
         cookieManager.setAcceptCookie(true)
-        cookieManager.setAcceptThirdPartyCookies(null, true)
+        cookieManager.setAcceptThirdPartyCookies(webView, true)
     }
 
     fun buildSafeUrl(rawUrl: String?): String {
@@ -90,7 +92,7 @@ object AppSecurityConfig {
             } else {
                 APP_BASE_URL
             }
-        } catch (e: Exception) {
+        } catch (_: Exception) {
             APP_BASE_URL
         }
     }
