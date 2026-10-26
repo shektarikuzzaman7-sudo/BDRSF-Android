@@ -2,91 +2,116 @@ package com.bdrsf.app
 
 import okhttp3.Call
 import okhttp3.Callback
-import okhttp3.MediaType.Companion.toMediaTypeOrNull
+import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
 import okhttp3.Response
+import org.json.JSONArray
 import org.json.JSONObject
 import java.io.IOException
 import java.util.concurrent.TimeUnit
 
 class ApiClient {
 
-    private val client = OkHttpClient.Builder()
-        .connectTimeout(AppSecurityConfig.DEFAULT_TIMEOUT_MS, TimeUnit.MILLISECONDS)
-        .readTimeout(AppSecurityConfig.DEFAULT_TIMEOUT_MS, TimeUnit.MILLISECONDS)
-        .writeTimeout(AppSecurityConfig.DEFAULT_TIMEOUT_MS, TimeUnit.MILLISECONDS)
-        .retryOnConnectionFailure(true)
-        .build()
+    private val httpClient: OkHttpClient by lazy {
+        OkHttpClient.Builder()
+            .connectTimeout(25, TimeUnit.SECONDS)
+            .readTimeout(30, TimeUnit.SECONDS)
+            .writeTimeout(30, TimeUnit.SECONDS)
+            .build()
+    }
+
+    private val jsonMediaType = "application/json; charset=utf-8".toMediaType()
 
     fun sendOcrRequest(
         documentType: String,
         frontImageBase64: String,
         backImageBase64: String?,
-        faceImageBase64: String,
+        faceImageBase64: String?,
         onSuccess: (JSONObject) -> Unit,
         onFailure: (String) -> Unit
     ) {
-        try {
-            val jsonBody = JSONObject().apply {
-                put("action", "scan_document")
-                put("document_type", documentType)
-                put("front_image_base64", frontImageBase64)
+        val payload = JSONObject().apply {
+            put("action", "scan_document")
+            put("document_type", documentType)
+            put("front_image_base64", frontImageBase64)
+            if (!backImageBase64.isNullOrBlank()) {
+                put("back_image_base64", backImageBase64)
+            }
+            if (!faceImageBase64.isNullOrBlank()) {
+                put("face_image_base64", faceImageBase64)
+            }
+        }
 
-                if (!backImageBase64.isNullOrEmpty()) {
-                    put("back_image_base64", backImageBase64)
-                }
+        val request = Request.Builder()
+            .url("${AppSecurityConfig.APP_BASE_URL}/api/ocr_scan")
+            .post(payload.toString().toRequestBody(jsonMediaType))
+            .addHeader("Accept", "application/json")
+            .build()
 
-                if (faceImageBase64.isNotBlank()) {
-                    put("face_image_base64", faceImageBase64)
-                }
+        httpClient.newCall(request).enqueue(object : Callback {
+            override fun onFailure(call: Call, e: IOException) {
+                onFailure(e.message ?: "Network error")
             }
 
-            val request = Request.Builder()
-                .url("${AppSecurityConfig.APP_BASE_URL.trimEnd('/')}/api/ocr_scan")
-                .post(
-                    jsonBody.toString()
-                        .toRequestBody("application/json; charset=utf-8".toMediaTypeOrNull())
-                )
-                .addHeader("Accept", "application/json")
-                .addHeader("Content-Type", "application/json")
-                .build()
-
-            client.newCall(request).enqueue(object : Callback {
-                override fun onFailure(call: Call, e: IOException) {
-                    onFailure("সার্ভার কানেকশন ব্যর্থ হয়েছে। ইন্টারনেট চেক করুন।")
-                }
-
-                override fun onResponse(call: Call, response: Response) {
-                    response.use { res ->
-                        val responseBody = try {
-                            res.body?.string()
-                        } catch (_: Exception) {
-                            null
-                        }
-
-                        if (!res.isSuccessful || responseBody.isNullOrBlank()) {
-                            onFailure("সার্ভার এরর: HTTP ${res.code}")
-                            return
-                        }
-
+            override fun onResponse(call: Call, response: Response) {
+                response.use { res ->
+                    val bodyStr = res.body?.string() ?: ""
+                    if (res.isSuccessful && bodyStr.isNotBlank()) {
                         try {
-                            val json = JSONObject(responseBody)
-                            if (json.optString("status") == "success") {
-                                onSuccess(json)
-                            } else {
-                                onFailure(json.optString("message", "ডকুমেন্ট প্রসেসিং ব্যর্থ হয়েছে।"))
-                            }
+                            onSuccess(JSONObject(bodyStr))
                         } catch (_: Exception) {
-                            onFailure("সার্ভার ডাটা প্রসেস করতে ব্যর্থ হয়েছে।")
+                            onFailure("Invalid JSON response from server")
                         }
+                    } else {
+                        onFailure("Server error: ${res.code}")
                     }
                 }
-            })
+            }
+        })
+    }
 
-        } catch (_: Exception) {
-            onFailure("API রিকোয়েস্ট তৈরি করতে সমস্যা হয়েছে।")
+    fun sendFaceVerifyRequest(
+        idFaceBase64: String,
+        liveSelfieBase64: String,
+        localBiometricScore: Double,
+        onResult: (Boolean, Double) -> Unit
+    ) {
+        val payload = JSONObject().apply {
+            put("id_face_base64", idFaceBase64)
+            put("live_selfie_base64", liveSelfieBase64)
+            put("client_biometric_score", localBiometricScore)
+            put("liveness_challenges", JSONArray(listOf("TURN_LEFT", "TURN_RIGHT", "EYE_BLINK")))
         }
+
+        val request = Request.Builder()
+            .url("${AppSecurityConfig.APP_BASE_URL}/api/face_verify")
+            .post(payload.toString().toRequestBody(jsonMediaType))
+            .addHeader("Accept", "application/json")
+            .build()
+
+        httpClient.newCall(request).enqueue(object : Callback {
+            override fun onFailure(call: Call, e: IOException) {
+                // সার্ভার অফলাইন থাকলে লোকাল বায়োমেট্রিক স্কোর দিয়েই ভেরিফিকেশন সম্পন্ন করবে
+                onResult(localBiometricScore >= 75.0, localBiometricScore)
+            }
+
+            override fun onResponse(call: Call, response: Response) {
+                response.use { res ->
+                    val bodyStr = res.body?.string() ?: ""
+                    if (res.isSuccessful && bodyStr.isNotBlank()) {
+                        try {
+                            val json = JSONObject(bodyStr)
+                            val serverScore = json.optDouble("match_score", localBiometricScore)
+                            val passed = json.optString("status") == "success" && serverScore >= 75.0
+                            onResult(passed, serverScore)
+                            return
+                        } catch (_: Exception) {}
+                    }
+                    onResult(localBiometricScore >= 75.0, localBiometricScore)
+                }
+            }
+        })
     }
 }
