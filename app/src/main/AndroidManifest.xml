@@ -1,48 +1,83 @@
 <?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
 
-    <!-- ইন্টারনেট ও নেটওয়ার্ক পারমিশন -->
+    <!-- =========================
+         Internet & Network
+         ========================= -->
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
-    
-    <!-- ক্যামেরা পারমিশন (কিউআর স্ক্যান, প্রোফাইল ছবি ও কেওয়াইসি ডকুমেন্ট আপলোড) -->
-    <uses-permission android:name="android.permission.CAMERA" />
-    <uses-feature android:name="android.hardware.camera" android:required="false" />
-    <uses-feature android:name="android.hardware.camera.autofocus" android:required="false" />
 
-    <!-- ফাইল ম্যানেজার, গ্যালারি ও ডকুমেন্ট (পিডিএফ, ছবি, ডাউনলোড ও শেয়ার) এক্সেস পারমিশন -->
-    <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE" android:maxSdkVersion="32" />
-    <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE" android:maxSdkVersion="32" />
-    
-    <!-- Android 13+ (API 33+) এর জন্য লেটেস্ট মিডিয়া পারমিশন -->
+    <!-- =========================
+         Camera (QR, document scan, profile capture)
+         ========================= -->
+    <uses-permission android:name="android.permission.CAMERA" />
+    <uses-feature
+        android:name="android.hardware.camera"
+        android:required="false" />
+    <uses-feature
+        android:name="android.hardware.camera.autofocus"
+        android:required="false" />
+
+    <!-- =========================
+         Storage / Media
+         Android 13+ uses READ_MEDIA_IMAGES
+         Older versions use READ_EXTERNAL_STORAGE / WRITE_EXTERNAL_STORAGE
+         ========================= -->
+    <uses-permission
+        android:name="android.permission.READ_EXTERNAL_STORAGE"
+        android:maxSdkVersion="32" />
+    <uses-permission
+        android:name="android.permission.WRITE_EXTERNAL_STORAGE"
+        android:maxSdkVersion="29" />
     <uses-permission android:name="android.permission.READ_MEDIA_IMAGES" />
 
-    <!-- লোকেশন পারমিশন (প্রয়োজনীয় কেওয়াইসি বা লোকেশন ভেরিফিকেশনের জন্য) -->
+    <!-- =========================
+         Notifications (future push/alert support)
+         ========================= -->
+    <uses-permission
+        android:name="android.permission.POST_NOTIFICATIONS" />
+
+    <!-- =========================
+         Location (for KYC / verification flows if needed)
+         ========================= -->
     <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />
     <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" />
 
+    <!-- =========================
+         Application config
+         ========================= -->
     <application
-        android:allowBackup="true"
+        android:name=".AppApplication"
+        android:allowBackup="false"
+        android:fullBackupContent="false"
         android:icon="@drawable/ic_launcher"
         android:roundIcon="@drawable/ic_launcher"
         android:label="@string/app_name"
         android:theme="@style/Theme.BDRSF"
         android:supportsRtl="true"
-        android:usesCleartextTraffic="true">
-        
+        android:usesCleartextTraffic="false"
+        android:networkSecurityConfig="@xml/network_security_config"
+        android:requestLegacyExternalStorage="false">
+
+        <!-- =========================
+             Main activity
+             ========================= -->
         <activity
             android:name=".MainActivity"
             android:exported="true"
             android:screenOrientation="portrait"
             android:windowSoftInputMode="adjustResize"
             android:configChanges="screenSize|smallestScreenSize|screenLayout|keyboardHidden|orientation">
+
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
         </activity>
 
-        <!-- ক্যামেরা থেকে ফাইল নিরাপদে শেয়ার করার জন্য FileProvider -->
+        <!-- =========================
+             FileProvider for camera/file uploads
+             ========================= -->
         <provider
             android:name="androidx.core.content.FileProvider"
             android:authorities="${applicationId}.fileprovider"
@@ -53,7 +88,9 @@
                 android:resource="@xml/file_paths" />
         </provider>
 
-        <!-- গুগল প্লে-সার্ভিসেস থেকে ML Kit মডেলসমূহ প্রি-লোড রাখার ট্যাগ -->
+        <!-- =========================
+             ML Kit dependencies
+             ========================= -->
         <meta-data
             android:name="com.google.mlkit.vision.DEPENDENCIES"
             android:value="barcode,face,ocr" />
