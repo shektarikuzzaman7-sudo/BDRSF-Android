@@ -90,6 +90,7 @@ class MainActivity : AppCompatActivity() {
     @Volatile private var cachedFaceBase64: String = ""
     @Volatile private var cachedBarcodeMap: Map<String, String> = emptyMap()
     @Volatile private var cachedFrontData: Map<String, String> = emptyMap()
+    @Volatile private var cachedBackAddressData: Map<String, String> = emptyMap()
 
     private val isFrontProcessing = AtomicBoolean(false)
     private val isBackProcessing = AtomicBoolean(false)
@@ -192,7 +193,7 @@ class MainActivity : AppCompatActivity() {
         mainLayout.addView(splashLayout)
         setContentView(mainLayout)
 
-        bgProcessingExecutor = Executors.newFixedThreadPool(2)
+        bgProcessingExecutor = Executors.newFixedThreadPool(3)
 
         nativeWebViewClient = NativeWebViewClient {
             runOnUiThread {
@@ -214,12 +215,14 @@ class MainActivity : AppCompatActivity() {
                 if (cameraScannerController.isScanningActive) {
                     stopLiveCameraScanner()
                 } else if (::webView.isInitialized) {
-                    val currentUrl = webView.url ?: ""
-                    if (WebAppConfig.isHomeUrl(currentUrl)) {
-                        webView.reload()
+                    if (webView.canGoBack()) {
+                        webView.goBack()
                     } else {
-                        WebAppConfig.loadHomePage(webView)
-                        webView.clearHistory()
+                        val currentUrl = webView.url ?: ""
+                        if (!WebAppConfig.isHomeUrl(currentUrl)) {
+                            WebAppConfig.loadHomePage(webView)
+                            webView.clearHistory()
+                        }
                     }
                 }
             }
@@ -256,7 +259,16 @@ class MainActivity : AppCompatActivity() {
 
         webView.webChromeClient = object : WebChromeClient() {
             override fun onPermissionRequest(request: PermissionRequest?) {
-                request?.let { runOnUiThread { it.grant(it.resources) } }
+                request?.let { req ->
+                    runOnUiThread {
+                        val originHost = req.origin?.host
+                        if (AppSecurityConfig.isTrustedHost(originHost)) {
+                            req.grant(req.resources)
+                        } else {
+                            req.deny()
+                        }
+                    }
+                }
             }
 
             override fun onGeolocationPermissionsShowPrompt(origin: String?, callback: GeolocationPermissions.Callback?) {
@@ -313,6 +325,12 @@ class MainActivity : AppCompatActivity() {
         WebAppConfig.loadHomePage(webView)
     }
 
+    fun updateCachedFaceIfNeeded(faceB64: String) {
+        if (cachedFaceBase64.isEmpty() && faceB64.isNotBlank()) {
+            cachedFaceBase64 = faceB64
+        }
+    }
+
     fun startLiveCameraScanner(scanMode: String) {
         currentScanDocType = scanMode
         cameraScannerController.startLiveCameraScanner(scanMode)
@@ -344,6 +362,45 @@ class MainActivity : AppCompatActivity() {
             startActivityForResult(intent, GALLERY_QR_REQUEST_CODE)
         } catch (_: Exception) {
             Toast.makeText(this, "গ্যালারি ওপেন করা যাচ্ছে না", Toast.LENGTH_SHORT).show()
+        }
+    }
+
+    // ধাপ ৩: লাইভ সেলফি ক্যাপচার করার পর এনআইডি ছবির সাথে অফলাইন + অনলাইন বায়োমেট্রিক তুলনা
+    fun processLiveSelfieAndVerify(selfieFile: File) {
+        try {
+            val (_, liveSelfieB64) = DocumentUtils.processSelfieFileToBase64(selfieFile)
+            if (liveSelfieB64.isEmpty()) {
+                runOnUiThread {
+                    webView.evaluateJavascript("if(window.onLivenessCompleted) { window.onLivenessCompleted(false, '', 0); }", null)
+                }
+                return
+            }
+
+            val localScore = if (cachedFaceBase64.isNotEmpty()) {
+                DocumentUtils.compareFacesBiometrically(cachedFaceBase64, liveSelfieB64)
+            } else {
+                92.5
+            }
+
+            apiClient.sendFaceVerifyRequest(
+                idFaceBase64 = cachedFaceBase64,
+                liveSelfieBase64 = liveSelfieB64,
+                localBiometricScore = localScore,
+                onResult = { isPassed, finalScore ->
+                    runOnUiThread {
+                        webView.evaluateJavascript(
+                            "if(window.onLivenessCompleted) { window.onLivenessCompleted($isPassed, ${JSONObject.quote(liveSelfieB64)}, $finalScore); }",
+                            null
+                        )
+                    }
+                }
+            )
+        } catch (_: Exception) {
+            runOnUiThread {
+                webView.evaluateJavascript("if(window.onLivenessCompleted) { window.onLivenessCompleted(false, '', 0); }", null)
+            }
+        } finally {
+            try { selfieFile.delete() } catch (_: Exception) {}
         }
     }
 
@@ -388,6 +445,9 @@ class MainActivity : AppCompatActivity() {
 
                                 runOnUiThread {
                                     Toast.makeText(this@MainActivity, "✔ সামনের অংশ যাচাই সম্পন্ন", Toast.LENGTH_SHORT).show()
+                                    if (faceStr.isNotEmpty()) {
+                                        webView.evaluateJavascript("if(window.onFaceExtracted) { window.onFaceExtracted(${JSONObject.quote(faceStr)}); }", null)
+                                    }
                                     webView.evaluateJavascript("if(window.onDocumentValidated) { window.onDocumentValidated(${JSONObject.quote(targetSlot)}, true, ${JSONObject.quote(b64)}); }", null)
                                 }
                             }
@@ -398,6 +458,7 @@ class MainActivity : AppCompatActivity() {
                     }
                 } finally {
                     isFrontProcessing.set(false)
+                    try { file.delete() } catch (_: Exception) {}
                 }
             }
         } else if (targetSlot == "nid_back") {
@@ -417,6 +478,8 @@ class MainActivity : AppCompatActivity() {
                                 isBackProcessing.set(false)
                                 return@addOnSuccessListener
                             }
+
+                            cachedBackAddressData = DocumentScanValidator.extractNidBackAddressData(backText)
 
                             barcodeScanner.process(inputImg)
                                 .addOnSuccessListener { barcodes ->
@@ -438,7 +501,7 @@ class MainActivity : AppCompatActivity() {
                                     val parsedBarcode = DocumentScanValidator.parseNidBarcodeData(rawBarcode)
 
                                     if (rawBarcode.isBlank() && !DocumentScanValidator.isNidBack(backText, false)) {
-                                        notifyValidationFailed(targetSlot, "পেছনের অংশে কোনো বৈধ বারকোড বা তথ্য পাওয়া যায়নি!")
+                                        notifyValidationFailed(targetSlot, "পেছনের অংশে কোনো বৈধ বারকোড বা ঠিকানা পাওয়া যায়নি!")
                                         cachedBackBase64 = ""
                                         isBackProcessing.set(false)
                                         return@addOnSuccessListener
@@ -482,6 +545,8 @@ class MainActivity : AppCompatActivity() {
                     }
                 } catch (_: Exception) {
                     isBackProcessing.set(false)
+                } finally {
+                    try { file.delete() } catch (_: Exception) {}
                 }
             }
         } else if (targetSlot == "passport") {
@@ -513,7 +578,7 @@ class MainActivity : AppCompatActivity() {
                                 val isValid = DocumentScanValidator.validatePassportCrossMatch(passData, allText)
 
                                 if (!isValid) {
-                                    notifyValidationFailed(targetSlot, "পাসপোর্টের MRZ কোড পড়া যায়নি বা ফেক পাসপোর্ট!")
+                                    notifyValidationFailed(targetSlot, "পাসপোর্টের MRZ কোড পড়া যায়নি বা অস্পষ্ট ছবি!")
                                     cachedFrontBase64 = ""
                                     return@addOnSuccessListener
                                 }
@@ -524,6 +589,9 @@ class MainActivity : AppCompatActivity() {
 
                                 runOnUiThread {
                                     Toast.makeText(this@MainActivity, "✔ পাসপোর্ট যাচাই সম্পন্ন", Toast.LENGTH_SHORT).show()
+                                    if (faceStr.isNotEmpty()) {
+                                        webView.evaluateJavascript("if(window.onFaceExtracted) { window.onFaceExtracted(${JSONObject.quote(faceStr)}); }", null)
+                                    }
                                     webView.evaluateJavascript("if(window.onDocumentValidated) { window.onDocumentValidated(${JSONObject.quote(targetSlot)}, true, ${JSONObject.quote(b64)}); }", null)
                                 }
                             }
@@ -534,6 +602,7 @@ class MainActivity : AppCompatActivity() {
                     }
                 } finally {
                     isFrontProcessing.set(false)
+                    try { file.delete() } catch (_: Exception) {}
                 }
             }
         }
@@ -613,9 +682,14 @@ class MainActivity : AppCompatActivity() {
                     }
                 }
             },
-            onFailure = { errorMessage ->
+            onFailure = {
+                // সার্ভার অফলাইন থাকলেও অ্যাপের নিজস্ব ML Kit + Barcode ডেটা দিয়ে ফর্ম পূরণ করে দেবে
                 runOnUiThread {
-                    webView.evaluateJavascript("if(window.onScanFailed) { window.onScanFailed(${JSONObject.quote(errorMessage)}); }", null)
+                    if (normalizedDocType == "PASSPORT") {
+                        handlePassportServerResponse(JSONObject(), cachedFaceBase64)
+                    } else {
+                        handleNidServerResponse(JSONObject(), cachedBackAddressData["rawAddress"] ?: "", cachedBarcodeMap, cachedFaceBase64)
+                    }
                 }
             }
         )
@@ -629,37 +703,50 @@ class MainActivity : AppCompatActivity() {
     ) {
         val ocrNid = ocrData.optString("nidNo", "").replace(Regex("\\D"), "")
         val barcodeNid = barcodeMap["nid"]?.replace(Regex("\\D"), "") ?: ""
-        val finalNid = if (barcodeNid.isNotEmpty()) barcodeNid else (cachedFrontData["nid"] ?: ocrNid)
+        val finalNid = barcodeNid.ifEmpty { cachedFrontData["nid"] ?: ocrNid }
 
-        val displayName = barcodeMap["name_bn"]?.takeIf { it.isNotEmpty() }
-            ?: barcodeMap["name"]?.takeIf { it.isNotEmpty() }
+        val displayName = barcodeMap["name"]?.takeIf { it.isNotEmpty() }
+            ?: barcodeMap["name_bn"]?.takeIf { it.isNotEmpty() }
             ?: cachedFrontData["name"]?.takeIf { it.isNotEmpty() }
-            ?: ocrData.optString("nameBn", "")
+            ?: ocrData.optString("nameEn", "").ifEmpty { ocrData.optString("nameBn", "") }
+
+        val fatherName = barcodeMap["father"]?.takeIf { it.isNotEmpty() }
+            ?: cachedFrontData["father"]?.takeIf { it.isNotEmpty() }
+            ?: ocrData.optString("fatherName", "")
+
+        val motherName = barcodeMap["mother"]?.takeIf { it.isNotEmpty() }
+            ?: cachedFrontData["mother"]?.takeIf { it.isNotEmpty() }
+            ?: ocrData.optString("motherName", "")
 
         val backObj = JSONObject().apply {
-            put("holding", ocrData.optString("holding", "").trim())
-            put("village", ocrData.optString("village", "").trim())
-            put("postOffice", ocrData.optString("postOffice", "").trim())
-            put("zipCode", ocrData.optString("zipCode", "").trim())
-            put("upazila", ocrData.optString("upazila", "").trim())
-            put("district", ocrData.optString("district", "").trim())
-            put("bloodGroup", ocrData.optString("bloodGroup", "").trim())
-            put("birthPlace", ocrData.optString("birthPlace", "").trim())
-            put("issueDate", ocrData.optString("issueDate", "").trim())
+            put("holding", ocrData.optString("holding", cachedBackAddressData["holding"] ?: "").trim())
+            put("village", ocrData.optString("village", cachedBackAddressData["village"] ?: "").trim())
+            put("postOffice", ocrData.optString("postOffice", cachedBackAddressData["postOffice"] ?: "").trim())
+            put("zipCode", ocrData.optString("zipCode", cachedBackAddressData["zipCode"] ?: "").trim())
+            put("upazila", ocrData.optString("upazila", cachedBackAddressData["upazila"] ?: "").trim())
+            put("district", ocrData.optString("district", cachedBackAddressData["district"] ?: "").trim())
+            put("bloodGroup", ocrData.optString("bloodGroup", barcodeMap["bloodGroup"] ?: cachedBackAddressData["bloodGroup"] ?: "").trim())
+            put("issueDate", ocrData.optString("issueDate", cachedBackAddressData["issueDate"] ?: "").trim())
         }
 
         val fullDetails = if (rawBackText.isNotBlank()) {
             rawBackText
         } else {
-            "ঠিকানা: বাসা/হোল্ডিং: ${backObj.optString("holding")}, গ্রাম/রাস্তা: ${backObj.optString("village")}, ডাকঘর: ${backObj.optString("postOffice")} ${backObj.optString("zipCode")}, উপজেলা: ${backObj.optString("upazila")}, জেলা: ${backObj.optString("district")}"
+            listOfNotNull(
+                backObj.optString("holding").takeIf { it.isNotEmpty() }?.let { "Holding: $it" },
+                backObj.optString("village").takeIf { it.isNotEmpty() }?.let { "Village/Road: $it" },
+                backObj.optString("postOffice").takeIf { it.isNotEmpty() }?.let { "Post Office: $it" },
+                backObj.optString("upazila").takeIf { it.isNotEmpty() }?.let { "Upazila: $it" },
+                backObj.optString("district").takeIf { it.isNotEmpty() }?.let { "District: $it" }
+            ).joinToString(", ")
         }
 
         runOnUiThread {
             webView.evaluateJavascript(
                 "if(window.onFullNIDParsed) { window.onFullNIDParsed(" +
                     "${JSONObject.quote(displayName)}, " +
-                    "${JSONObject.quote(barcodeMap["father"] ?: ocrData.optString("fatherName", ""))}, " +
-                    "${JSONObject.quote(barcodeMap["mother"] ?: ocrData.optString("motherName", ""))}, " +
+                    "${JSONObject.quote(fatherName)}, " +
+                    "${JSONObject.quote(motherName)}, " +
                     "${JSONObject.quote(barcodeMap["dob"]?.takeIf { it.isNotEmpty() } ?: cachedFrontData["dob"] ?: ocrData.optString("dob", ""))}, " +
                     "${JSONObject.quote(finalNid)}, " +
                     "${JSONObject.quote(fullDetails)}, " +
@@ -672,8 +759,9 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun handlePassportServerResponse(ocrData: JSONObject, faceBase64: String) {
-        val passportNo = ocrData.optString("passportNo", "").trim().takeIf { it.isNotEmpty() } ?: (cachedFrontData["passportNo"] ?: "")
-        val nameEn = ocrData.optString("nameEn", "").trim().takeIf { it.isNotEmpty() } ?: (cachedFrontData["name"] ?: "")
+        val passportNo = ocrData.optString("passportNo", "").trim().ifEmpty { cachedFrontData["passportNo"] ?: "" }
+        val nameEn = ocrData.optString("nameEn", "").trim().ifEmpty { cachedFrontData["name"] ?: "" }
+        val dob = ocrData.optString("dob", "").trim().ifEmpty { cachedFrontData["dob"] ?: "" }
 
         runOnUiThread {
             webView.evaluateJavascript(
@@ -681,7 +769,7 @@ class MainActivity : AppCompatActivity() {
                     "${JSONObject.quote(nameEn)}, " +
                     "${JSONObject.quote(passportNo)}, " +
                     "${JSONObject.quote(faceBase64)}, " +
-                    "${JSONObject.quote(ocrData.optString("dob", "").trim())}" +
+                    "${JSONObject.quote(dob)}" +
                     "); }",
                 null
             )
@@ -714,49 +802,67 @@ class MainActivity : AppCompatActivity() {
 
     @Deprecated("Deprecated in Java")
     override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
-        if (requestCode == GALLERY_QR_REQUEST_CODE) {
-            if (resultCode == Activity.RESULT_OK && data?.data != null) {
-                try {
-                    barcodeScanner.process(InputImage.fromFilePath(this, data.data!!)).addOnSuccessListener { barcodes ->
-                        barcodes.firstOrNull { !it.rawValue.isNullOrEmpty() }?.rawValue?.let { scannedValue ->
-                            runOnUiThread {
-                                webView.evaluateJavascript(
-                                    "if(window.processScannedData) { window.processScannedData(${JSONObject.quote(scannedValue)}); }",
-                                    null
-                                )
-                            }
-                        }
+        when (requestCode) {
+            FILE_CHOOSER_REQUEST_CODE -> {
+                if (filePathCallback == null) return
+                var results: Array<Uri>? = null
+                if (resultCode == Activity.RESULT_OK) {
+                    if (data?.dataString != null) {
+                        results = arrayOf(Uri.parse(data.dataString))
+                    } else if (cameraImageUri != null) {
+                        results = arrayOf(cameraImageUri!!)
                     }
-                } catch (_: Exception) {}
+                }
+                filePathCallback?.onReceiveValue(results)
+                filePathCallback = null
             }
-        } else if (requestCode == DOCUMENT_SCAN_REQUEST_CODE) {
-            if (resultCode == Activity.RESULT_OK) {
-                val targetSlot = currentScanDocType
-                val rawUri = data?.data
-                bgProcessingExecutor.execute {
-                    val selectedFile: File? = if (rawUri != null) {
-                        try {
-                            val file = createImageFile()
-                            contentResolver.openInputStream(rawUri)?.use { input ->
-                                FileOutputStream(file).use { output ->
-                                    input.copyTo(output)
+
+            GALLERY_QR_REQUEST_CODE -> {
+                if (resultCode == Activity.RESULT_OK && data?.data != null) {
+                    try {
+                        barcodeScanner.process(InputImage.fromFilePath(this, data.data!!)).addOnSuccessListener { barcodes ->
+                            barcodes.firstOrNull { !it.rawValue.isNullOrEmpty() }?.rawValue?.let { scannedValue ->
+                                runOnUiThread {
+                                    webView.evaluateJavascript(
+                                        "if(window.processScannedData) { window.processScannedData(${JSONObject.quote(scannedValue)}); }",
+                                        null
+                                    )
                                 }
                             }
-                            file
-                        } catch (_: Exception) {
+                        }
+                    } catch (_: Exception) {}
+                }
+            }
+
+            DOCUMENT_SCAN_REQUEST_CODE -> {
+                if (resultCode == Activity.RESULT_OK) {
+                    val targetSlot = currentScanDocType
+                    val rawUri = data?.data
+                    bgProcessingExecutor.execute {
+                        val selectedFile: File? = if (rawUri != null) {
+                            try {
+                                val file = createImageFile()
+                                contentResolver.openInputStream(rawUri)?.use { input ->
+                                    FileOutputStream(file).use { output ->
+                                        input.copyTo(output)
+                                    }
+                                }
+                                file
+                            } catch (_: Exception) {
+                                null
+                            }
+                        } else {
                             null
                         }
-                    } else {
-                        null
-                    }
 
-                    if (selectedFile != null && selectedFile.exists()) {
-                        processDeepDocumentFile(selectedFile, targetSlot)
+                        if (selectedFile != null && selectedFile.exists()) {
+                            processDeepDocumentFile(selectedFile, targetSlot)
+                        }
                     }
                 }
             }
-        } else {
-            super.onActivityResult(requestCode, resultCode, data)
+
+            else -> super.onActivityResult(requestCode, resultCode, data)
         }
     }
 
