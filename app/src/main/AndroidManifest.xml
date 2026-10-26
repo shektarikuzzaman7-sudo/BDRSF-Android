@@ -53,6 +53,11 @@
                 android:resource="@xml/file_paths" />
         </provider>
 
+        <!-- গুগল প্লে-সার্ভিসেস থেকে ML Kit মডেলসমূহ প্রি-লোড রাখার ট্যাগ -->
+        <meta-data
+            android:name="com.google.mlkit.vision.DEPENDENCIES"
+            android:value="barcode,face,ocr" />
+
     </application>
 
 </manifest>
