@@ -14,10 +14,8 @@ import android.graphics.Canvas
 import android.graphics.Color
 import android.graphics.Matrix
 import android.graphics.Paint
-import android.graphics.PointF
 import android.graphics.PorterDuff
 import android.graphics.RectF
-import android.media.FaceDetector
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
@@ -64,14 +62,23 @@ import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
 import androidx.exifinterface.media.ExifInterface
+import com.google.android.gms.tasks.Tasks
 import com.google.mlkit.vision.barcode.BarcodeScanner
 import com.google.mlkit.vision.barcode.BarcodeScannerOptions
 import com.google.mlkit.vision.barcode.BarcodeScanning
 import com.google.mlkit.vision.barcode.common.Barcode
 import com.google.mlkit.vision.common.InputImage
+import com.google.mlkit.vision.face.FaceDetection
+import com.google.mlkit.vision.face.FaceDetector
+import com.google.mlkit.vision.face.FaceDetectorOptions
 import com.google.mlkit.vision.text.TextRecognition
 import com.google.mlkit.vision.text.TextRecognizer
 import com.google.mlkit.vision.text.latin.TextRecognizerOptions
+import com.google.zxing.BinaryBitmap
+import com.google.zxing.DecodeHintType
+import com.google.zxing.MultiFormatReader
+import com.google.zxing.RGBLuminanceSource
+import com.google.zxing.common.HybridBinarizer
 import okhttp3.Call
 import okhttp3.Callback
 import okhttp3.MediaType.Companion.toMediaTypeOrNull
@@ -132,13 +139,14 @@ class MainActivity : AppCompatActivity() {
     private val GALLERY_QR_REQUEST_CODE = 1004
     private val DOCUMENT_SCAN_REQUEST_CODE = 1005
 
-    // PDF417 সহ সকল দরকারি বারকোড ও কিউআর রিডার অপশন
+    // ১. Google ML Kit Barcode Scanner (PDF417, QR Code ও অন্যান্য 1D/2D বারকোড)
     private val barcodeScanner: BarcodeScanner by lazy {
         val options = BarcodeScannerOptions.Builder()
             .setBarcodeFormats(
                 Barcode.FORMAT_PDF417,
                 Barcode.FORMAT_QR_CODE,
                 Barcode.FORMAT_CODE_128,
+                Barcode.FORMAT_CODE_39,
                 Barcode.FORMAT_DATA_MATRIX,
                 Barcode.FORMAT_AZTEC
             )
@@ -146,10 +154,22 @@ class MainActivity : AppCompatActivity() {
         BarcodeScanning.getClient(options)
     }
 
+    // ২. Google ML Kit Text Recognizer (OCR)
     private val textRecognizer: TextRecognizer by lazy {
         TextRecognition.getClient(TextRecognizerOptions.DEFAULT_OPTIONS)
     }
 
+    // ৩. Google ML Kit Face Detector (স্মার্ট ও নিখুঁত ফেস ক্রপার)
+    private val faceDetector: FaceDetector by lazy {
+        val options = FaceDetectorOptions.Builder()
+            .setPerformanceMode(FaceDetectorOptions.PERFORMANCE_MODE_FAST)
+            .setLandmarkMode(FaceDetectorOptions.LANDMARK_MODE_NONE)
+            .setClassificationMode(FaceDetectorOptions.CLASSIFICATION_MODE_NONE)
+            .build()
+        FaceDetection.getClient(options)
+    }
+
+    // ৪. নেটওয়ার্ক ক্লায়েন্ট
     private val okHttpClient = OkHttpClient.Builder()
         .connectTimeout(45, TimeUnit.SECONDS)
         .writeTimeout(45, TimeUnit.SECONDS)
@@ -400,7 +420,9 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    // ডকুমেন্ট ফোকাস বক্স ও গাইডলাইন ভিউ
+    // =========================================================================
+    // স্ট্যান্ডার্ড আইডি কার্ড ফ্রেম ও ভিজ্যুয়াল গাইড (Standard 85.6mm x 54mm Ratio)
+    // =========================================================================
     inner class DocumentOverlayView(context: Context, private val mode: String) : View(context) {
         private val boxPaint = Paint().apply {
             color = Color.parseColor("#00E676")
@@ -437,9 +459,9 @@ class MainActivity : AppCompatActivity() {
             canvas.drawRect(0f, top, left, bottom, shadePaint)
             canvas.drawRect(right, top, w, bottom, shadePaint)
 
-            canvas.drawRoundRect(RectF(left, top, right, bottom), 20f, 20f, boxPaint)
+            canvas.drawRoundRect(RectF(left, top, right, bottom), 22f, 22f, boxPaint)
 
-            val guideText = when(mode) {
+            val guideText = when (mode) {
                 "nid_front" -> "কার্ডের সামনের অংশ ও ছবি বক্সের মধ্যে রাখুন"
                 "nid_back" -> "কার্ডের পেছনের অংশ ও বারকোড বক্সের মধ্যে রাখুন"
                 "passport" -> "পাসপোর্টের পৃষ্ঠা ও MRZ কোড ফ্রেমের মধ্যে রাখুন"
@@ -449,7 +471,9 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    // লাইভ ক্যামেরা চালু এবং ফ্রেম চেক
+    // =========================================================================
+    // লাইভ ক্যামেরা স্ক্যানার ও রিয়েল-টাইম কন্ডিশন ভ্যালিডেশন
+    // =========================================================================
     private fun startLiveCameraScanner(scanMode: String) {
         if (!hasCameraPermission()) { requestAllRequiredPermissions(); return }
         if (isScanningActive) return
@@ -602,7 +626,7 @@ class MainActivity : AppCompatActivity() {
         })
     }
 
-    // অতিরিক্ত ব্যাকগ্রাউন্ড বাদ দিয়ে কার্ডের সাইজ অনুযায়ী নিখুঁত ক্রপ
+    // নিখুঁত অনুপাত ও অপ্রয়োজনীয় বর্ডার বাদ দেওয়ার অটো-কাটিং অ্যালগরিদম
     private fun cropCenterBoxFromImage(file: File) {
         try {
             val exif = ExifInterface(file.absolutePath)
@@ -637,7 +661,9 @@ class MainActivity : AppCompatActivity() {
         previewView = null
     }
 
-    // অফলাইন ভ্যালিডেশন এবং কার্ড ক্রস-ম্যাচিং লজিক
+    // =========================================================================
+    // ডিপ অফলাইন চেকিং ও ডাবল ইঞ্জিন (ML Kit + ZXing) বারকোড ডিকোডিং
+    // =========================================================================
     private fun processDeepDocumentFile(file: File, targetSlot: String) {
         if (!file.exists()) return
 
@@ -684,7 +710,6 @@ class MainActivity : AppCompatActivity() {
 
                                 runOnUiThread {
                                     Toast.makeText(this@MainActivity, "✔ ফ্রন্ট পার্ট সফলভাবে যাচাই হয়েছে", Toast.LENGTH_SHORT).show()
-                                    // ওয়েবসাইটে সফল টিকচিহ্ন ও প্রিভিউ পাঠানো
                                     webView.evaluateJavascript("if(window.onDocumentValidated) { window.onDocumentValidated(${JSONObject.quote(targetSlot)}, true, ${JSONObject.quote(b64)}); }", null)
                                     webView.evaluateJavascript("if(window.onImageSelectedPreview) { window.onImageSelectedPreview(${JSONObject.quote(targetSlot)}, ${JSONObject.quote(b64)}); }", null)
                                 }
@@ -707,6 +732,7 @@ class MainActivity : AppCompatActivity() {
                     if (bmp != null) {
                         val inputImg = InputImage.fromBitmap(bmp, 0)
 
+                        // প্রথম ধাপ: Google ML Kit দিয়ে বারকোড রিড করার চেষ্টা
                         barcodeScanner.process(inputImg)
                             .addOnSuccessListener { barcodes ->
                                 var rawUtf8 = ""
@@ -717,11 +743,19 @@ class MainActivity : AppCompatActivity() {
                                     if (decoded.isNotEmpty()) rawUtf8 += "$decoded\n"
                                 }
 
+                                // দ্বিতীয় ধাপ: ML Kit মিস করলে ZXing ইঞ্জিন দিয়ে ডিকোড করা
+                                if (rawUtf8.isBlank()) {
+                                    val zxingResult = decodeBarcodeWithZxing(bmp)
+                                    if (!zxingResult.isNullOrBlank()) {
+                                        rawUtf8 = zxingResult
+                                    }
+                                }
+
                                 val parsedData = parseNidBarcodeData(rawUtf8)
                                 val barcodeNid = parsedData["nid"] ?: ""
 
-                                // বারকোডের সাথে ফ্রন্টের এনআইডি মিলানো
                                 if (barcodeNid.isNotEmpty()) {
+                                    // অফলাইন ক্রস-ম্যাচ
                                     if (localExtractedNidFront.isNotEmpty()) {
                                         val cleanFront = localExtractedNidFront.replace("\\D".toRegex(), "")
                                         val cleanBack = barcodeNid.replace("\\D".toRegex(), "")
@@ -746,7 +780,7 @@ class MainActivity : AppCompatActivity() {
                                     }
                                     isBackProcessing.set(false)
                                 } else {
-                                    // বারকোড মিস হলেও ব্যাকপার্টের ঠিকানা দেখে কনফার্ম করা
+                                    // বারকোড না পেলেও পেছনের ঠিকানার টেক্সট চেক
                                     textRecognizer.process(inputImg).addOnSuccessListener { vText ->
                                         val t = vText.text
                                         val isBack = t.contains("ঠিকানা") || t.contains("ডাকঘর") || t.contains("Blood") || t.contains("রক্তের") || t.contains("Address")
@@ -763,15 +797,29 @@ class MainActivity : AppCompatActivity() {
                                         }
                                         isBackProcessing.set(false)
                                     }.addOnFailureListener {
-                                        notifyValidationFailed(targetSlot, "পেছনের বারকোড স্ক্যান ব্যর্থ হয়েছে।")
+                                        notifyValidationFailed(targetSlot, "পেছনের অংশ প্রসেসিং ব্যর্থ হয়েছে।")
                                         cachedBackBase64 = ""
                                         isBackProcessing.set(false)
                                     }
                                 }
                             }
                             .addOnFailureListener {
-                                notifyValidationFailed(targetSlot, "বারকোড রিড করা সম্ভব হয়নি।")
-                                cachedBackBase64 = ""
+                                // ML Kit ফেইল করলে সরাসরি ZXing ট্রাই করা
+                                val zxingResult = decodeBarcodeWithZxing(bmp)
+                                if (!zxingResult.isNullOrBlank()) {
+                                    val parsedData = parseNidBarcodeData(zxingResult)
+                                    cachedBackBase64 = b64
+                                    cachedBarcodeRaw = zxingResult
+                                    cachedBarcodeMap = parsedData
+                                    runOnUiThread {
+                                        Toast.makeText(this@MainActivity, "✔ ব্যাক পার্ট সফলভাবে যাচাই হয়েছে", Toast.LENGTH_SHORT).show()
+                                        webView.evaluateJavascript("if(window.onDocumentValidated) { window.onDocumentValidated(${JSONObject.quote(targetSlot)}, true, ${JSONObject.quote(b64)}); }", null)
+                                        webView.evaluateJavascript("if(window.onImageSelectedPreview) { window.onImageSelectedPreview(${JSONObject.quote(targetSlot)}, ${JSONObject.quote(b64)}); }", null)
+                                    }
+                                } else {
+                                    notifyValidationFailed(targetSlot, "বারকোড রিড করা সম্ভব হয়নি।")
+                                    cachedBackBase64 = ""
+                                }
                                 isBackProcessing.set(false)
                             }
                     } else { isBackProcessing.set(false) }
@@ -780,10 +828,35 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
+    // ZXing শক্তিশালী বারকোড ডিকোডার
+    private fun decodeBarcodeWithZxing(bitmap: Bitmap): String? {
+        return try {
+            val width = bitmap.width
+            val height = bitmap.height
+            val pixels = IntArray(width * height)
+            bitmap.getPixels(pixels, 0, width, 0, 0, width, height)
+            val source = RGBLuminanceSource(width, height, pixels)
+            val binaryBitmap = BinaryBitmap(HybridBinarizer(source))
+
+            val hints = mapOf(
+                DecodeHintType.TRY_HARDER to true,
+                DecodeHintType.POSSIBLE_FORMATS to listOf(
+                    com.google.zxing.BarcodeFormat.PDF_417,
+                    com.google.zxing.BarcodeFormat.QR_CODE,
+                    com.google.zxing.BarcodeFormat.CODE_128,
+                    com.google.zxing.BarcodeFormat.CODE_39
+                )
+            )
+            val result = MultiFormatReader().decode(binaryBitmap, hints)
+            result.text
+        } catch (e: Exception) {
+            null
+        }
+    }
+
     private fun notifyValidationFailed(slot: String, message: String) {
         runOnUiThread {
             Toast.makeText(this, message, Toast.LENGTH_LONG).show()
-            // ওয়েবসাইটে ক্রস চিহ্ন দেখানোর নোটিফিকেশন
             webView.evaluateJavascript("if(window.onDocumentValidated) { window.onDocumentValidated(${JSONObject.quote(slot)}, false, ''); }", null)
             webView.evaluateJavascript("if(window.onDocumentValidationFailed) { window.onDocumentValidationFailed(${JSONObject.quote(slot)}, ${JSONObject.quote(message)}); }", null)
         }
@@ -816,24 +889,25 @@ class MainActivity : AppCompatActivity() {
         } catch (e: Exception) { return Pair(null, "") }
     }
 
-    // আইডি কার্ড থেকে আলাদা ফেস ইমেজ ক্রপ করা
+    // Google ML Kit Face Detector দিয়ে কার্ড থেকে আলাদা ফেস ইমেজ ক্রপ করা
     private fun extractFaceFromBitmap(bitmap: Bitmap?): String {
         if (bitmap == null) return ""
         try {
-            val width = if (bitmap.width % 2 == 0) bitmap.width else bitmap.width - 1
-            val bmp565 = bitmap.copy(Bitmap.Config.RGB_565, false)
-            val faces = arrayOfNulls<FaceDetector.Face>(1)
-            if (FaceDetector(width, bitmap.height, 1).findFaces(bmp565, faces) > 0 && faces[0] != null) {
-                val face = faces[0]!!
-                val midPoint = PointF(); face.getMidPoint(midPoint)
-                val eyeDist = face.eyesDistance()
-                val fW = (eyeDist * 3.0f).toInt()
-                val fH = (eyeDist * 3.8f).toInt()
-                val x = (midPoint.x - fW / 2).toInt().coerceIn(0, bitmap.width - 1)
-                val y = (midPoint.y - fH / 2.2f).toInt().coerceIn(0, bitmap.height - 1)
-                val w = fW.coerceAtMost(bitmap.width - x)
-                val h = fH.coerceAtMost(bitmap.height - y)
-                if (w > 40 && h > 40) {
+            val inputImage = InputImage.fromBitmap(bitmap, 0)
+            val facesTask = faceDetector.process(inputImage)
+            val faces = Tasks.await(facesTask, 3, TimeUnit.SECONDS)
+
+            if (!faces.isNullOrEmpty()) {
+                val box = faces[0].boundingBox
+                val padX = (box.width() * 0.25f).toInt()
+                val padY = (box.height() * 0.35f).toInt()
+
+                val x = (box.left - padX).coerceAtLeast(0)
+                val y = (box.top - padY).coerceAtLeast(0)
+                val w = (box.width() + padX * 2).coerceAtMost(bitmap.width - x)
+                val h = (box.height() + padY * 2).coerceAtMost(bitmap.height - y)
+
+                if (w > 30 && h > 30) {
                     val stream = ByteArrayOutputStream()
                     Bitmap.createBitmap(bitmap, x, y, w, h).compress(Bitmap.CompressFormat.JPEG, 90, stream)
                     return "data:image/jpeg;base64," + Base64.encodeToString(stream.toByteArray(), Base64.NO_WRAP)
@@ -841,6 +915,7 @@ class MainActivity : AppCompatActivity() {
             }
         } catch (e: Exception) {}
 
+        // ফেস ডিটেকশন মিস করলেও আইডি কার্ডের স্ট্যান্ডার্ড ছবি পজিশন থেকে সেফ ক্রপ
         return try {
             val x = (bitmap.width * 0.04).toInt()
             val y = (bitmap.height * 0.16).toInt()
@@ -870,7 +945,7 @@ class MainActivity : AppCompatActivity() {
         return result
     }
 
-    // ইউজার ওয়েবে নেক্সট বাটনে চাপ দিলে ডাটা সার্ভারে পাঠানো হবে
+    // ব্যবহারকারী নেক্সট বাটনে চাপ দিলে ডাটা সার্ভারে যাবে
     private fun processSavedDocumentsHybrid(rawDocType: String) {
         val isPassport = rawDocType.contains("PASS", ignoreCase = true)
         val normalizedDocType = if (isPassport) "PASSPORT" else "NID"
@@ -907,7 +982,7 @@ class MainActivity : AppCompatActivity() {
 
             okHttpClient.newCall(request).enqueue(object : Callback {
                 override fun onFailure(call: Call, e: IOException) {
-                    runOnUiThread { webView.evaluateJavascript("if(window.onScanFailed) { window.onScanFailed('সার্ভার কানেকশন ব্যর্থ হয়েছে।'); }", null) }
+                    runOnUiThread { webView.evaluateJavascript("if(window.onScanFailed) { window.onScanFailed('সার্ভার কানেকশন ব্যর্থ হয়েছে। ইন্টারনেট চেক করুন।'); }", null) }
                 }
                 override fun onResponse(call: Call, response: Response) {
                     val responseBody = response.body?.string()
@@ -1006,7 +1081,13 @@ class MainActivity : AppCompatActivity() {
 
     override fun onDestroy() {
         super.onDestroy()
-        try { barcodeScanner.close(); textRecognizer.close(); if (::cameraExecutor.isInitialized) cameraExecutor.shutdown(); if (::bgProcessingExecutor.isInitialized) bgProcessingExecutor.shutdown() } catch (e: Exception) {}
+        try {
+            barcodeScanner.close()
+            textRecognizer.close()
+            faceDetector.close()
+            if (::cameraExecutor.isInitialized) cameraExecutor.shutdown()
+            if (::bgProcessingExecutor.isInitialized) bgProcessingExecutor.shutdown()
+        } catch (e: Exception) {}
     }
 
     private fun hideSystemNavigationBar() {
