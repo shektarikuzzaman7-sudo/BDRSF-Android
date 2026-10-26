@@ -2,133 +2,77 @@ package com.bdrsf.app
 
 import android.webkit.JavascriptInterface
 import android.widget.Toast
-import org.json.JSONObject
 
 class AndroidBridge(private val activity: MainActivity) {
 
-    /**
-     * ওয়েবসাইট থেকে সব ধরণের ডাইনামিক কমান্ড রিসিভ করার ইউনিভার্সাল মেথড।
-     * 
-     * উদাহরণ (JS থেকে):
-     * AndroidBridge.executeAction(JSON.stringify({
-     *     action: "capture",
-     *     slot: "nid_front",
-     *     source: "camera",      // "camera" অথবা "gallery"
-     *     autoCapture: true,      // ফ্রেম সোজা হলে অটো তুলবে
-     *     checkType: "none",      // "none" = চেক ছাড়া ছবি তুলবে, "strict" = যাচাই করবে
-     *     extractFace: true       // ফেস কেটে আলাদা করবে কি না
-     * }))
-     */
+    // ১. শুধু ছবি তোলার অর্ডার (ক্যামেরা দিয়ে)
     @JavascriptInterface
-    fun executeAction(jsonConfigStr: String?) {
-        if (jsonConfigStr.isNullOrBlank()) return
-
+    fun openCameraOnly(slot: String?) {
+        val targetSlot = slot ?: "document"
         activity.runOnUiThread {
-            try {
-                val config = JSONObject(jsonConfigStr)
-                val action = config.optString("action", "capture")
-                val slot = config.optString("slot", "nid_front")
-                val source = config.optString("source", "camera")
+            activity.currentScanDocType = targetSlot
+            activity.isStrictCheckEnabled = false // কোনো বাধা ছাড়া শুধু ছবি তুলবে
+            activity.startLiveCameraScanner(targetSlot)
+        }
+    }
 
-                when (action) {
-                    "capture" -> {
-                        activity.currentScanDocType = slot
-                        activity.currentScanConfig = config
+    // ২. শুধু গ্যালারি থেকে ছবি আনার অর্ডার
+    @JavascriptInterface
+    fun openGalleryOnly(slot: String?) {
+        val targetSlot = slot ?: "document"
+        activity.runOnUiThread {
+            activity.currentScanDocType = targetSlot
+            activity.openGalleryForDocument(targetSlot)
+        }
+    }
 
-                        if (source == "camera") {
-                            activity.startLiveCameraScanner(slot)
-                        } else {
-                            activity.openGalleryForDocument(slot)
-                        }
-                    }
-
-                    "scan_qr" -> {
-                        activity.startLiveCameraScanner("qr")
-                    }
-
-                    "extract_face" -> {
-                        val base64 = config.optString("image_base64", "")
-                        activity.bgProcessingExecutor.execute {
-                            activity.processFaceExtractionOnly(slot, base64)
-                        }
-                    }
-
-                    "read_barcode" -> {
-                        val base64 = config.optString("image_base64", "")
-                        activity.bgProcessingExecutor.execute {
-                            activity.processBarcodeExtractionOnly(slot, base64)
-                        }
-                    }
-
-                    "read_text" -> {
-                        val base64 = config.optString("image_base64", "")
-                        activity.bgProcessingExecutor.execute {
-                            activity.processTextExtractionOnly(slot, base64)
-                        }
-                    }
-
-                    "process_full" -> {
-                        val docType = config.optString("document_type", "NID")
-                        activity.bgProcessingExecutor.execute {
-                            activity.processSavedDocumentsHybrid(docType)
-                        }
-                    }
-
-                    "toast" -> {
-                        val msg = config.optString("message", "")
-                        if (msg.isNotEmpty()) {
-                            Toast.makeText(activity, msg, Toast.LENGTH_SHORT).show()
-                        }
-                    }
-                }
-            } catch (e: Exception) {
-                activity.sendResultToWeb("error", "invalid_config", JSONObject().put("error", e.message ?: "Unknown error"))
+    // ৩. ছবি থেকে ফেস কেটে নেওয়ার অর্ডার
+    @JavascriptInterface
+    fun extractFace(base64Image: String?) {
+        if (!base64Image.isNullOrBlank()) {
+            activity.bgProcessingExecutor.execute {
+                activity.extractFaceFromBase64(base64Image)
             }
         }
     }
 
-    // =========================================================================
-    // পুরোনো মেথডগুলো অক্ষুণ্ণ রাখা হয়েছে (ব্যাকওয়ার্ড কম্প্যাটিবিলিটির জন্য)
-    // =========================================================================
-
+    // ৪. ছবি থেকে বারকোড ডাটা নেওয়ার অর্ডার
     @JavascriptInterface
-    fun pickDocumentImage(slot: String?, mode: String?) {
-        val targetSlot = slot ?: "nid_front"
-        val targetMode = mode ?: "camera"
-
-        val dynamicConfig = JSONObject().apply {
-            put("action", "capture")
-            put("slot", targetSlot)
-            put("source", targetMode)
-            put("checkType", "none") // ওয়েবসাইট থেকে সরাসরি চাইলে কোনো কড়া চেক ছাড়া ছবি তুলবে
+    fun readBarcode(base64Image: String?) {
+        if (!base64Image.isNullOrBlank()) {
+            activity.bgProcessingExecutor.execute {
+                activity.readBarcodeFromBase64(base64Image)
+            }
         }
-        executeAction(dynamicConfig.toString())
     }
 
+    // ৫. ছবি থেকে টেক্সট পড়ে নেওয়ার অর্ডার
     @JavascriptInterface
-    fun triggerFullDocumentProcessing(docType: String?) {
-        val dynamicConfig = JSONObject().apply {
-            put("action", "process_full")
-            put("document_type", docType ?: "NID")
+    fun readText(base64Image: String?) {
+        if (!base64Image.isNullOrBlank()) {
+            activity.bgProcessingExecutor.execute {
+                activity.readTextFromBase64(base64Image)
+            }
         }
-        executeAction(dynamicConfig.toString())
     }
 
+    // ৬. কিউআর কোড স্ক্যানার চালু করার অর্ডার
     @JavascriptInterface
-    fun startNativeMLKitScanner() {
-        val dynamicConfig = JSONObject().apply {
-            put("action", "scan_qr")
-        }
-        executeAction(dynamicConfig.toString())
-    }
-
-    @JavascriptInterface
-    fun startNativeGalleryPicker() {
+    fun openQrScanner() {
         activity.runOnUiThread {
-            activity.openGalleryForQrScan()
+            activity.startLiveCameraScanner("qr")
         }
     }
 
+    // ৭. সার্ভার ও Gemini এআই প্রসেসিংয়ের অর্ডার
+    @JavascriptInterface
+    fun triggerFullProcessing(docType: String?) {
+        activity.bgProcessingExecutor.execute {
+            activity.processSavedDocumentsHybrid(docType ?: "NID")
+        }
+    }
+
+    // টোস্ট মেসেজ
     @JavascriptInterface
     fun showToast(message: String?) {
         if (!message.isNullOrBlank()) {
