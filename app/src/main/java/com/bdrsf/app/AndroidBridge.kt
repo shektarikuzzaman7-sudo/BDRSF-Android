@@ -13,21 +13,25 @@ class AndroidBridge(private val activity: MainActivity) {
     }
 
     @JavascriptInterface
-    fun pickDocumentImage(slot: String, mode: String) {
+    fun pickDocumentImage(slot: String?, mode: String?) {
+        val targetSlot = slot ?: "nid_front"
+        val targetMode = mode ?: "camera"
+
         activity.runOnUiThread {
-            activity.currentScanDocType = slot
-            if (mode == "camera") {
-                activity.startLiveCameraScanner(slot)
+            activity.currentScanDocType = targetSlot
+            if (targetMode == "camera") {
+                activity.startLiveCameraScanner(targetSlot)
             } else {
-                activity.openGalleryForDocument(slot)
+                activity.openGalleryForDocument(targetSlot)
             }
         }
     }
 
     @JavascriptInterface
-    fun triggerFullDocumentProcessing(docType: String) {
+    fun triggerFullDocumentProcessing(docType: String?) {
+        val type = docType ?: "NID"
         activity.bgProcessingExecutor.execute {
-            activity.processSavedDocumentsHybrid(docType)
+            activity.processSavedDocumentsHybrid(type)
         }
     }
 
@@ -39,9 +43,11 @@ class AndroidBridge(private val activity: MainActivity) {
     }
 
     @JavascriptInterface
-    fun showToast(message: String) {
-        activity.runOnUiThread {
-            Toast.makeText(activity, message, Toast.LENGTH_SHORT).show()
+    fun showToast(message: String?) {
+        if (!message.isNullOrBlank()) {
+            activity.runOnUiThread {
+                Toast.makeText(activity, message, Toast.LENGTH_SHORT).show()
+            }
         }
     }
 }
