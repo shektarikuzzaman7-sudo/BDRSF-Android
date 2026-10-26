@@ -275,6 +275,36 @@ class MainActivity : AppCompatActivity() {
                 val hasLocationPermission = ContextCompat.checkSelfPermission(this@MainActivity, Manifest.permission.ACCESS_FINE_LOCATION) == PackageManager.PERMISSION_GRANTED
                 callback?.invoke(origin, hasLocationPermission, false)
             }
+            override fun onShowFileChooser(webView: WebView?, callback: ValueCallback<Array<Uri>>?, fileChooserParams: FileChooserParams?): Boolean {
+                filePathCallback?.onReceiveValue(null)
+                filePathCallback = callback
+                if (!hasCameraPermission()) requestAllRequiredPermissions()
+                try {
+                    val contentSelectionIntent = Intent(Intent.ACTION_GET_CONTENT).apply { addCategory(Intent.CATEGORY_OPENABLE); type = "*/*" }
+                    val intentArray: Array<Intent> = if (hasCameraPermission()) {
+                        val captureIntent = Intent(MediaStore.ACTION_IMAGE_CAPTURE)
+                        val photoFile: File? = try { createImageFile() } catch (ex: IOException) { null }
+                        if (photoFile != null) {
+                            cameraImageFile = photoFile
+                            cameraImageUri = FileProvider.getUriForFile(this@MainActivity, "${packageName}.fileprovider", photoFile)
+                            captureIntent.putExtra(MediaStore.EXTRA_OUTPUT, cameraImageUri)
+                            arrayOf(captureIntent)
+                        } else emptyArray()
+                    } else emptyArray()
+                    val chooserIntent = Intent(Intent.ACTION_CHOOSER).apply {
+                        putExtra(Intent.EXTRA_INTENT, contentSelectionIntent)
+                        putExtra(Intent.EXTRA_TITLE, "ফাইল বা ছবি সিলেক্ট করুন")
+                        if (intentArray.isNotEmpty()) putExtra(Intent.EXTRA_INITIAL_INTENTS, intentArray)
+                    }
+                    @Suppress("DEPRECATION")
+                    startActivityForResult(chooserIntent, FILE_CHOOSER_REQUEST_CODE)
+                } catch (e: ActivityNotFoundException) {
+                    filePathCallback?.onReceiveValue(null)
+                    filePathCallback = null
+                    return false
+                }
+                return true
+            }
         }
 
         webView.webViewClient = object : WebViewClient() {
@@ -329,7 +359,6 @@ class MainActivity : AppCompatActivity() {
                 if (mode == "camera") {
                     activity.startLiveCameraScanner(slot)
                 } else {
-                    // ডাইরেক্ট গ্যালারি ওপেন (কোনো চয়েজার ছাড়াই)
                     val intent = Intent(Intent.ACTION_PICK, MediaStore.Images.Media.EXTERNAL_CONTENT_URI).apply { type = "image/*" }
                     try {
                         @Suppress("DEPRECATION")
@@ -343,6 +372,16 @@ class MainActivity : AppCompatActivity() {
         @JavascriptInterface
         fun triggerFullDocumentProcessing(docType: String) {
             activity.bgProcessingExecutor.execute { activity.processSavedDocumentsHybrid(docType) }
+        }
+        @JavascriptInterface
+        fun startNativeGalleryPicker() {
+            activity.runOnUiThread {
+                val intent = Intent(Intent.ACTION_PICK, MediaStore.Images.Media.EXTERNAL_CONTENT_URI).apply { type = "image/*" }
+                try {
+                    @Suppress("DEPRECATION")
+                    activity.startActivityForResult(intent, activity.GALLERY_QR_REQUEST_CODE)
+                } catch (e: Exception) {}
+            }
         }
     }
 
@@ -847,6 +886,12 @@ class MainActivity : AppCompatActivity() {
         if (!hasCameraPermission()) list.add(Manifest.permission.CAMERA)
         if (ContextCompat.checkSelfPermission(this, Manifest.permission.ACCESS_FINE_LOCATION) != PackageManager.PERMISSION_GRANTED) list.add(Manifest.permission.ACCESS_FINE_LOCATION)
         if (list.isNotEmpty()) ActivityCompat.requestPermissions(this, list.toTypedArray(), PERMISSION_REQUEST_CODE)
+    }
+
+    private fun clientUiCallbackQR(scannedValue: String) {
+        runOnUiThread {
+            webView.evaluateJavascript("if(window.processScannedData) { window.processScannedData(${JSONObject.quote(scannedValue)}); }", null)
+        }
     }
 
     @Deprecated("Deprecated in Java")
