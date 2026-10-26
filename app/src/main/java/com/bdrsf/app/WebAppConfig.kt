@@ -1,8 +1,8 @@
 package com.bdrsf.app
 
-import android.content.Context
-import android.webkit.WebSettings
+import android.net.Uri
 import android.webkit.WebView
+import java.util.Locale
 
 object WebAppConfig {
 
@@ -10,26 +10,8 @@ object WebAppConfig {
     const val HOME_HOST = "bdrsf.com"
     const val JS_BRIDGE_NAME = "AndroidBridge"
 
-    fun configureWebView(webView: WebView, context: Context) {
-        val settings = webView.settings
-        AppSecurityConfig.configureWebSettings(settings)
-
-        settings.javaScriptEnabled = true
-        settings.domStorageEnabled = true
-        settings.databaseEnabled = true
-        settings.allowFileAccess = true
-        settings.allowContentAccess = true
-        settings.setSupportZoom(false)
-        settings.builtInZoomControls = false
-        settings.displayZoomControls = false
-        settings.cacheMode = WebSettings.LOAD_DEFAULT
-        settings.loadWithOverviewMode = true
-        settings.useWideViewPort = true
-        settings.mixedContentMode = WebSettings.MIXED_CONTENT_NEVER_ALLOW
-        settings.safeBrowsingEnabled = true
-        settings.savePassword = false
-        settings.setSupportMultipleWindows(false)
-        settings.javaScriptCanOpenWindowsAutomatically = false
+    fun configureWebView(webView: WebView) {
+        AppSecurityConfig.configureWebSettings(webView.settings)
     }
 
     fun loadHomePage(webView: WebView) {
@@ -38,11 +20,20 @@ object WebAppConfig {
 
     fun isHomeUrl(url: String?): Boolean {
         if (url.isNullOrBlank()) return false
-        return url.trim().startsWith(HOME_URL) || url.trim().startsWith("https://bdrsf.com")
+        val clean = url.trim().trimEnd('/')
+        val homeClean = HOME_URL.trimEnd('/')
+        return clean.isEmpty() || clean == homeClean
     }
 
     fun shouldStayInsideWebView(url: String?): Boolean {
         if (url.isNullOrBlank()) return false
-        return AppSecurityConfig.isTrustedUrl(url)
+        return try {
+            val uri = Uri.parse(url)
+            val scheme = uri.scheme?.lowercase(Locale.US)
+            val host = uri.host?.lowercase(Locale.US)
+            (scheme == "https" || scheme == "http") && AppSecurityConfig.isTrustedHost(host)
+        } catch (_: Exception) {
+            false
+        }
     }
 }
