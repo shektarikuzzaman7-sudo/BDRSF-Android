@@ -31,7 +31,7 @@ object WebAppConfig {
             val uri = Uri.parse(url)
             val scheme = uri.scheme?.lowercase(Locale.US)
             val host = uri.host?.lowercase(Locale.US)
-            (scheme == "https" || scheme == "http") && AppSecurityConfig.isTrustedHost(host)
+            scheme == "https" && AppSecurityConfig.isTrustedHost(host)
         } catch (_: Exception) {
             false
         }
