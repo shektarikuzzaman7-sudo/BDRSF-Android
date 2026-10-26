@@ -44,10 +44,10 @@ dependencies {
     // ML Kit Barcode Scanning (পেছনের বারকোড পড়ার জন্য)
     implementation("com.google.mlkit:barcode-scanning:17.3.0")
 
-    // ML Kit Text Recognition (সামনের ইংরেজি নাম, NID ও জন্মতারিখ দ্রুত পড়ার জন্য)
+    // ML Kit Text Recognition (সামনের ইংরেজি নাম, NID ও লেখা স্পষ্ট কি না তা যাচাই করতে)
     implementation("com.google.mlkit:text-recognition:16.0.1")
 
-    // নেটওয়ার্ক কল
+    // নেটওয়ার্ক কল (সার্ভারে ডেটা পাঠানোর জন্য)
     implementation("com.squareup.okhttp3:okhttp:4.12.0")
 
     // CameraX (লাইভ ক্যামেরা প্রিভিউ, ফ্রেম গাইড ও অটো স্ক্যানারের জন্য)
