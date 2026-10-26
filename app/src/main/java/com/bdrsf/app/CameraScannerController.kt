@@ -48,6 +48,7 @@ class CameraScannerController(
 
     private val isImageCaptured = AtomicBoolean(false)
 
+    // কিউআর কোড স্ক্যানের জন্য ডিফল্ট স্ক্যানার
     private val barcodeScanner: BarcodeScanner by lazy {
         val options = BarcodeScannerOptions.Builder()
             .setBarcodeFormats(Barcode.FORMAT_QR_CODE)
@@ -106,10 +107,11 @@ class CameraScannerController(
                 topMargin = topMarginPx
                 rightMargin = rightMarginPx
             }
+
             setOnClickListener { stopLiveCameraScanner() }
         }
-        scannerLayout?.addView(closeButton)
 
+        scannerLayout?.addView(closeButton)
         activity.mainLayout.addView(scannerLayout)
 
         val cameraProviderFuture = ProcessCameraProvider.getInstance(activity)
@@ -154,47 +156,68 @@ class CameraScannerController(
 
             val inputImage = InputImage.fromMediaImage(mediaImage, imageProxy.imageInfo.rotationDegrees)
 
-            if (scanMode == "qr") {
-                barcodeScanner.process(inputImage)
-                    .addOnSuccessListener { barcodes ->
-                        val value = barcodes.firstOrNull { !it.rawValue.isNullOrEmpty() }?.rawValue
-                        if (!value.isNullOrBlank() && isImageCaptured.compareAndSet(false, true)) {
-                            activity.runOnUiThread {
-                                stopLiveCameraScanner()
-                                activity.webView.evaluateJavascript(
-                                    "if(window.processScannedData) { window.processScannedData(${JSONObject.quote(value)}); }",
-                                    null
-                                )
+            when (scanMode) {
+                "qr" -> {
+                    barcodeScanner.process(inputImage)
+                        .addOnSuccessListener { barcodes ->
+                            val value = barcodes.firstOrNull { !it.rawValue.isNullOrEmpty() }?.rawValue
+                            if (!value.isNullOrBlank() && isImageCaptured.compareAndSet(false, true)) {
+                                activity.runOnUiThread {
+                                    stopLiveCameraScanner()
+                                    activity.webView.evaluateJavascript(
+                                        "if(window.processScannedData) { window.processScannedData(${JSONObject.quote(value)}); }",
+                                        null
+                                    )
+                                }
                             }
                         }
-                    }
-                    .addOnCompleteListener { imageProxy.close() }
-                return@setAnalyzer
-            }
-
-            textRecognizer.process(inputImage)
-                .addOnSuccessListener { visionText ->
-                    val lineCount = visionText.textBlocks.sumOf { it.lines.size }
-                    // কঠোরভাবে চেক করবে লাইভ ফ্রেমেই
-                    when (scanMode) {
-                        "nid_front" -> {
-                            if (DocumentScanValidator.isNidFrontClearForCapture(visionText.text, lineCount)) {
-                                if (isImageCaptured.compareAndSet(false, true)) takeAutoCaptureAndCrop(scanMode)
-                            }
-                        }
-                        "nid_back" -> {
-                            if (DocumentScanValidator.isNidBackClearForCapture(visionText.text, lineCount, false)) {
-                                if (isImageCaptured.compareAndSet(false, true)) takeAutoCaptureAndCrop(scanMode)
-                            }
-                        }
-                        "passport" -> {
-                            if (DocumentScanValidator.isPassportClearForCapture(visionText.text, lineCount)) {
-                                if (isImageCaptured.compareAndSet(false, true)) takeAutoCaptureAndCrop(scanMode)
-                            }
-                        }
-                    }
+                        .addOnCompleteListener { imageProxy.close() }
                 }
-                .addOnCompleteListener { imageProxy.close() }
+
+                "nid_front" -> {
+                    textRecognizer.process(inputImage)
+                        .addOnSuccessListener { visionText ->
+                            val lineCount = visionText.textBlocks.sumOf { it.lines.size }
+                            // সামনের অংশ চেনা মাত্রই ছবি তুলবে
+                            if (DocumentScanValidator.isNidFrontClearForCapture(visionText.text, lineCount)) {
+                                if (isImageCaptured.compareAndSet(false, true)) {
+                                    takeAutoCaptureAndCrop(scanMode)
+                                }
+                            }
+                        }
+                        .addOnCompleteListener { imageProxy.close() }
+                }
+
+                "nid_back" -> {
+                    // কোনো বারকোড স্ক্যান করার চেষ্টা করবে না! 
+                    // শুধুমাত্র পেছনের অংশ কি না (ঠিকানা/সিল ইত্যাদি) দেখেই সাথে সাথে ছবি তুলবে
+                    textRecognizer.process(inputImage)
+                        .addOnSuccessListener { visionText ->
+                            val lineCount = visionText.textBlocks.sumOf { it.lines.size }
+                            if (DocumentScanValidator.isNidBackClearForCapture(visionText.text, lineCount, false)) {
+                                if (isImageCaptured.compareAndSet(false, true)) {
+                                    takeAutoCaptureAndCrop(scanMode)
+                                }
+                            }
+                        }
+                        .addOnCompleteListener { imageProxy.close() }
+                }
+
+                "passport" -> {
+                    textRecognizer.process(inputImage)
+                        .addOnSuccessListener { visionText ->
+                            val lineCount = visionText.textBlocks.sumOf { it.lines.size }
+                            if (DocumentScanValidator.isPassportClearForCapture(visionText.text, lineCount)) {
+                                if (isImageCaptured.compareAndSet(false, true)) {
+                                    takeAutoCaptureAndCrop(scanMode)
+                                }
+                            }
+                        }
+                        .addOnCompleteListener { imageProxy.close() }
+                }
+
+                else -> imageProxy.close()
+            }
         }
 
         try {
@@ -215,7 +238,9 @@ class CameraScannerController(
     private fun takeAutoCaptureAndCrop(scanMode: String) {
         val photoFile = try {
             activity.createImageFile()
-        } catch (_: Exception) { null }
+        } catch (e: Exception) {
+            null
+        }
 
         if (photoFile == null) {
             isImageCaptured.set(false)
@@ -240,7 +265,11 @@ class CameraScannerController(
                     stopLiveCameraScanner()
                     isImageCaptured.set(false)
                     activity.runOnUiThread {
-                        Toast.makeText(activity, "ছবি ক্যাপচার ব্যর্থ হয়েছে", Toast.LENGTH_SHORT).show()
+                        Toast.makeText(
+                            activity,
+                            "ছবি ক্যাপচার ব্যর্থ হয়েছে",
+                            Toast.LENGTH_SHORT
+                        ).show()
                     }
                 }
             }
@@ -249,7 +278,10 @@ class CameraScannerController(
 
     fun stopLiveCameraScanner() {
         isScanningActive = false
-        try { cameraProvider?.unbindAll() } catch (_: Exception) {}
+        try {
+            cameraProvider?.unbindAll()
+        } catch (_: Exception) {
+        }
 
         scannerLayout?.let {
             activity.mainLayout.removeView(it)
@@ -264,11 +296,15 @@ class CameraScannerController(
             barcodeScanner.close()
             textRecognizer.close()
             cameraExecutor.shutdown()
-        } catch (_: Exception) {}
+        } catch (_: Exception) {
+        }
     }
 
     private fun hasCameraPermission(): Boolean {
-        return ContextCompat.checkSelfPermission(activity, Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED
+        return ContextCompat.checkSelfPermission(
+            activity,
+            Manifest.permission.CAMERA
+        ) == PackageManager.PERMISSION_GRANTED
     }
 
     inner class DocumentOverlayView(context: Context, private val mode: String) : View(context) {
@@ -308,6 +344,7 @@ class CameraScannerController(
             canvas.drawRect(0f, bottom, w, h, shadePaint)
             canvas.drawRect(0f, top, left, bottom, shadePaint)
             canvas.drawRect(right, top, w, bottom, shadePaint)
+
             canvas.drawRoundRect(RectF(left, top, right, bottom), 22f, 22f, boxPaint)
 
             val guideText = when (mode) {
@@ -316,6 +353,7 @@ class CameraScannerController(
                 "passport" -> "পাসপোর্টের পৃষ্ঠাটি ফ্রেমের ভেতরে স্পষ্ট রাখুন"
                 else -> "ডকুমেন্টটি ফ্রেমের ভেতরে স্পষ্ট রাখুন"
             }
+
             canvas.drawText(guideText, w / 2f, top - 45f, textPaint)
         }
     }
