@@ -9,28 +9,26 @@ import android.content.Intent
 import android.content.pm.ActivityInfo
 import android.content.pm.PackageManager
 import android.graphics.Bitmap
+import android.graphics.Color
+import android.graphics.PorterDuff
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
 import android.os.Environment
 import android.provider.MediaStore
-import android.util.Base64
 import android.view.Gravity
 import android.view.View
+import android.view.WindowInsets
+import android.view.WindowInsetsController
 import android.view.WindowManager
 import android.webkit.CookieManager
 import android.webkit.DownloadListener
 import android.webkit.GeolocationPermissions
-import android.webkit.JavascriptInterface
 import android.webkit.PermissionRequest
 import android.webkit.URLUtil
 import android.webkit.ValueCallback
 import android.webkit.WebChromeClient
-import android.webkit.WebResourceRequest
-import android.webkit.WebSettings
 import android.webkit.WebView
-import android.webkit.WebViewClient
-import android.widget.Button
 import android.widget.FrameLayout
 import android.widget.ImageView
 import android.widget.ProgressBar
@@ -38,7 +36,6 @@ import android.widget.RelativeLayout
 import android.widget.Toast
 import androidx.activity.OnBackPressedCallback
 import androidx.appcompat.app.AppCompatActivity
-import androidx.camera.view.PreviewView
 import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
 import androidx.core.content.FileProvider
@@ -46,16 +43,11 @@ import androidx.core.view.ViewCompat
 import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
-import androidx.exifinterface.media.ExifInterface
-import com.google.android.gms.tasks.Tasks
 import com.google.mlkit.vision.barcode.BarcodeScanner
 import com.google.mlkit.vision.barcode.BarcodeScannerOptions
 import com.google.mlkit.vision.barcode.BarcodeScanning
 import com.google.mlkit.vision.barcode.common.Barcode
 import com.google.mlkit.vision.common.InputImage
-import com.google.mlkit.vision.face.FaceDetection
-import com.google.mlkit.vision.face.FaceDetector
-import com.google.mlkit.vision.face.FaceDetectorOptions
 import com.google.mlkit.vision.text.TextRecognition
 import com.google.mlkit.vision.text.TextRecognizer
 import com.google.mlkit.vision.text.latin.TextRecognizerOptions
@@ -64,15 +56,7 @@ import com.google.zxing.DecodeHintType
 import com.google.zxing.MultiFormatReader
 import com.google.zxing.RGBLuminanceSource
 import com.google.zxing.common.HybridBinarizer
-import okhttp3.Call
-import okhttp3.Callback
-import okhttp3.MediaType.Companion.toMediaTypeOrNull
-import okhttp3.OkHttpClient
-import okhttp3.Request
-import okhttp3.RequestBody.Companion.toRequestBody
-import okhttp3.Response
 import org.json.JSONObject
-import java.io.ByteArrayOutputStream
 import java.io.File
 import java.io.FileOutputStream
 import java.io.IOException
@@ -81,31 +65,27 @@ import java.util.Date
 import java.util.Locale
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
-import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
-import kotlin.math.max
 
 class MainActivity : AppCompatActivity() {
 
-    private lateinit var webView: WebView
-    private lateinit var splashLayout: FrameLayout
-    private lateinit var mainLayout: RelativeLayout
+    lateinit var webView: WebView
+    lateinit var splashLayout: FrameLayout
+    lateinit var mainLayout: RelativeLayout
 
-    private lateinit var cameraScannerController: CameraScannerController
+    lateinit var cameraScannerController: CameraScannerController
     private lateinit var nativeWebViewClient: NativeWebViewClient
     private lateinit var androidBridge: AndroidBridge
     private lateinit var apiClient: ApiClient
 
-    private lateinit var bgProcessingExecutor: ExecutorService
-    private var isScanningActive = false
-    private var isFirstPageLoad = true
+    lateinit var bgProcessingExecutor: ExecutorService
 
-    private var currentScanDocType = "nid_front"
+    var currentScanDocType: String = "nid_front"
     private var filePathCallback: ValueCallback<Array<Uri>>? = null
     private var cameraImageFile: File? = null
     private var cameraImageUri: Uri? = null
 
-    // document caching
+    // ডকুমেন্ট ক্যাশিং
     @Volatile private var cachedFrontBase64: String = ""
     @Volatile private var cachedBackBase64: String = ""
     @Volatile private var cachedFaceBase64: String = ""
@@ -121,7 +101,7 @@ class MainActivity : AppCompatActivity() {
     private val GALLERY_QR_REQUEST_CODE = 1004
     private val DOCUMENT_SCAN_REQUEST_CODE = 1005
 
-    // ML Kit objects
+    // ML Kit অবজেক্টসমূহ
     private val barcodeScanner: BarcodeScanner by lazy {
         val options = BarcodeScannerOptions.Builder()
             .setBarcodeFormats(
@@ -139,22 +119,6 @@ class MainActivity : AppCompatActivity() {
     private val textRecognizer: TextRecognizer by lazy {
         TextRecognition.getClient(TextRecognizerOptions.DEFAULT_OPTIONS)
     }
-
-    private val faceDetector: FaceDetector by lazy {
-        val options = FaceDetectorOptions.Builder()
-            .setPerformanceMode(FaceDetectorOptions.PERFORMANCE_MODE_FAST)
-            .setLandmarkMode(FaceDetectorOptions.LANDMARK_MODE_NONE)
-            .setClassificationMode(FaceDetectorOptions.CLASSIFICATION_MODE_NONE)
-            .build()
-        FaceDetection.getClient(options)
-    }
-
-    private val okHttpClient = OkHttpClient.Builder()
-        .connectTimeout(45, TimeUnit.SECONDS)
-        .writeTimeout(45, TimeUnit.SECONDS)
-        .readTimeout(45, TimeUnit.SECONDS)
-        .retryOnConnectionFailure(true)
-        .build()
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -213,7 +177,7 @@ class MainActivity : AppCompatActivity() {
             }
             try {
                 @Suppress("DEPRECATION")
-                indeterminateDrawable.setColorFilter(Color.parseColor("#FFD700"), android.graphics.PorterDuff.Mode.SRC_IN)
+                indeterminateDrawable.setColorFilter(Color.parseColor("#FFD700"), PorterDuff.Mode.SRC_IN)
             } catch (_: Exception) {
             }
         }
@@ -234,26 +198,32 @@ class MainActivity : AppCompatActivity() {
 
         bgProcessingExecutor = Executors.newFixedThreadPool(2)
 
-        nativeWebViewClient = NativeWebViewClient()
+        nativeWebViewClient = NativeWebViewClient {
+            runOnUiThread {
+                splashLayout.animate().alpha(0f).setDuration(400).withEndAction {
+                    splashLayout.visibility = View.GONE
+                }
+            }
+        }
+
         androidBridge = AndroidBridge(this)
         cameraScannerController = CameraScannerController(this)
-        apiClient = ApiClient(webView)
+        apiClient = ApiClient()
 
         requestAllRequiredPermissions()
         hideSystemNavigationBar()
 
         onBackPressedDispatcher.addCallback(this, object : OnBackPressedCallback(true) {
             override fun handleOnBackPressed() {
-                if (isScanningActive) {
+                if (cameraScannerController.isScanningActive) {
                     stopLiveCameraScanner()
                 } else if (::webView.isInitialized) {
                     val currentUrl = webView.url ?: ""
-                    val homeBase = "https://bdrsf.com"
-                    if (currentUrl.trimEnd('/').isNotEmpty() && currentUrl.trimEnd('/') != homeBase) {
-                        webView.loadUrl("https://bdrsf.com/")
-                        webView.clearHistory()
-                    } else {
+                    if (WebAppConfig.isHomeUrl(currentUrl)) {
                         webView.reload()
+                    } else {
+                        WebAppConfig.loadHomePage(webView)
+                        webView.clearHistory()
                     }
                 }
             }
@@ -263,12 +233,12 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun setupWebView() {
-        WebAppConfig.configureWebView(webView, this)
-        webView.addJavascriptInterface(androidBridge, "AndroidBridge")
+        WebAppConfig.configureWebView(webView)
+        webView.addJavascriptInterface(androidBridge, WebAppConfig.JS_BRIDGE_NAME)
         webView.webViewClient = nativeWebViewClient
 
         val cookieManager = CookieManager.getInstance()
-        AppSecurityConfig.configureCookiePolicy(this, cookieManager)
+        AppSecurityConfig.configureCookiePolicy(webView, cookieManager)
 
         webView.setDownloadListener(DownloadListener { url, userAgent, contentDisposition, mimetype, _ ->
             try {
@@ -283,7 +253,7 @@ class MainActivity : AppCompatActivity() {
                 val downloadManager = getSystemService(Context.DOWNLOAD_SERVICE) as DownloadManager
                 downloadManager.enqueue(request)
                 Toast.makeText(this, "ডাউনলোড শুরু হয়েছে", Toast.LENGTH_SHORT).show()
-            } catch (e: Exception) {
+            } catch (_: Exception) {
                 Toast.makeText(this, "ডাউনলোডে সমস্যা হয়েছে", Toast.LENGTH_SHORT).show()
             }
         })
@@ -315,7 +285,7 @@ class MainActivity : AppCompatActivity() {
                         val captureIntent = Intent(MediaStore.ACTION_IMAGE_CAPTURE)
                         val photoFile: File? = try {
                             createImageFile()
-                        } catch (ex: IOException) {
+                        } catch (_: IOException) {
                             null
                         }
 
@@ -343,7 +313,7 @@ class MainActivity : AppCompatActivity() {
 
                     @Suppress("DEPRECATION")
                     startActivityForResult(chooserIntent, FILE_CHOOSER_REQUEST_CODE)
-                } catch (e: ActivityNotFoundException) {
+                } catch (_: ActivityNotFoundException) {
                     filePathCallback?.onReceiveValue(null)
                     filePathCallback = null
                     return false
@@ -355,66 +325,42 @@ class MainActivity : AppCompatActivity() {
         WebAppConfig.loadHomePage(webView)
     }
 
-    class WebAppInterface(private val activity: MainActivity) {
-        @JavascriptInterface
-        fun startNativeMLKitScanner() {
-            activity.runOnUiThread { activity.startLiveCameraScanner("qr") }
-        }
-
-        @JavascriptInterface
-        fun pickDocumentImage(slot: String, mode: String) {
-            activity.runOnUiThread {
-                activity.currentScanDocType = slot
-                if (mode == "camera") {
-                    activity.startLiveCameraScanner(slot)
-                } else {
-                    val intent = Intent(Intent.ACTION_PICK, MediaStore.Images.Media.EXTERNAL_CONTENT_URI).apply {
-                        type = "image/*"
-                    }
-                    try {
-                        @Suppress("DEPRECATION")
-                        activity.startActivityForResult(intent, activity.DOCUMENT_SCAN_REQUEST_CODE)
-                    } catch (e: Exception) {
-                        Toast.makeText(activity, "গ্যালারি ওপেন করা যাচ্ছে না", Toast.LENGTH_SHORT).show()
-                    }
-                }
-            }
-        }
-
-        @JavascriptInterface
-        fun triggerFullDocumentProcessing(docType: String) {
-            activity.bgProcessingExecutor.execute { activity.processSavedDocumentsHybrid(docType) }
-        }
-
-        @JavascriptInterface
-        fun startNativeGalleryPicker() {
-            activity.runOnUiThread {
-                val intent = Intent(Intent.ACTION_PICK, MediaStore.Images.Media.EXTERNAL_CONTENT_URI).apply {
-                    type = "image/*"
-                }
-                try {
-                    @Suppress("DEPRECATION")
-                    activity.startActivityForResult(intent, activity.GALLERY_QR_REQUEST_CODE)
-                } catch (_: Exception) {
-                }
-            }
-        }
-    }
-
-    private fun startLiveCameraScanner(scanMode: String) {
+    fun startLiveCameraScanner(scanMode: String) {
+        currentScanDocType = scanMode
         cameraScannerController.startLiveCameraScanner(scanMode)
-        isScanningActive = true
     }
 
-    private fun stopLiveCameraScanner() {
+    fun stopLiveCameraScanner() {
         cameraScannerController.stopLiveCameraScanner()
-        isScanningActive = false
     }
 
-    private fun processDeepDocumentFile(file: File, targetSlot: String) {
-        if (!file.exists()) return
+    fun openGalleryForDocument(slot: String) {
+        currentScanDocType = slot
+        val intent = Intent(Intent.ACTION_PICK, MediaStore.Images.Media.EXTERNAL_CONTENT_URI).apply {
+            type = "image/*"
+        }
+        try {
+            @Suppress("DEPRECATION")
+            startActivityForResult(intent, DOCUMENT_SCAN_REQUEST_CODE)
+        } catch (_: Exception) {
+            Toast.makeText(this, "গ্যালারি ওপেন করা যাচ্ছে না", Toast.LENGTH_SHORT).show()
+        }
+    }
 
-        val isPassport = targetSlot.equals("passport", ignoreCase = true)
+    fun openGalleryForQrScan() {
+        val intent = Intent(Intent.ACTION_PICK, MediaStore.Images.Media.EXTERNAL_CONTENT_URI).apply {
+            type = "image/*"
+        }
+        try {
+            @Suppress("DEPRECATION")
+            startActivityForResult(intent, GALLERY_QR_REQUEST_CODE)
+        } catch (_: Exception) {
+            Toast.makeText(this, "গ্যালারি ওপেন করা যাচ্ছে না", Toast.LENGTH_SHORT).show()
+        }
+    }
+
+    fun processDeepDocumentFile(file: File, targetSlot: String) {
+        if (!file.exists()) return
 
         if (targetSlot == "nid_front" || targetSlot == "passport") {
             isFrontProcessing.set(true)
@@ -436,7 +382,7 @@ class MainActivity : AppCompatActivity() {
 
                                 if (targetSlot == "nid_front") {
                                     val isNidText = DocumentScanValidator.isValidNidFrontText(allText)
-                                    if (!isNidText) {
+                                    if (nidMatch == null && !isNidText) {
                                         notifyValidationFailed(targetSlot, "এটি সঠিক এনআইডি কার্ড নয়। পরিষ্কার ছবি দিন।")
                                         cachedFrontBase64 = ""
                                         return@addOnSuccessListener
@@ -508,9 +454,7 @@ class MainActivity : AppCompatActivity() {
 
                                 if (barcodeNid.isNotEmpty()) {
                                     if (localExtractedNidFront.isNotEmpty()) {
-                                        val cleanFront = localExtractedNidFront.replace("\\D".toRegex(), "")
-                                        val cleanBack = barcodeNid.replace("\\D".toRegex(), "")
-                                        val isMatch = cleanFront == cleanBack || cleanFront.endsWith(cleanBack) || cleanBack.endsWith(cleanFront)
+                                        val isMatch = DocumentScanValidator.validateNidMatch(localExtractedNidFront, barcodeNid)
                                         if (!isMatch) {
                                             notifyValidationFailed(targetSlot, "ভুল কার্ড! সামনের এবং পেছনের অংশ দুটি ভিন্ন কার্ডের।")
                                             cachedBackBase64 = ""
@@ -520,6 +464,7 @@ class MainActivity : AppCompatActivity() {
                                     }
 
                                     cachedBackBase64 = b64
+                                    cachedBarcodeRaw = rawUtf8
                                     cachedBarcodeMap = parsedData
 
                                     runOnUiThread {
@@ -636,7 +581,7 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    private fun processSavedDocumentsHybrid(rawDocType: String) {
+    fun processSavedDocumentsHybrid(rawDocType: String) {
         val isPassport = rawDocType.contains("PASS", ignoreCase = true)
         val normalizedDocType = if (isPassport) "PASSPORT" else "NID"
 
@@ -666,90 +611,31 @@ class MainActivity : AppCompatActivity() {
             return
         }
 
-        sendPreCachedDataToServerForOCR(
-            cachedFrontBase64,
-            if (isPassport) null else cachedBackBase64,
-            cachedFaceBase64,
-            cachedBarcodeMap,
-            normalizedDocType
-        )
-    }
-
-    private fun sendPreCachedDataToServerForOCR(
-        frontBase64: String,
-        backBase64: String?,
-        faceBase64: String,
-        barcodeMap: Map<String, String>,
-        documentType: String
-    ) {
-        try {
-            val jsonBody = JSONObject().apply {
-                put("action", "scan_document")
-                put("document_type", documentType)
-                put("front_image_base64", frontBase64)
-                if (!backBase64.isNullOrEmpty()) put("back_image_base64", backBase64)
-            }
-
-            val request = Request.Builder()
-                .url("https://bdrsf.com/api/ocr_scan")
-                .post(
-                    jsonBody.toString().toRequestBody("application/json; charset=utf-8".toMediaTypeOrNull())
-                )
-                .addHeader("Accept", "application/json")
-                .addHeader("Content-Type", "application/json")
-                .build()
-
-            okHttpClient.newCall(request).enqueue(object : Callback {
-                override fun onFailure(call: Call, e: IOException) {
-                    runOnUiThread {
-                        webView.evaluateJavascript(
-                            "if(window.onScanFailed) { window.onScanFailed('সার্ভার কানেকশন ব্যর্থ হয়েছে। ইন্টারনেট চেক করুন।'); }",
-                            null
-                        )
-                    }
-                }
-
-                override fun onResponse(call: Call, response: Response) {
-                    val responseBody = response.body?.string()
-                    if (response.isSuccessful && responseBody != null) {
-                        try {
-                            val json = JSONObject(responseBody)
-                            if (json.optString("status") == "success") {
-                                val data = json.getJSONObject("data")
-                                val rawBackText = json.optString("raw_text", "")
-                                if (documentType == "PASSPORT") {
-                                    handlePassportServerResponse(data, faceBase64)
-                                } else {
-                                    handleNidServerResponse(data, rawBackText, barcodeMap, faceBase64)
-                                }
-                            } else {
-                                runOnUiThread {
-                                    webView.evaluateJavascript(
-                                        "if(window.onScanFailed) { window.onScanFailed(${JSONObject.quote(json.optString("message"))}); }",
-                                        null
-                                    )
-                                }
-                            }
-                        } catch (_: Exception) {
-                            runOnUiThread {
-                                webView.evaluateJavascript(
-                                    "if(window.onScanFailed) { window.onScanFailed('সঠিক তথ্য ডিকোড করা সম্ভব হয়নি।'); }",
-                                    null
-                                )
-                            }
-                        }
+        apiClient.sendOcrRequest(
+            documentType = normalizedDocType,
+            frontImageBase64 = cachedFrontBase64,
+            backImageBase64 = if (isPassport) null else cachedBackBase64,
+            faceImageBase64 = cachedFaceBase64,
+            onSuccess = { json ->
+                runOnUiThread {
+                    val data = json.optJSONObject("data") ?: JSONObject()
+                    val rawBackText = json.optString("raw_text", "")
+                    if (normalizedDocType == "PASSPORT") {
+                        handlePassportServerResponse(data, cachedFaceBase64)
                     } else {
-                        runOnUiThread {
-                            webView.evaluateJavascript(
-                                "if(window.onScanFailed) { window.onScanFailed('সার্ভার এরর: HTTP ${response.code}'); }",
-                                null
-                            )
-                        }
+                        handleNidServerResponse(data, rawBackText, cachedBarcodeMap, cachedFaceBase64)
                     }
                 }
-            })
-        } catch (_: Exception) {
-        }
+            },
+            onFailure = { errorMessage ->
+                runOnUiThread {
+                    webView.evaluateJavascript(
+                        "if(window.onScanFailed) { window.onScanFailed(${JSONObject.quote(errorMessage)}); }",
+                        null
+                    )
+                }
+            }
+        )
     }
 
     private fun handleNidServerResponse(
@@ -770,7 +656,10 @@ class MainActivity : AppCompatActivity() {
             return
         }
 
-        val displayName = barcodeMap["name_bn"]?.takeIf { it.isNotEmpty() } ?: barcodeMap["name"]?.takeIf { it.isNotEmpty() } ?: ocrData.optString("nameBn", "")
+        val displayName = barcodeMap["name_bn"]?.takeIf { it.isNotEmpty() }
+            ?: barcodeMap["name"]?.takeIf { it.isNotEmpty() }
+            ?: ocrData.optString("nameBn", "")
+
         val backObj = JSONObject().apply {
             put("holding", ocrData.optString("holding", "").trim())
             put("village", ocrData.optString("village", "").trim())
@@ -834,7 +723,7 @@ class MainActivity : AppCompatActivity() {
     }
 
     @Throws(IOException::class)
-    private fun createImageFile(): File {
+    fun createImageFile(): File {
         return File.createTempFile(
             "KYC_${SimpleDateFormat("yyyyMMdd_HHmmss", Locale.getDefault()).format(Date())}_",
             ".jpg",
@@ -842,11 +731,11 @@ class MainActivity : AppCompatActivity() {
         )
     }
 
-    private fun hasCameraPermission(): Boolean {
+    fun hasCameraPermission(): Boolean {
         return ContextCompat.checkSelfPermission(this, Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED
     }
 
-    private fun requestAllRequiredPermissions() {
+    fun requestAllRequiredPermissions() {
         val list = mutableListOf<String>()
         if (!hasCameraPermission()) list.add(Manifest.permission.CAMERA)
         if (ContextCompat.checkSelfPermission(this, Manifest.permission.ACCESS_FINE_LOCATION) != PackageManager.PERMISSION_GRANTED) {
@@ -908,10 +797,10 @@ class MainActivity : AppCompatActivity() {
 
     override fun onDestroy() {
         super.onDestroy()
+        cameraScannerController.destroy()
         try {
             barcodeScanner.close()
             textRecognizer.close()
-            faceDetector.close()
         } catch (_: Exception) {
         }
         if (this::bgProcessingExecutor.isInitialized) {
@@ -923,8 +812,8 @@ class MainActivity : AppCompatActivity() {
         try {
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
                 window.insetsController?.let {
-                    it.hide(android.view.WindowInsets.Type.navigationBars())
-                    it.systemBarsBehavior = android.view.WindowInsetsController.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
+                    it.hide(WindowInsets.Type.navigationBars())
+                    it.systemBarsBehavior = WindowInsetsController.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
                 }
             } else {
                 @Suppress("DEPRECATION")
