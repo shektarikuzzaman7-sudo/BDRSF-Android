@@ -83,12 +83,12 @@ class MainActivity : AppCompatActivity() {
 
     var currentScanDocType: String = "nid_front"
     var isStrictCheckEnabled: Boolean = false
+    var currentScanConfig: JSONObject? = null
 
     private var filePathCallback: ValueCallback<Array<Uri>>? = null
     private var cameraImageFile: File? = null
     private var cameraImageUri: Uri? = null
 
-    // ক্যাশ করা ডেটা
     @Volatile var cachedFrontBase64: String = ""
     @Volatile var cachedBackBase64: String = ""
     @Volatile var cachedFaceBase64: String = ""
@@ -343,11 +343,6 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    // =========================================================================
-    // দোকানদার টুলবক্স (টুলসগুলো রেডি রাখা হলো, ওয়েবসাইট অর্ডার করলেই কাজ করবে)
-    // =========================================================================
-
-    // ১. ছবি পাওয়ার পর সরাসরি ওয়েবসাইটে পাঠিয়ে দেওয়া
     fun processDeepDocumentFile(file: File, targetSlot: String) {
         if (!file.exists()) return
 
@@ -363,12 +358,10 @@ class MainActivity : AppCompatActivity() {
                     }
 
                     runOnUiThread {
-                        // সরাসরি ওয়েবসাইটে ইমেজ দিয়ে দেওয়া
                         webView.evaluateJavascript(
                             "if(window.onImageCaptured) { window.onImageCaptured(${JSONObject.quote(targetSlot)}, ${JSONObject.quote(b64)}); }",
                             null
                         )
-                        // পুরোনো ফাংশনের সাথে মিল রাখার জন্য
                         webView.evaluateJavascript(
                             "if(window.onImageSelectedPreview) { window.onImageSelectedPreview(${JSONObject.quote(targetSlot)}, ${JSONObject.quote(b64)}); }",
                             null
@@ -379,7 +372,6 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    // ২. ফেস ক্রপ করে দেওয়া
     fun extractFaceFromBase64(base64Str: String) {
         val bmp = base64ToBitmap(base64Str)
         val faceB64 = if (bmp != null) DocumentUtils.extractFaceFromBitmap(bmp) else ""
@@ -391,7 +383,6 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    // ৩. বারকোড পড়ে দেওয়া
     fun readBarcodeFromBase64(base64Str: String) {
         val bmp = base64ToBitmap(base64Str)
         if (bmp != null) {
@@ -420,7 +411,6 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    // ৪. টেক্সট পড়ে দেওয়া
     fun readTextFromBase64(base64Str: String) {
         val bmp = base64ToBitmap(base64Str)
         if (bmp != null) {
@@ -438,7 +428,6 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    // ৫. সার্ভারে ফাইনাল পাঠানোর টুল
     fun processSavedDocumentsHybrid(rawDocType: String) {
         val isPassport = rawDocType.contains("PASS", ignoreCase = true)
         val normalizedDocType = if (isPassport) "PASSPORT" else "NID"
