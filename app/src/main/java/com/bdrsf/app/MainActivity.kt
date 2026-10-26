@@ -85,13 +85,15 @@ class MainActivity : AppCompatActivity() {
     private var cameraImageFile: File? = null
     private var cameraImageUri: Uri? = null
 
-    // ডকুমেন্ট ক্যাশিং
+    // ভেরিফাইড ডেটা ক্যাশ
     @Volatile private var cachedFrontBase64: String = ""
     @Volatile private var cachedBackBase64: String = ""
     @Volatile private var cachedFaceBase64: String = ""
     @Volatile private var cachedBarcodeMap: Map<String, String> = emptyMap()
     @Volatile private var cachedBarcodeRaw: String = ""
     @Volatile private var localExtractedNidFront: String = ""
+    @Volatile private var localExtractedDobFront: String = ""
+    @Volatile private var localExtractedNameFront: String = ""
 
     private val isFrontProcessing = AtomicBoolean(false)
     private val isBackProcessing = AtomicBoolean(false)
@@ -101,7 +103,6 @@ class MainActivity : AppCompatActivity() {
     private val GALLERY_QR_REQUEST_CODE = 1004
     private val DOCUMENT_SCAN_REQUEST_CODE = 1005
 
-    // ML Kit অবজেক্টসমূহ
     private val barcodeScanner: BarcodeScanner by lazy {
         val options = BarcodeScannerOptions.Builder()
             .setBarcodeFormats(
@@ -178,8 +179,7 @@ class MainActivity : AppCompatActivity() {
             try {
                 @Suppress("DEPRECATION")
                 indeterminateDrawable.setColorFilter(Color.parseColor("#FFD700"), PorterDuff.Mode.SRC_IN)
-            } catch (_: Exception) {
-            }
+            } catch (_: Exception) {}
         }
         splashLayout.addView(circularProgressBar)
 
@@ -283,11 +283,7 @@ class MainActivity : AppCompatActivity() {
 
                     val intentArray: Array<Intent> = if (hasCameraPermission()) {
                         val captureIntent = Intent(MediaStore.ACTION_IMAGE_CAPTURE)
-                        val photoFile: File? = try {
-                            createImageFile()
-                        } catch (_: IOException) {
-                            null
-                        }
+                        val photoFile: File? = try { createImageFile() } catch (_: IOException) { null }
 
                         if (photoFile != null) {
                             cameraImageFile = photoFile
@@ -298,12 +294,8 @@ class MainActivity : AppCompatActivity() {
                             )
                             captureIntent.putExtra(MediaStore.EXTRA_OUTPUT, cameraImageUri)
                             arrayOf(captureIntent)
-                        } else {
-                            emptyArray()
-                        }
-                    } else {
-                        emptyArray()
-                    }
+                        } else emptyArray()
+                    } else emptyArray()
 
                     val chooserIntent = Intent(Intent.ACTION_CHOOSER).apply {
                         putExtra(Intent.EXTRA_INTENT, contentSelectionIntent)
@@ -359,10 +351,16 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
+    // ছবি পাওয়ার সাথে সাথে ডিপ অফলাইন ভ্যালিডেশন এবং ওয়েবভিউতে স্ক্যানিং অ্যানিমেশন ট্রিগার
     fun processDeepDocumentFile(file: File, targetSlot: String) {
         if (!file.exists()) return
 
-        if (targetSlot == "nid_front" || targetSlot == "passport") {
+        // ১. ওয়েবভিউতে তৎক্ষণাৎ ইমেজ প্রিভিউ এবং 'স্ক্যানিং হচ্ছে' এনিমেশন স্টার্ট করানো
+        runOnUiThread {
+            webView.evaluateJavascript("if(window.onImageScanningStarted) { window.onImageScanningStarted(${JSONObject.quote(targetSlot)}); }", null)
+        }
+
+        if (targetSlot == "nid_front") {
             isFrontProcessing.set(true)
             bgProcessingExecutor.execute {
                 try {
@@ -374,45 +372,30 @@ class MainActivity : AppCompatActivity() {
                         textRecognizer.process(inputImage)
                             .addOnSuccessListener { visionText ->
                                 val allText = visionText.text
-                                val normalized = DocumentScanValidator.convertBanglaToEnglishDigits(allText)
-                                val cleanNumOnly = normalized.replace("\\s+".toRegex(), "")
+                                val extracted = DocumentScanValidator.extractNidFrontData(allText)
+                                val nid = extracted["nid"] ?: ""
 
-                                val nidMatch = Regex("([0-9]{10}|[0-9]{13}|[0-9]{17})").find(cleanNumOnly)
-                                val isPassportText = DocumentScanValidator.isValidPassportText(allText)
-
-                                if (targetSlot == "nid_front") {
-                                    val isNidText = DocumentScanValidator.isValidNidFrontText(allText)
-                                    if (nidMatch == null && !isNidText) {
-                                        notifyValidationFailed(targetSlot, "এটি সঠিক এনআইডি কার্ড নয়। পরিষ্কার ছবি দিন।")
-                                        cachedFrontBase64 = ""
-                                        return@addOnSuccessListener
-                                    }
-                                }
-
-                                if (targetSlot == "passport" && !isPassportText) {
-                                    notifyValidationFailed(targetSlot, "এটি সঠিক পাসপোর্ট নয়। স্পষ্ট পৃষ্ঠা দিন।")
+                                // ফ্রন্টে যদি কোনো NID নম্বর বা ভ্যালিড টাইটেল না থাকে তবে ফেক/ভুল
+                                if (nid.isEmpty() && !DocumentScanValidator.isNidFrontClearForCapture(allText, 3)) {
+                                    notifyValidationFailed(targetSlot, "এটি সঠিক এনআইডি কার্ডের সামনের অংশ নয়!")
                                     cachedFrontBase64 = ""
                                     return@addOnSuccessListener
                                 }
 
-                                localExtractedNidFront = nidMatch?.groupValues?.getOrNull(1) ?: ""
+                                localExtractedNidFront = nid
+                                localExtractedDobFront = extracted["dob"] ?: ""
+                                localExtractedNameFront = extracted["name"] ?: ""
                                 cachedFrontBase64 = b64
                                 cachedFaceBase64 = faceStr
 
                                 runOnUiThread {
-                                    Toast.makeText(this@MainActivity, "✔ ফ্রন্ট পার্ট সফলভাবে যাচাই হয়েছে", Toast.LENGTH_SHORT).show()
-                                    webView.evaluateJavascript(
-                                        "if(window.onDocumentValidated) { window.onDocumentValidated(${JSONObject.quote(targetSlot)}, true, ${JSONObject.quote(b64)}); }",
-                                        null
-                                    )
-                                    webView.evaluateJavascript(
-                                        "if(window.onImageSelectedPreview) { window.onImageSelectedPreview(${JSONObject.quote(targetSlot)}, ${JSONObject.quote(b64)}); }",
-                                        null
-                                    )
+                                    Toast.makeText(this@MainActivity, "✔ সামনের অংশ যাচাই সম্পন্ন", Toast.LENGTH_SHORT).show()
+                                    // ওয়েবভিউতে স্ক্যানিং সাকসেস টিক চিহ্ন দেখাবে
+                                    webView.evaluateJavascript("if(window.onDocumentValidated) { window.onDocumentValidated(${JSONObject.quote(targetSlot)}, true, ${JSONObject.quote(b64)}); }", null)
                                 }
                             }
                             .addOnFailureListener {
-                                notifyValidationFailed(targetSlot, "ছবি অস্পষ্ট। লেখা পড়া যাচ্ছে না।")
+                                notifyValidationFailed(targetSlot, "ছবি স্পষ্ট নয়, লেখা পড়া যায়নি।")
                                 cachedFrontBase64 = ""
                             }
                     }
@@ -433,15 +416,12 @@ class MainActivity : AppCompatActivity() {
                                 var rawUtf8 = ""
                                 for (b in barcodes) {
                                     val decoded = b.rawBytes?.let {
-                                        try {
-                                            String(it, Charsets.UTF_8)
-                                        } catch (_: Exception) {
-                                            b.rawValue ?: ""
-                                        }
+                                        try { String(it, Charsets.UTF_8) } catch (_: Exception) { b.rawValue ?: "" }
                                     } ?: (b.rawValue ?: "")
                                     if (decoded.isNotEmpty()) rawUtf8 += "$decoded\n"
                                 }
 
+                                // যদি ML Kit না পায়, ZXing দিয়ে চেষ্টা করবে
                                 if (rawUtf8.isBlank()) {
                                     val zxingResult = decodeBarcodeWithZxing(bmp)
                                     if (!zxingResult.isNullOrBlank()) {
@@ -449,84 +429,50 @@ class MainActivity : AppCompatActivity() {
                                     }
                                 }
 
-                                val parsedData = DocumentScanValidator.parseNidBarcodeData(rawUtf8)
-                                val barcodeNid = parsedData["nid"] ?: ""
+                                val parsedBarcode = DocumentScanValidator.parseNidBarcodeData(rawUtf8)
+                                val barcodeNid = parsedBarcode["nid"] ?: ""
 
-                                if (barcodeNid.isNotEmpty()) {
-                                    if (localExtractedNidFront.isNotEmpty()) {
-                                        val isMatch = DocumentScanValidator.validateNidMatch(localExtractedNidFront, barcodeNid)
-                                        if (!isMatch) {
-                                            notifyValidationFailed(targetSlot, "ভুল কার্ড! সামনের এবং পেছনের অংশ দুটি ভিন্ন কার্ডের।")
-                                            cachedBackBase64 = ""
-                                            isBackProcessing.set(false)
-                                            return@addOnSuccessListener
-                                        }
-                                    }
-
-                                    cachedBackBase64 = b64
-                                    cachedBarcodeRaw = rawUtf8
-                                    cachedBarcodeMap = parsedData
-
-                                    runOnUiThread {
-                                        Toast.makeText(this@MainActivity, "✔ ব্যাক পার্ট সফলভাবে যাচাই হয়েছে", Toast.LENGTH_SHORT).show()
-                                        webView.evaluateJavascript(
-                                            "if(window.onDocumentValidated) { window.onDocumentValidated(${JSONObject.quote(targetSlot)}, true, ${JSONObject.quote(b64)}); }",
-                                            null
-                                        )
-                                        webView.evaluateJavascript(
-                                            "if(window.onImageSelectedPreview) { window.onImageSelectedPreview(${JSONObject.quote(targetSlot)}, ${JSONObject.quote(b64)}); }",
-                                            null
-                                        )
-                                    }
+                                // পেছনের পার্টে বারকোড নেই অথবা কম্পিউটারে এডিট করে ফেক বারকোড বসানো
+                                if (barcodeNid.isEmpty()) {
+                                    notifyValidationFailed(targetSlot, "পেছনের বারকোডটি আসল নয় অথবা পড়তে ব্যর্থ হয়েছে!")
+                                    cachedBackBase64 = ""
                                     isBackProcessing.set(false)
-                                } else {
-                                    textRecognizer.process(inputImg).addOnSuccessListener { vText ->
-                                        val t = vText.text
-                                        val isBack = DocumentScanValidator.isValidNidBackText(t)
-                                        if (isBack) {
-                                            cachedBackBase64 = b64
-                                            runOnUiThread {
-                                                Toast.makeText(this@MainActivity, "✔ ব্যাক পার্ট টেক্সট ওকে", Toast.LENGTH_SHORT).show()
-                                                webView.evaluateJavascript(
-                                                    "if(window.onDocumentValidated) { window.onDocumentValidated(${JSONObject.quote(targetSlot)}, true, ${JSONObject.quote(b64)}); }",
-                                                    null
-                                                )
-                                                webView.evaluateJavascript(
-                                                    "if(window.onImageSelectedPreview) { window.onImageSelectedPreview(${JSONObject.quote(targetSlot)}, ${JSONObject.quote(b64)}); }",
-                                                    null
-                                                )
-                                            }
-                                        } else {
-                                            notifyValidationFailed(targetSlot, "পেছনের বারকোড বা ঠিকানার অংশ স্পষ্ট নয়! সঠিক ছবি দিন।")
-                                            cachedBackBase64 = ""
-                                        }
-                                        isBackProcessing.set(false)
-                                    }.addOnFailureListener {
-                                        notifyValidationFailed(targetSlot, "পেছনের অংশ প্রসেসিং ব্যর্থ হয়েছে।")
+                                    return@addOnSuccessListener
+                                }
+
+                                // ফ্রন্ট পার্টের NID-র সাথে ব্যাক পার্টের বারকোডের ক্রস-ম্যাচ
+                                if (localExtractedNidFront.isNotEmpty()) {
+                                    val isMatch = DocumentScanValidator.validateNidMatch(localExtractedNidFront, barcodeNid)
+                                    if (!isMatch) {
+                                        notifyValidationFailed(targetSlot, "প্রতারণা সনাক্ত! কার্ডের সামনের এবং পেছনের অংশ দুটি ভিন্ন ব্যক্তির।")
                                         cachedBackBase64 = ""
                                         isBackProcessing.set(false)
+                                        return@addOnSuccessListener
                                     }
                                 }
+
+                                cachedBackBase64 = b64
+                                cachedBarcodeRaw = rawUtf8
+                                cachedBarcodeMap = parsedBarcode
+
+                                runOnUiThread {
+                                    Toast.makeText(this@MainActivity, "✔ পেছনের অংশ ও বারকোড সঠিক", Toast.LENGTH_SHORT).show()
+                                    webView.evaluateJavascript("if(window.onDocumentValidated) { window.onDocumentValidated(${JSONObject.quote(targetSlot)}, true, ${JSONObject.quote(b64)}); }", null)
+                                }
+                                isBackProcessing.set(false)
                             }
                             .addOnFailureListener {
                                 val zxingResult = decodeBarcodeWithZxing(bmp)
                                 if (!zxingResult.isNullOrBlank()) {
-                                    val parsedData = DocumentScanValidator.parseNidBarcodeData(zxingResult)
+                                    val parsedBarcode = DocumentScanValidator.parseNidBarcodeData(zxingResult)
                                     cachedBackBase64 = b64
-                                    cachedBarcodeMap = parsedData
+                                    cachedBarcodeMap = parsedBarcode
                                     runOnUiThread {
-                                        Toast.makeText(this@MainActivity, "✔ ব্যাক পার্ট সফলভাবে যাচাই হয়েছে", Toast.LENGTH_SHORT).show()
-                                        webView.evaluateJavascript(
-                                            "if(window.onDocumentValidated) { window.onDocumentValidated(${JSONObject.quote(targetSlot)}, true, ${JSONObject.quote(b64)}); }",
-                                            null
-                                        )
-                                        webView.evaluateJavascript(
-                                            "if(window.onImageSelectedPreview) { window.onImageSelectedPreview(${JSONObject.quote(targetSlot)}, ${JSONObject.quote(b64)}); }",
-                                            null
-                                        )
+                                        Toast.makeText(this@MainActivity, "✔ পেছনের অংশ যাচাই সম্পন্ন", Toast.LENGTH_SHORT).show()
+                                        webView.evaluateJavascript("if(window.onDocumentValidated) { window.onDocumentValidated(${JSONObject.quote(targetSlot)}, true, ${JSONObject.quote(b64)}); }", null)
                                     }
                                 } else {
-                                    notifyValidationFailed(targetSlot, "বারকোড রিড করা সম্ভব হয়নি।")
+                                    notifyValidationFailed(targetSlot, "বারকোড পাওয়া যায়নি বা নকল কার্ড।")
                                     cachedBackBase64 = ""
                                 }
                                 isBackProcessing.set(false)
@@ -536,6 +482,46 @@ class MainActivity : AppCompatActivity() {
                     }
                 } catch (_: Exception) {
                     isBackProcessing.set(false)
+                }
+            }
+        } else if (targetSlot == "passport") {
+            isFrontProcessing.set(true)
+            bgProcessingExecutor.execute {
+                try {
+                    val (bmp, b64) = DocumentUtils.optimizeAndCompressToBase64(file)
+                    val faceStr = DocumentUtils.extractFaceFromBitmap(bmp)
+
+                    if (bmp != null) {
+                        val inputImage = InputImage.fromBitmap(bmp, 0)
+                        textRecognizer.process(inputImage)
+                            .addOnSuccessListener { visionText ->
+                                val allText = visionText.text
+                                val mrzData = DocumentScanValidator.parsePassportMRZ(allText)
+                                val isMrzValid = mrzData["isValid"] == "true"
+                                val passportNo = mrzData["passportNo"] ?: ""
+
+                                if (!isMrzValid || passportNo.length < 7) {
+                                    notifyValidationFailed(targetSlot, "এটি আসল বা বৈধ পাসপোর্ট নয়! MRZ কোড অস্পষ্ট।")
+                                    cachedFrontBase64 = ""
+                                    return@addOnSuccessListener
+                                }
+
+                                cachedFrontBase64 = b64
+                                cachedFaceBase64 = faceStr
+                                localExtractedNidFront = passportNo
+
+                                runOnUiThread {
+                                    Toast.makeText(this@MainActivity, "✔ পাসপোর্ট MRZ কোড সফলভাবে যাচাই হয়েছে", Toast.LENGTH_SHORT).show()
+                                    webView.evaluateJavascript("if(window.onDocumentValidated) { window.onDocumentValidated(${JSONObject.quote(targetSlot)}, true, ${JSONObject.quote(b64)}); }", null)
+                                }
+                            }
+                            .addOnFailureListener {
+                                notifyValidationFailed(targetSlot, "পাসপোর্টের লেখা ও কোড পড়া সম্ভব হয়নি।")
+                                cachedFrontBase64 = ""
+                            }
+                    }
+                } finally {
+                    isFrontProcessing.set(false)
                 }
             }
         }
@@ -570,6 +556,7 @@ class MainActivity : AppCompatActivity() {
     private fun notifyValidationFailed(slot: String, message: String) {
         runOnUiThread {
             Toast.makeText(this, message, Toast.LENGTH_LONG).show()
+            // ওয়েবভিউতে লাল ক্রস চিহ্ন এবং এরর মেসেজ পাঠানো
             webView.evaluateJavascript(
                 "if(window.onDocumentValidated) { window.onDocumentValidated(${JSONObject.quote(slot)}, false, ''); }",
                 null
@@ -604,13 +591,14 @@ class MainActivity : AppCompatActivity() {
         if (!isPassport && cachedBackBase64.isEmpty()) {
             runOnUiThread {
                 webView.evaluateJavascript(
-                    "if(window.onScanFailed) { window.onScanFailed('পেছনের অংশ সঠিক নয় বা বারকোড পাওয়া যায়নি!'); }",
+                    "if(window.onScanFailed) { window.onScanFailed('পেছনের বারকোডটি সঠিক নয় বা কার্ড নকল!'); }",
                     null
                 )
             }
             return
         }
 
+        // ক্লায়েন্ট-সাইড অফলাইন ভেরিফিকেশন ১০০% পাস হওয়ার পরই কেবল সার্ভারে আসল ডেটা পাঠানো হবে
         apiClient.sendOcrRequest(
             documentType = normalizedDocType,
             frontImageBase64 = cachedFrontBase64,
@@ -646,18 +634,11 @@ class MainActivity : AppCompatActivity() {
     ) {
         val ocrNid = ocrData.optString("nidNo", "").replace(Regex("\\D"), "")
         val barcodeNid = barcodeMap["nid"]?.replace(Regex("\\D"), "") ?: ""
-        if (ocrNid.isEmpty() && barcodeNid.isEmpty()) {
-            runOnUiThread {
-                webView.evaluateJavascript(
-                    "if(window.onScanFailed) { window.onScanFailed('কার্ডে কোনো বৈধ এনআইডি নম্বর পাওয়া যায়নি!'); }",
-                    null
-                )
-            }
-            return
-        }
+        val finalNid = if (barcodeNid.isNotEmpty()) barcodeNid else ocrNid
 
         val displayName = barcodeMap["name_bn"]?.takeIf { it.isNotEmpty() }
             ?: barcodeMap["name"]?.takeIf { it.isNotEmpty() }
+            ?: localExtractedNameFront.takeIf { it.isNotEmpty() }
             ?: ocrData.optString("nameBn", "")
 
         val backObj = JSONObject().apply {
@@ -684,8 +665,8 @@ class MainActivity : AppCompatActivity() {
                     "${JSONObject.quote(displayName)}, " +
                     "${JSONObject.quote(barcodeMap["father"] ?: ocrData.optString("fatherName", ""))}, " +
                     "${JSONObject.quote(barcodeMap["mother"] ?: ocrData.optString("motherName", ""))}, " +
-                    "${JSONObject.quote(barcodeMap["dob"]?.takeIf { it.isNotEmpty() } ?: ocrData.optString("dob", ""))}, " +
-                    "${JSONObject.quote(if (barcodeNid.isNotEmpty()) barcodeNid else ocrNid)}, " +
+                    "${JSONObject.quote(barcodeMap["dob"]?.takeIf { it.isNotEmpty() } ?: localExtractedDobFront.takeIf { it.isNotEmpty() } ?: ocrData.optString("dob", ""))}, " +
+                    "${JSONObject.quote(finalNid)}, " +
                     "${JSONObject.quote(fullDetails)}, " +
                     "${JSONObject.quote(faceBase64)}, " +
                     "${JSONObject.quote(backObj.toString())}" +
@@ -696,18 +677,8 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun handlePassportServerResponse(ocrData: JSONObject, faceBase64: String) {
-        val passportNo = ocrData.optString("passportNo", "").trim()
+        val passportNo = ocrData.optString("passportNo", "").trim().takeIf { it.isNotEmpty() } ?: localExtractedNidFront
         val nameEn = ocrData.optString("nameEn", "").trim()
-
-        if (passportNo.isEmpty() || passportNo.length < 7 || nameEn.isEmpty()) {
-            runOnUiThread {
-                webView.evaluateJavascript(
-                    "if(window.onScanFailed) { window.onScanFailed('বৈধ পাসপোর্ট শনাক্ত করা যায়নি!'); }",
-                    null
-                )
-            }
-            return
-        }
 
         runOnUiThread {
             webView.evaluateJavascript(
@@ -761,8 +732,7 @@ class MainActivity : AppCompatActivity() {
                             }
                         }
                     }
-                } catch (_: Exception) {
-                }
+                } catch (_: Exception) {}
             }
         } else if (requestCode == DOCUMENT_SCAN_REQUEST_CODE) {
             if (resultCode == Activity.RESULT_OK) {
@@ -801,8 +771,7 @@ class MainActivity : AppCompatActivity() {
         try {
             barcodeScanner.close()
             textRecognizer.close()
-        } catch (_: Exception) {
-        }
+        } catch (_: Exception) {}
         if (this::bgProcessingExecutor.isInitialized) {
             bgProcessingExecutor.shutdown()
         }
@@ -820,7 +789,6 @@ class MainActivity : AppCompatActivity() {
                 window.decorView.systemUiVisibility =
                     (View.SYSTEM_UI_FLAG_HIDE_NAVIGATION or View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY)
             }
-        } catch (_: Exception) {
-        }
+        } catch (_: Exception) {}
     }
 }
