@@ -54,9 +54,7 @@ class CameraScannerController(
                 Barcode.FORMAT_PDF417,
                 Barcode.FORMAT_QR_CODE,
                 Barcode.FORMAT_CODE_128,
-                Barcode.FORMAT_CODE_39,
-                Barcode.FORMAT_DATA_MATRIX,
-                Barcode.FORMAT_AZTEC
+                Barcode.FORMAT_CODE_39
             )
             .build()
         BarcodeScanning.getClient(options)
@@ -183,8 +181,8 @@ class CameraScannerController(
                 "nid_front" -> {
                     textRecognizer.process(inputImage)
                         .addOnSuccessListener { visionText ->
-                            val rawText = visionText.text
-                            if (DocumentScanValidator.isValidNidFrontText(rawText)) {
+                            val lineCount = visionText.textBlocks.sumOf { it.lines.size }
+                            if (DocumentScanValidator.isNidFrontClearForCapture(visionText.text, lineCount)) {
                                 if (isImageCaptured.compareAndSet(false, true)) {
                                     takeAutoCaptureAndCrop(scanMode)
                                 }
@@ -194,16 +192,18 @@ class CameraScannerController(
                 }
 
                 "nid_back" -> {
-                    // পেছনের বারকোড থাকলে দ্রুত ক্যাপচার, না থাকলে ঠিকানার কি-ওয়ার্ড দেখা
                     barcodeScanner.process(inputImage)
                         .addOnSuccessListener { barcodes ->
-                            if (barcodes.isNotEmpty() && isImageCaptured.compareAndSet(false, true)) {
-                                takeAutoCaptureAndCrop(scanMode)
+                            val hasBarcode = barcodes.isNotEmpty()
+                            if (hasBarcode) {
+                                if (isImageCaptured.compareAndSet(false, true)) {
+                                    takeAutoCaptureAndCrop(scanMode)
+                                }
                             } else {
                                 textRecognizer.process(inputImage)
                                     .addOnSuccessListener { visionText ->
-                                        val rawText = visionText.text
-                                        if (DocumentScanValidator.isValidNidBackText(rawText)) {
+                                        val lineCount = visionText.textBlocks.sumOf { it.lines.size }
+                                        if (DocumentScanValidator.isNidBackClearForCapture(visionText.text, lineCount, false)) {
                                             if (isImageCaptured.compareAndSet(false, true)) {
                                                 takeAutoCaptureAndCrop(scanMode)
                                             }
@@ -217,8 +217,8 @@ class CameraScannerController(
                 "passport" -> {
                     textRecognizer.process(inputImage)
                         .addOnSuccessListener { visionText ->
-                            val rawText = visionText.text
-                            if (DocumentScanValidator.isValidPassportText(rawText)) {
+                            val lineCount = visionText.textBlocks.sumOf { it.lines.size }
+                            if (DocumentScanValidator.isPassportClearForCapture(visionText.text, lineCount)) {
                                 if (isImageCaptured.compareAndSet(false, true)) {
                                     takeAutoCaptureAndCrop(scanMode)
                                 }
@@ -267,7 +267,6 @@ class CameraScannerController(
                     stopLiveCameraScanner()
                     activity.bgProcessingExecutor.execute {
                         DocumentUtils.cropCenterBoxFromImage(photoFile)
-                        // সার্ভারে সরাসরি পাঠানোর আগে ডিপ প্রসেসিং ও ফেস/বারকোড ক্যাশিং আবশ্যক
                         activity.processDeepDocumentFile(photoFile, scanMode)
                     }
                 }
@@ -359,9 +358,9 @@ class CameraScannerController(
             canvas.drawRoundRect(RectF(left, top, right, bottom), 22f, 22f, boxPaint)
 
             val guideText = when (mode) {
-                "nid_front" -> "কার্ডের সামনের অংশ ও ছবি বক্সের মধ্যে রাখুন"
-                "nid_back" -> "কার্ডের পেছনের অংশ ও বারকোড বক্সের মধ্যে রাখুন"
-                "passport" -> "পাসপোর্টের পৃষ্ঠা ও MRZ কোড ফ্রেমের মধ্যে রাখুন"
+                "nid_front" -> "এনআইডি কার্ডের সামনের অংশ ফ্রেমে সোজা রাখুন"
+                "nid_back" -> "এনআইডি কার্ডের পেছনের অংশ ফ্রেমে সোজা রাখুন"
+                "passport" -> "পাসপোর্টের পৃষ্ঠাটি ফ্রেমের ভেতরে স্পষ্ট রাখুন"
                 else -> "ডকুমেন্টটি ফ্রেমের ভেতরে স্পষ্ট রাখুন"
             }
 
