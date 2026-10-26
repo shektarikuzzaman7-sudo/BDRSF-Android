@@ -85,7 +85,6 @@ class MainActivity : AppCompatActivity() {
     private var cameraImageFile: File? = null
     private var cameraImageUri: Uri? = null
 
-    // অফলাইন ক্যাশ করা ডেটা
     @Volatile private var cachedFrontBase64: String = ""
     @Volatile private var cachedBackBase64: String = ""
     @Volatile private var cachedFaceBase64: String = ""
@@ -348,7 +347,6 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    // অফলাইন প্রসেসিং ও অ্যান্টি-ফ্রড চেকিং
     fun processDeepDocumentFile(file: File, targetSlot: String) {
         if (!file.exists()) return
 
@@ -369,7 +367,6 @@ class MainActivity : AppCompatActivity() {
                             .addOnSuccessListener { visionText ->
                                 val allText = visionText.text
 
-                                // পাসপোর্ট দিলে এনআইডি ফ্রন্টে সরাসরি বাতিল
                                 if (DocumentScanValidator.isPassport(allText)) {
                                     notifyValidationFailed(targetSlot, "ভুল ডকুমেন্ট! আপনি এনআইডির জায়গায় পাসপোর্টের ছবি দিয়েছেন।")
                                     cachedFrontBase64 = ""
@@ -379,7 +376,6 @@ class MainActivity : AppCompatActivity() {
                                 val extracted = DocumentScanValidator.extractNidFrontData(allText)
                                 val nid = extracted["nid"] ?: ""
 
-                                // কোনো NID বা পরিচিত ফ্রন্ট লেখা না থাকলে ফেক
                                 if (nid.isEmpty() && !DocumentScanValidator.isNidFront(allText)) {
                                     notifyValidationFailed(targetSlot, "এটি সঠিক এনআইডি কার্ডের সামনের অংশ নয়। পরিষ্কার ছবি দিন।")
                                     cachedFrontBase64 = ""
@@ -415,7 +411,6 @@ class MainActivity : AppCompatActivity() {
                         textRecognizer.process(inputImg).addOnSuccessListener { vText ->
                             val backText = vText.text
 
-                            // পাসপোর্ট দিলে ব্যাক স্লটে সরাসরি বাতিল
                             if (DocumentScanValidator.isPassport(backText)) {
                                 notifyValidationFailed(targetSlot, "ভুল ডকুমেন্ট! আপনি এনআইডির পেছনে পাসপোর্টের ছবি দিয়েছেন।")
                                 cachedBackBase64 = ""
@@ -423,7 +418,6 @@ class MainActivity : AppCompatActivity() {
                                 return@addOnSuccessListener
                             }
 
-                            // বারকোড রিড করা
                             barcodeScanner.process(inputImg)
                                 .addOnSuccessListener { barcodes ->
                                     var rawBarcode = ""
@@ -434,7 +428,6 @@ class MainActivity : AppCompatActivity() {
                                         if (decoded.isNotEmpty()) rawBarcode += "$decoded\n"
                                     }
 
-                                    // ZXing ব্যাকআপ
                                     if (rawBarcode.isBlank()) {
                                         val zxingResult = decodeBarcodeWithZxing(bmp)
                                         if (!zxingResult.isNullOrBlank()) {
@@ -444,7 +437,6 @@ class MainActivity : AppCompatActivity() {
 
                                     val parsedBarcode = DocumentScanValidator.parseNidBarcodeData(rawBarcode)
 
-                                    // বারকোড একান্তই খালি হলে এবং পেছনের টেক্সটও না থাকলে ফেক
                                     if (rawBarcode.isBlank() && !DocumentScanValidator.isNidBack(backText, false)) {
                                         notifyValidationFailed(targetSlot, "পেছনের অংশে কোনো বৈধ বারকোড বা তথ্য পাওয়া যায়নি!")
                                         cachedBackBase64 = ""
@@ -452,7 +444,6 @@ class MainActivity : AppCompatActivity() {
                                         return@addOnSuccessListener
                                     }
 
-                                    // ফ্রন্ট পার্টের তথ্যের সাথে বারকোড ক্রস-ম্যাচিং
                                     if (cachedFrontData.isNotEmpty() && rawBarcode.isNotBlank()) {
                                         val isMatch = DocumentScanValidator.validateNidCrossMatch(cachedFrontData, parsedBarcode, rawBarcode)
                                         if (!isMatch) {
@@ -506,7 +497,6 @@ class MainActivity : AppCompatActivity() {
                             .addOnSuccessListener { visionText ->
                                 val allText = visionText.text
 
-                                // এনআইডি দিলে পাসপোর্ট স্লটে সরাসরি বাতিল
                                 if (DocumentScanValidator.isNidFront(allText)) {
                                     notifyValidationFailed(targetSlot, "ভুল ডকুমেন্ট! আপনি পাসপোর্টের জায়গায় এনআইডি কার্ড দিয়েছেন।")
                                     cachedFrontBase64 = ""
