@@ -68,6 +68,9 @@ import com.google.mlkit.vision.common.InputImage
 import com.google.mlkit.vision.documentscanner.GmsDocumentScannerOptions
 import com.google.mlkit.vision.documentscanner.GmsDocumentScanning
 import com.google.mlkit.vision.documentscanner.GmsDocumentScanningResult
+import com.google.mlkit.vision.text.TextRecognition
+import com.google.mlkit.vision.text.TextRecognizer
+import com.google.mlkit.vision.text.latin.TextRecognizerOptions
 import okhttp3.Call
 import okhttp3.Callback
 import okhttp3.MediaType.Companion.toMediaTypeOrNull
@@ -116,6 +119,8 @@ class MainActivity : AppCompatActivity() {
     @Volatile private var cachedFaceBase64: String = ""
     @Volatile private var cachedBarcodeMap: Map<String, String> = emptyMap()
     @Volatile private var cachedBarcodeRaw: String = ""
+    @Volatile private var localExtractedNidFront: String = ""
+
     private val isFrontProcessing = AtomicBoolean(false)
     private val isBackProcessing = AtomicBoolean(false)
 
@@ -128,7 +133,9 @@ class MainActivity : AppCompatActivity() {
     private val GALLERY_QR_REQUEST_CODE = 1004
     private val DOCUMENT_SCAN_REQUEST_CODE = 1005
 
+    // অফলাইন বারকোড ও ইংরেজি টেক্সট রিকগনাইজার
     private val barcodeScanner: BarcodeScanner by lazy { BarcodeScanning.getClient() }
+    private val textRecognizer: TextRecognizer by lazy { TextRecognition.getClient(TextRecognizerOptions.DEFAULT_OPTIONS) }
 
     private val okHttpClient = OkHttpClient.Builder()
         .connectTimeout(45, TimeUnit.SECONDS)
@@ -137,7 +144,6 @@ class MainActivity : AppCompatActivity() {
         .retryOnConnectionFailure(true)
         .build()
 
-    // আধুনিক অটো বর্ডার ও অটো-শট স্ক্যানার লনচার (Google ML Kit Document Scanner)
     private val documentScannerLauncher = registerForActivityResult(ActivityResultContracts.StartIntentSenderForResult()) { result ->
         if (result.resultCode == RESULT_OK) {
             val scanResult = GmsDocumentScanningResult.fromActivityResultIntent(result.data)
@@ -397,7 +403,6 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    // অটো শট এবং বর্ডার গাইডসহ স্ক্যানার লঞ্চার
     private fun launchAutoShotCameraScanner() {
         if (!hasCameraPermission()) { requestAllRequiredPermissions(); return }
         try {
@@ -407,13 +412,12 @@ class MainActivity : AppCompatActivity() {
                 .setResultFormats(GmsDocumentScannerOptions.RESULT_FORMAT_JPEG)
                 .setScannerMode(GmsDocumentScannerOptions.SCANNER_MODE_FULL)
                 .build()
-            
+
             GmsDocumentScanning.getClient(options).getStartScanIntent(this)
                 .addOnSuccessListener { intentSender ->
                     documentScannerLauncher.launch(IntentSenderRequest.Builder(intentSender).build())
                 }
                 .addOnFailureListener {
-                    // ফলব্যাক হিসেবে সাধারণ ক্যামেরা ওপেন হবে যদি গুগল প্লে সার্ভিস আপডেট না থাকে
                     launchDirectCameraForDocumentFallback()
                 }
         } catch (e: Exception) {
@@ -446,7 +450,7 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    // লোকাল সিকিউরিটি ভ্যালিডেশন এবং প্রসেসিং
+    // অফলাইন ফেস, টেক্সট এবং বারকোড প্রসেসিং
     private fun processSelectedDocumentFile(file: File, targetSlot: String) {
         if (!file.exists()) return
 
@@ -457,20 +461,35 @@ class MainActivity : AppCompatActivity() {
                 try {
                     val (bmp, b64) = optimizeAndCompressToBase64(file)
                     val faceStr = extractFaceFromBitmap(bmp)
-                    
-                    // ফ্রন্ট পার্টে মুখমণ্ডল না পেলে ফেক/ভুল ডকুমেন্ট হিসেবে লোকালি রিজেক্ট করা
+
                     if (faceStr.isEmpty() || !faceStr.contains("base64")) {
-                        notifyValidationFailed(targetSlot, "কার্ডে কোনো মুখমণ্ডল (Face/Photo) শনাক্ত করা যায়নি! সঠিক কার্ড আপলোড করুন।")
+                        notifyValidationFailed(targetSlot, "কার্ডে কোনো মুখমণ্ডল (Face) পাওয়া যায়নি! সঠিক কার্ড আপলোড করুন।")
                         cachedFrontBase64 = ""
                         return@execute
                     }
-                    
-                    cachedFrontBase64 = b64
-                    cachedFaceBase64 = faceStr
-                    runOnUiThread {
-                        val safeSlot = JSONObject.quote(targetSlot)
-                        val safeB64 = JSONObject.quote(b64)
-                        webView.evaluateJavascript("if(window.onImageSelectedPreview) { window.onImageSelectedPreview($safeSlot, $safeB64); }", null)
+
+                    // সামনের পার্ট থেকে ইংরেজি টেক্সট (এনআইডি নম্বর) অফলাইনে পড়া
+                    if (bmp != null) {
+                        val inputImage = InputImage.fromBitmap(bmp, 0)
+                        textRecognizer.process(inputImage)
+                            .addOnSuccessListener { visionText ->
+                                val allText = visionText.text
+                                val nidPattern = Regex("\\b([0-9]{10}|[0-9]{13}|[0-9]{17})\\b")
+                                val match = nidPattern.find(allText)
+                                localExtractedNidFront = match?.groupValues?.getOrNull(1) ?: ""
+
+                                cachedFrontBase64 = b64
+                                cachedFaceBase64 = faceStr
+                                runOnUiThread {
+                                    val safeSlot = JSONObject.quote(targetSlot)
+                                    val safeB64 = JSONObject.quote(b64)
+                                    webView.evaluateJavascript("if(window.onImageSelectedPreview) { window.onImageSelectedPreview($safeSlot, $safeB64); }", null)
+                                }
+                            }
+                            .addOnFailureListener {
+                                cachedFrontBase64 = b64
+                                cachedFaceBase64 = faceStr
+                            }
                     }
                 } finally {
                     isFrontProcessing.set(false)
@@ -493,24 +512,41 @@ class MainActivity : AppCompatActivity() {
                                     } ?: (b.rawValue ?: "")
                                     if (decoded.isNotEmpty()) rawUtf8 += "$decoded\n"
                                 }
-                                
+
                                 val parsedData = parseNidBarcodeData(rawUtf8)
-                                
-                                // ব্যাক পার্টে যদি কোনো বারকোড না থাকে বা ভুয়া হয়, তবে লোকালি রিজেক্ট করা (লাল বর্ডার)
-                                if (parsedData.isEmpty() || !parsedData.containsKey("nid")) {
-                                    notifyValidationFailed(targetSlot, "পেছনের অংশে কোনো বৈধ বারকোড/কিউআর কোড পাওয়া যায়নি! এটি ভুয়া বা অস্পষ্ট কার্ড হতে পারে।")
+                                val barcodeNid = parsedData["nid"] ?: ""
+
+                                // ১. ভুয়া বা বারকোড ছাড়া কার্ড রিজেকশন
+                                if (parsedData.isEmpty() || barcodeNid.isEmpty()) {
+                                    notifyValidationFailed(targetSlot, "পেছনের অংশে কোনো বৈধ বারকোড পাওয়া যায়নি! এটি ভুয়া কার্ড হতে পারে।")
                                     cachedBackBase64 = ""
                                     cachedBarcodeRaw = ""
                                     cachedBarcodeMap = emptyMap()
-                                } else {
-                                    cachedBackBase64 = b64
-                                    cachedBarcodeRaw = rawUtf8
-                                    cachedBarcodeMap = parsedData
-                                    runOnUiThread {
-                                        val safeSlot = JSONObject.quote(targetSlot)
-                                        val safeB64 = JSONObject.quote(b64)
-                                        webView.evaluateJavascript("if(window.onImageSelectedPreview) { window.onImageSelectedPreview($safeSlot, $safeB64); }", null)
+                                    isBackProcessing.set(false)
+                                    return@addOnSuccessListener
+                                }
+
+                                // ২. ইনস্ট্যান্ট লোকাল ক্রস-ম্যাচ (সামনের এনআইডি ও পেছনের বারকোড এনআইডি মিলছে কিনা)
+                                if (localExtractedNidFront.isNotEmpty() && barcodeNid.isNotEmpty()) {
+                                    val isMatch = (localExtractedNidFront == barcodeNid) ||
+                                            localExtractedNidFront.endsWith(barcodeNid) ||
+                                            barcodeNid.endsWith(localExtractedNidFront)
+
+                                    if (!isMatch) {
+                                        notifyValidationFailed(targetSlot, "প্রতারণা সনাক্ত হয়েছে! সামনের ও পেছনের অংশ দুটি ভিন্ন কার্ডের।")
+                                        cachedBackBase64 = ""
+                                        isBackProcessing.set(false)
+                                        return@addOnSuccessListener
                                     }
+                                }
+
+                                cachedBackBase64 = b64
+                                cachedBarcodeRaw = rawUtf8
+                                cachedBarcodeMap = parsedData
+                                runOnUiThread {
+                                    val safeSlot = JSONObject.quote(targetSlot)
+                                    val safeB64 = JSONObject.quote(b64)
+                                    webView.evaluateJavascript("if(window.onImageSelectedPreview) { window.onImageSelectedPreview($safeSlot, $safeB64); }", null)
                                 }
                                 isBackProcessing.set(false)
                             }
@@ -534,7 +570,6 @@ class MainActivity : AppCompatActivity() {
             Toast.makeText(this, message, Toast.LENGTH_LONG).show()
             val safeSlot = JSONObject.quote(slot)
             val safeMsg = JSONObject.quote(message)
-            // ফ্রন্টএন্ডে লাল বর্ডার বা এরর দেখানোর জন্য JS কল
             webView.evaluateJavascript("if(window.onDocumentValidationFailed) { window.onDocumentValidationFailed($safeSlot, $safeMsg); }", null)
         }
     }
@@ -807,14 +842,6 @@ class MainActivity : AppCompatActivity() {
             return
         }
 
-        if (ocrNid.isNotEmpty() && barcodeNid.isNotEmpty()) {
-            val isMatch = (ocrNid == barcodeNid) || ocrNid.endsWith(barcodeNid) || barcodeNid.endsWith(ocrNid)
-            if (!isMatch) {
-                runOnUiThread { webView.evaluateJavascript("if(window.onScanFailed) { window.onScanFailed('প্রতারণা সনাক্ত হয়েছে! সামনের ও পেছনের অংশ একই এনআইডি কার্ডের নয়।'); }", null) }
-                return
-            }
-        }
-
         val finalNidNo = if (barcodeNid.isNotEmpty()) barcodeNid else ocrNid
         val finalDob = barcodeMap["dob"]?.takeIf { it.isNotEmpty() } ?: ocrData.optString("dob", "")
         val finalNameBn = barcodeMap["name_bn"]?.takeIf { it.isNotEmpty() } ?: ocrData.optString("nameBn", "")
@@ -938,6 +965,7 @@ class MainActivity : AppCompatActivity() {
         super.onDestroy()
         try {
             barcodeScanner.close()
+            textRecognizer.close()
             if (::cameraExecutor.isInitialized) cameraExecutor.shutdown()
             if (::bgProcessingExecutor.isInitialized) bgProcessingExecutor.shutdown()
         } catch (e: Exception) {}
