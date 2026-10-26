@@ -23,7 +23,7 @@
         android:maxSdkVersion="29" />
     <uses-permission android:name="android.permission.READ_MEDIA_IMAGES" />
 
-    <!-- Notifications for future use -->
+    <!-- Notifications -->
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
 
     <!-- Location -->
@@ -40,7 +40,7 @@
         android:supportsRtl="true"
         android:usesCleartextTraffic="false"
         android:networkSecurityConfig="@xml/network_security_config"
-        android:requestLegacyExternalStorage="false">
+        android:requestLegacyExternalStorage="true">
 
         <activity
             android:name=".MainActivity"
@@ -65,6 +65,7 @@
                 android:resource="@xml/file_paths" />
         </provider>
 
+        <!-- ML Kit মডেলসমূহ অ্যাপ ইন্সটল হওয়ার সাথে সাথেই ব্যাকগ্রাউন্ডে প্রি-লোড রাখার ট্যাগ -->
         <meta-data
             android:name="com.google.mlkit.vision.DEPENDENCIES"
             android:value="barcode,face,ocr" />
