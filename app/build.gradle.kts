@@ -41,16 +41,19 @@ dependencies {
     implementation("com.google.android.material:material:1.12.0")
     implementation("androidx.exifinterface:exifinterface:1.3.7")
 
-    // ML Kit Barcode Scanning (এনআইডি পেছনের বারকোড পড়ার জন্য)
+    // ML Kit Barcode Scanning (পেছনের বারকোড পড়ার জন্য)
     implementation("com.google.mlkit:barcode-scanning:17.3.0")
 
-    // Google Play Services Document Scanner (অটো বর্ডার ক্রপ ও অটো শটের জন্য)
+    // ML Kit Text Recognition (সামনের ইংরেজি নাম, NID ও জন্মতারিখ দ্রুত পড়ার জন্য)
+    implementation("com.google.mlkit:text-recognition:16.0.1")
+
+    // Google Play Services Document Scanner (অটো বর্ডার ক্রপ ও অটো শট)
     implementation("com.google.android.gms:play-services-document-scanner:16.0.0-beta1")
 
-    // নেটওয়ার্ক কল (OCR সার্ভারে ডাটা পাঠানোর জন্য)
+    // নেটওয়ার্ক কল
     implementation("com.squareup.okhttp3:okhttp:4.12.0")
 
-    // CameraX লাইব্রেরি (লাইভ ক্যামেরা প্রিভিউ ও স্ক্যানারের জন্য)
+    // CameraX
     val cameraxVersion = "1.3.4"
     implementation("androidx.camera:camera-core:$cameraxVersion")
     implementation("androidx.camera:camera-camera2:$cameraxVersion")
