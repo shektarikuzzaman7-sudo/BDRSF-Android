@@ -34,6 +34,7 @@ class NativeWebViewClient : WebViewClient() {
         val scheme = uri.scheme?.lowercase() ?: ""
         val host = uri.host?.lowercase() ?: ""
 
+        // Handle native app schemes like tel, mailto, whatsapp, etc.
         if (scheme == "tel" || scheme == "mailto" || scheme == "whatsapp" || scheme == "intent") {
             try {
                 val intent = Intent(Intent.ACTION_VIEW, uri)
@@ -43,16 +44,18 @@ class NativeWebViewClient : WebViewClient() {
             return true
         }
 
-        // Allow only trusted URLs; everything else opens externally
+        // Only trusted host should remain inside WebView
         val allowed = AppSecurityConfig.isTrustedUrl(url)
-        if (allowed) return false
-
-        try {
-            val intent = Intent(Intent.ACTION_VIEW, uri)
-            view?.context?.startActivity(intent)
-        } catch (_: Exception) {
+        if (allowed) {
+            return false
         }
 
+        // Everything else opens externally
+        try {
+            val externalIntent = Intent(Intent.ACTION_VIEW, uri)
+            view?.context?.startActivity(externalIntent)
+        } catch (_: Exception) {
+        }
         return true
     }
 }
