@@ -50,12 +50,7 @@ class CameraScannerController(
 
     private val barcodeScanner: BarcodeScanner by lazy {
         val options = BarcodeScannerOptions.Builder()
-            .setBarcodeFormats(
-                Barcode.FORMAT_PDF417,
-                Barcode.FORMAT_QR_CODE,
-                Barcode.FORMAT_CODE_128,
-                Barcode.FORMAT_CODE_39
-            )
+            .setBarcodeFormats(Barcode.FORMAT_QR_CODE)
             .build()
         BarcodeScanning.getClient(options)
     }
@@ -99,6 +94,7 @@ class CameraScannerController(
         val topMarginPx = (40 * density).toInt()
         val rightMarginPx = (20 * density).toInt()
 
+        // বাতিল বাটন
         val closeButton = Button(activity).apply {
             text = "✕ বাতিল"
             setTextColor(Color.WHITE)
@@ -111,11 +107,32 @@ class CameraScannerController(
                 topMargin = topMarginPx
                 rightMargin = rightMarginPx
             }
-
             setOnClickListener { stopLiveCameraScanner() }
         }
-
         scannerLayout?.addView(closeButton)
+
+        // ম্যানুয়াল ক্যাপচার বাটন (প্রয়োজন হলে ইউজার সরাসরি ট্যাপ করেও ছবি তুলতে পারবে)
+        if (scanMode != "qr") {
+            val captureButton = Button(activity).apply {
+                text = "● ছবি তুলুন"
+                setTextColor(Color.BLACK)
+                setBackgroundColor(Color.parseColor("#10B981"))
+                layoutParams = FrameLayout.LayoutParams(
+                    FrameLayout.LayoutParams.WRAP_CONTENT,
+                    FrameLayout.LayoutParams.WRAP_CONTENT
+                ).apply {
+                    gravity = Gravity.BOTTOM or Gravity.CENTER_HORIZONTAL
+                    bottomMargin = (35 * density).toInt()
+                }
+                setOnClickListener {
+                    if (isImageCaptured.compareAndSet(false, true)) {
+                        takeAutoCaptureAndCrop(scanMode)
+                    }
+                }
+            }
+            scannerLayout?.addView(captureButton)
+        }
+
         activity.mainLayout.addView(scannerLayout)
 
         val cameraProviderFuture = ProcessCameraProvider.getInstance(activity)
@@ -146,6 +163,9 @@ class CameraScannerController(
             .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
             .build()
 
+        // ওয়েবসাইট থেকে আসা নির্দেশিকা দেখা
+        val checkType = activity.currentScanConfig?.optString("checkType", "none") ?: "none"
+
         imageAnalysis.setAnalyzer(cameraExecutor) { imageProxy ->
             if (!isScanningActive || isImageCaptured.get()) {
                 imageProxy.close()
@@ -160,75 +180,64 @@ class CameraScannerController(
 
             val inputImage = InputImage.fromMediaImage(mediaImage, imageProxy.imageInfo.rotationDegrees)
 
-            when (scanMode) {
-                "qr" -> {
-                    barcodeScanner.process(inputImage)
-                        .addOnSuccessListener { barcodes ->
-                            val value = barcodes.firstOrNull { !it.rawValue.isNullOrEmpty() }?.rawValue
-                            if (!value.isNullOrBlank() && isImageCaptured.compareAndSet(false, true)) {
-                                activity.runOnUiThread {
-                                    stopLiveCameraScanner()
-                                    activity.webView.evaluateJavascript(
-                                        "if(window.processScannedData) { window.processScannedData(${JSONObject.quote(value)}); }",
-                                        null
-                                    )
-                                }
+            if (scanMode == "qr") {
+                barcodeScanner.process(inputImage)
+                    .addOnSuccessListener { barcodes ->
+                        val value = barcodes.firstOrNull { !it.rawValue.isNullOrEmpty() }?.rawValue
+                        if (!value.isNullOrBlank() && isImageCaptured.compareAndSet(false, true)) {
+                            activity.runOnUiThread {
+                                stopLiveCameraScanner()
+                                activity.webView.evaluateJavascript(
+                                    "if(window.processScannedData) { window.processScannedData(${JSONObject.quote(value)}); }",
+                                    null
+                                )
                             }
                         }
-                        .addOnCompleteListener { imageProxy.close() }
-                }
-
-                "nid_front" -> {
-                    textRecognizer.process(inputImage)
-                        .addOnSuccessListener { visionText ->
-                            val lineCount = visionText.textBlocks.sumOf { it.lines.size }
-                            if (DocumentScanValidator.isNidFrontClearForCapture(visionText.text, lineCount)) {
-                                if (isImageCaptured.compareAndSet(false, true)) {
-                                    takeAutoCaptureAndCrop(scanMode)
-                                }
-                            }
-                        }
-                        .addOnCompleteListener { imageProxy.close() }
-                }
-
-                "nid_back" -> {
-                    barcodeScanner.process(inputImage)
-                        .addOnSuccessListener { barcodes ->
-                            val hasBarcode = barcodes.isNotEmpty()
-                            if (hasBarcode) {
-                                if (isImageCaptured.compareAndSet(false, true)) {
-                                    takeAutoCaptureAndCrop(scanMode)
-                                }
-                            } else {
-                                textRecognizer.process(inputImage)
-                                    .addOnSuccessListener { visionText ->
-                                        val lineCount = visionText.textBlocks.sumOf { it.lines.size }
-                                        if (DocumentScanValidator.isNidBackClearForCapture(visionText.text, lineCount, false)) {
-                                            if (isImageCaptured.compareAndSet(false, true)) {
-                                                takeAutoCaptureAndCrop(scanMode)
-                                            }
-                                        }
-                                    }
-                            }
-                        }
-                        .addOnCompleteListener { imageProxy.close() }
-                }
-
-                "passport" -> {
-                    textRecognizer.process(inputImage)
-                        .addOnSuccessListener { visionText ->
-                            val lineCount = visionText.textBlocks.sumOf { it.lines.size }
-                            if (DocumentScanValidator.isPassportClearForCapture(visionText.text, lineCount)) {
-                                if (isImageCaptured.compareAndSet(false, true)) {
-                                    takeAutoCaptureAndCrop(scanMode)
-                                }
-                            }
-                        }
-                        .addOnCompleteListener { imageProxy.close() }
-                }
-
-                else -> imageProxy.close()
+                    }
+                    .addOnCompleteListener { imageProxy.close() }
+                return@setAnalyzer
             }
+
+            // ওয়েবসাইট যদি বলে কোনো চেক লাগবে না ("none"), তবে লেখা ফ্রেমের ভেতর এলেই সাথে সাথে ছবি তুলবে
+            textRecognizer.process(inputImage)
+                .addOnSuccessListener { visionText ->
+                    val lineCount = visionText.textBlocks.sumOf { it.lines.size }
+
+                    if (checkType == "none") {
+                        // কোনো বাধা বা জটিল চেক ছাড়া কার্ড সামনে আনা মাত্রই সরাসরি ছবি ক্যাপচার
+                        if (lineCount >= 2) {
+                            if (isImageCaptured.compareAndSet(false, true)) {
+                                takeAutoCaptureAndCrop(scanMode)
+                            }
+                        }
+                    } else {
+                        // যদি ওয়েবসাইট স্পষ্টভাবে "strict" চেক করতে বলে
+                        when (scanMode) {
+                            "nid_front" -> {
+                                if (DocumentScanValidator.isNidFrontClearForCapture(visionText.text, lineCount)) {
+                                    if (isImageCaptured.compareAndSet(false, true)) {
+                                        takeAutoCaptureAndCrop(scanMode)
+                                    }
+                                }
+                            }
+                            "nid_back" -> {
+                                if (DocumentScanValidator.isNidBackClearForCapture(visionText.text, lineCount, false)) {
+                                    if (isImageCaptured.compareAndSet(false, true)) {
+                                        takeAutoCaptureAndCrop(scanMode)
+                                    }
+                                }
+                            }
+                            "passport" -> {
+                                if (DocumentScanValidator.isPassportClearForCapture(visionText.text, lineCount)) {
+                                    if (isImageCaptured.compareAndSet(false, true)) {
+                                        takeAutoCaptureAndCrop(scanMode)
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                .addOnCompleteListener { imageProxy.close() }
         }
 
         try {
@@ -358,8 +367,8 @@ class CameraScannerController(
             canvas.drawRoundRect(RectF(left, top, right, bottom), 22f, 22f, boxPaint)
 
             val guideText = when (mode) {
-                "nid_front" -> "এনআইডি কার্ডের সামনের অংশ ফ্রেমে সোজা রাখুন"
-                "nid_back" -> "এনআইডি কার্ডের পেছনের অংশ ফ্রেমে সোজা রাখুন"
+                "nid_front" -> "কার্ডের সামনের অংশ ফ্রেমে সোজা রাখুন"
+                "nid_back" -> "কার্ডের পেছনের অংশ ফ্রেমে সোজা রাখুন"
                 "passport" -> "পাসপোর্টের পৃষ্ঠাটি ফ্রেমের ভেতরে স্পষ্ট রাখুন"
                 else -> "ডকুমেন্টটি ফ্রেমের ভেতরে স্পষ্ট রাখুন"
             }
