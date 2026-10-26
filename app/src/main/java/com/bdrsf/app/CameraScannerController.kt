@@ -79,10 +79,10 @@ class CameraScannerController(
 
     private val liveFaceDetector: FaceDetector by lazy {
         val options = FaceDetectorOptions.Builder()
-            .setPerformanceMode(FaceDetectorOptions.PERFORMANCE_MODE_FAST)
+            .setPerformanceMode(FaceDetectorOptions.PERFORMANCE_MODE_ACCURATE)
             .setClassificationMode(FaceDetectorOptions.CLASSIFICATION_MODE_ALL)
             .setLandmarkMode(FaceDetectorOptions.LANDMARK_MODE_ALL)
-            .setMinFaceSize(0.25f)
+            .setMinFaceSize(0.30f)
             .build()
         FaceDetection.getClient(options)
     }
@@ -125,7 +125,6 @@ class CameraScannerController(
         val rightMarginPx = (20 * density).toInt()
         val bottomMarginPx = (36 * density).toInt()
 
-        // উপরে ডানদিকে বাতিল বাটন
         val closeButton = Button(activity).apply {
             text = "✕ Close"
             setTextColor(Color.WHITE)
@@ -149,7 +148,6 @@ class CameraScannerController(
         }
         scannerLayout?.addView(closeButton)
 
-        // এনআইডি বা পাসপোর্ট স্ক্যানের সময় অটো-স্ক্যানের পাশাপাশি নিচে ম্যানুয়াল শাটার বাটন যুক্ত করা হলো
         if (scanMode == "nid_front" || scanMode == "nid_back" || scanMode == "passport") {
             manualCaptureBtn = Button(activity).apply {
                 text = "📸 ছবি তুলুন / Capture"
@@ -255,10 +253,10 @@ class CameraScannerController(
                 }
 
                 "nid_back" -> {
-                    // ব্যাকপার্টের জন্য একই সাথে লাইভ বারকোড (PDF417/QR) ও ঠিকানা চেক করবে
+                    // PDF417 বারকোড এবং টেক্সট কঠোরভাবে স্ক্যান করা
                     barcodeScanner.process(inputImage)
                         .addOnSuccessListener { barcodes ->
-                            val hasValidBarcode = barcodes.any { !it.rawValue.isNullOrBlank() || (it.rawBytes != null && it.rawBytes!!.isNotEmpty()) }
+                            val hasValidBarcode = barcodes.any { !it.rawValue.isNullOrEmpty() || (it.rawBytes != null && it.rawBytes!!.isNotEmpty()) }
                             if (hasValidBarcode) {
                                 if (isImageCaptured.compareAndSet(false, true)) {
                                     takeAutoCaptureAndCrop(scanMode)
@@ -299,47 +297,48 @@ class CameraScannerController(
                     liveFaceDetector.process(inputImage)
                         .addOnSuccessListener { faces ->
                             if (faces.isNullOrEmpty()) {
-                                updateFaceOverlayPrompt("মুখমণ্ডল ওভাল ফ্রেমের ভেতরে আনুন", 10, "#F59E0B")
+                                updateFaceOverlayPrompt("Position your face inside the oval frame", 10, "#F59E0B")
                                 return@addOnSuccessListener
                             }
 
                             val face = faces.maxByOrNull { it.boundingBox.width() * it.boundingBox.height() } ?: faces[0]
-                            val yaw = face.headEulerAngleY // ডানে/বামে ঘোরার কোণ
-                            val pitch = face.headEulerAngleX // উপরে/নিচে কোণ
+                            val yaw = face.headEulerAngleY   // ডানে/বামে ঘোরার কোণ (-) বাম, (+) ডানে
+                            val pitch = face.headEulerAngleX // উপরে/নিচে
                             val leftEyeOpen = face.leftEyeOpenProbability ?: 1.0f
                             val rightEyeOpen = face.rightEyeOpenProbability ?: 1.0f
 
+                            // কঠোর লাইভনেস স্টেট মেশিন
                             when (livenessStage) {
                                 0 -> {
-                                    // ধাপ ১: মুখ সোজা রাখা
-                                    if (abs(yaw) < 12f && abs(pitch) < 15f) {
+                                    // ধাপ ১: সোজা তাকানো
+                                    if (abs(yaw) < 10f && abs(pitch) < 12f) {
                                         livenessStage = 1
-                                        updateFaceOverlayPrompt("ধাপ ১/৩: ধীরে ধীরে মাথা বামে ঘোরান ⬅️", 35, "#F59E0B", "pose-left")
+                                        updateFaceOverlayPrompt("Step 2/4: Slowly turn head LEFT ⬅️", 35, "#F59E0B", "pose-left")
                                     } else {
-                                        updateFaceOverlayPrompt("ক্যামেরার দিকে সোজা তাকান", 15, "#F59E0B", "")
+                                        updateFaceOverlayPrompt("Step 1/4: Look straight into camera", 15, "#F59E0B", "")
                                     }
                                 }
                                 1 -> {
-                                    // ধাপ ২: মাথা বামে ঘোরানো
-                                    if (yaw > 16f || yaw < -16f) {
+                                    // ধাপ ২: বামে ঘোরানো (yaw < -18f)
+                                    if (yaw < -18f) {
                                         livenessStage = 2
-                                        updateFaceOverlayPrompt("ধাপ ২/৩: এবার মাথা বিপরীত দিকে (ডানে) ঘোরান ➡️", 65, "#F59E0B", "pose-right")
+                                        updateFaceOverlayPrompt("Step 3/4: Slowly turn head RIGHT ➡️", 65, "#F59E0B", "pose-right")
                                     }
                                 }
                                 2 -> {
-                                    // ধাপ ৩: মাথা ডানে ঘোরানো
-                                    if (abs(yaw) > 15f) {
+                                    // ধাপ ৩: ডানে ঘোরানো (yaw > 18f)
+                                    if (yaw > 18f) {
                                         livenessStage = 3
-                                        updateFaceOverlayPrompt("ধাপ ৩/৩: সোজা তাকিয়ে চোখের পলক ফেলুন (Blink) 👁️", 85, "#10B981", "pose-blink")
+                                        updateFaceOverlayPrompt("Step 4/4: Blink your eyes to capture 👁️", 88, "#10B981", "pose-blink")
                                     }
                                 }
                                 3 -> {
-                                    // ধাপ ৪: সোজা তাকিয়ে চোখের পলক ফেলা ও অটো-ক্যাপচার
-                                    val isLookingStraight = abs(yaw) < 14f && abs(pitch) < 14f
-                                    val isBlinking = leftEyeOpen < 0.45f || rightEyeOpen < 0.45f
-                                    if (isLookingStraight && isBlinking) {
+                                    // ধাপ ৪: চোখ পলক ফেলা (Blink) এবং সোজা থাকা
+                                    val isStraight = abs(yaw) < 12f
+                                    val isBlinking = leftEyeOpen < 0.38f || rightEyeOpen < 0.38f
+                                    if (isStraight && isBlinking) {
                                         livenessStage = 4
-                                        updateFaceOverlayPrompt("✔ ভেরিফাইড! ছবি মিলিয়ে দেখা হচ্ছে...", 100, "#10B981", "")
+                                        updateFaceOverlayPrompt("✔ Verified! Capturing biometric frame...", 100, "#10B981", "")
                                         if (isImageCaptured.compareAndSet(false, true)) {
                                             takeAutoCaptureAndCrop("face_liveness")
                                         }
@@ -420,7 +419,7 @@ class CameraScannerController(
                     activity.runOnUiThread {
                         Toast.makeText(
                             activity,
-                            "ছবি ক্যাপচার ব্যর্থ হয়েছে, আবার চেষ্টা করুন",
+                            "Capture failed, please try again",
                             Toast.LENGTH_SHORT
                         ).show()
                     }
@@ -464,7 +463,7 @@ class CameraScannerController(
     }
 
     inner class DocumentOverlayView(context: Context, private val mode: String) : View(context) {
-        private var dynamicPrompt: String = "মুখমণ্ডল ফ্রেমের ভেতরে রাখুন"
+        private var dynamicPrompt: String = "Position your face inside the oval"
         private var dynamicProgress: Int = 15
         private var ringColor: Int = Color.parseColor("#10B981")
 
@@ -483,14 +482,15 @@ class CameraScannerController(
             pathEffect = DashPathEffect(floatArrayOf(12f, 8f), 0f)
         }
 
+        // মুখের বৃত্তের বাইরের অংশ রঙিন/ডার্ক মাস্ক দিয়ে ঢেকে দেওয়ার শেড
         private val shadePaint = Paint().apply {
-            color = Color.parseColor("#B802120E")
+            color = Color.parseColor("#CC01120D")
             style = Paint.Style.FILL
         }
 
         private val textPaint = Paint().apply {
             color = Color.WHITE
-            textSize = 42f
+            textSize = 38f
             textAlign = Paint.Align.CENTER
             isAntiAlias = true
             setShadowLayer(8f, 0f, 0f, Color.BLACK)
@@ -498,7 +498,7 @@ class CameraScannerController(
 
         private val subTextPaint = Paint().apply {
             color = Color.parseColor("#10B981")
-            textSize = 34f
+            textSize = 30f
             textAlign = Paint.Align.CENTER
             isAntiAlias = true
             setShadowLayer(6f, 0f, 0f, Color.BLACK)
@@ -519,24 +519,31 @@ class CameraScannerController(
             val h = height.toFloat()
 
             if (mode == "face_liveness") {
-                val ovalW = w * 0.72f
-                val ovalH = ovalW * 1.25f
+                // বড় এবং পরিষ্কার ফেস ওভাল ফ্রেম
+                val ovalW = w * 0.78f
+                val ovalH = ovalW * 1.30f
                 val left = (w - ovalW) / 2f
-                val top = (h - ovalH) / 2f - (h * 0.04f)
+                val top = (h - ovalH) / 2f - (h * 0.03f)
                 val right = left + ovalW
                 val bottom = top + ovalH
                 val ovalRect = RectF(left, top, right, bottom)
 
+                // বাইরের অংশ রঙিন মাস্ক দিয়ে ঢেকে দেওয়া (Vignette Mask)
+                canvas.drawRect(0f, 0f, w, top, shadePaint)
+                canvas.drawRect(0f, bottom, w, h, shadePaint)
+                canvas.drawRect(0f, top, left, bottom, shadePaint)
+                canvas.drawRect(right, top, w, bottom, shadePaint)
+
                 boxPaint.color = ringColor
-                boxPaint.strokeWidth = 10f
+                boxPaint.strokeWidth = 12f
                 canvas.drawOval(ovalRect, boxPaint)
 
-                // ক্যামেরার ভেতর ৩ডি বায়োমেট্রিক গাইড লাইন
-                canvas.drawLine(w / 2f, top + 30f, w / 2f, bottom - 30f, meshPaint)
-                canvas.drawLine(left + 30f, (top + bottom) / 2f, right - 30f, (top + bottom) / 2f, meshPaint)
+                // গাইড লাইন
+                canvas.drawLine(w / 2f, top + 40f, w / 2f, bottom - 40f, meshPaint)
+                canvas.drawLine(left + 40f, (top + bottom) / 2f, right - 40f, (top + bottom) / 2f, meshPaint)
 
-                canvas.drawText(dynamicPrompt, w / 2f, bottom + 75f, textPaint)
-                canvas.drawText("3D BIOMETRIC LIVENESS ($dynamicProgress%)", w / 2f, top - 40f, subTextPaint)
+                canvas.drawText(dynamicPrompt, w / 2f, bottom + 65f, textPaint)
+                canvas.drawText("3D BIOMETRIC LIVENESS ($dynamicProgress%)", w / 2f, top - 35f, subTextPaint)
                 return
             }
 
@@ -555,14 +562,14 @@ class CameraScannerController(
             canvas.drawRoundRect(RectF(left, top, right, bottom), 24f, 24f, boxPaint)
 
             val guideText = when (mode) {
-                "nid_front" -> "এনআইডি কার্ডের সামনের অংশ ফ্রেমে রাখুন"
-                "nid_back" -> "এনআইডি কার্ডের পেছনের অংশ ফ্রেমে রাখুন"
-                "passport" -> "পাসপোর্টের তথ্য পৃষ্ঠাটি ফ্রেমে রাখুন"
-                else -> "ডকুমেন্টটি ফ্রেমের ভেতরে স্পষ্ট রাখুন"
+                "nid_front" -> "Keep NID front side inside the frame"
+                "nid_back" -> "Keep NID back side inside the frame"
+                "passport" -> "Keep passport data page inside the frame"
+                else -> "Keep document clearly inside the frame"
             }
 
             canvas.drawText(guideText, w / 2f, top - 45f, textPaint)
-            canvas.drawText("অটো-স্ক্যান হবে অথবা নিচের বাটনে চাপ দিয়ে ছবি তুলুন", w / 2f, bottom + 55f, subTextPaint)
+            canvas.drawText("Auto-scanning or tap shutter below", w / 2f, bottom + 55f, subTextPaint)
         }
     }
 }
