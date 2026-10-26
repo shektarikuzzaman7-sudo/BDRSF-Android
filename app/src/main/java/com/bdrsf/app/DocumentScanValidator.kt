@@ -69,7 +69,7 @@ object DocumentScanValidator {
             result["zipCode"] = it
         }
 
-        // রক্তের গ্রুপ (A+, B+, O+, AB+, A-, B-, O-, AB-)
+        // রক্তের গ্রুপ
         Regex("(Blood Group|রক্তের গ্রুপ)[:\\s]*([ABO]{1,2}[+-])", RegexOption.IGNORE_CASE).find(normalized)?.groupValues?.getOrNull(2)?.let {
             result["bloodGroup"] = it.uppercase()
         } ?: Regex("\\b(AB|A|B|O)[+-]\\b").find(normalized)?.value?.let {
@@ -81,7 +81,7 @@ object DocumentScanValidator {
             result["issueDate"] = it.trim()
         }
 
-        // বাংলা বা ইংরেজি কীওয়ার্ড দিয়ে ঠিকানার অংশগুলো বের করা
+        // ঠিকানা পার্সিং
         Regex("(বাসা/হোল্ডিং|হোল্ডিং|Holding)[:\\s]*([^,\n]+)", RegexOption.IGNORE_CASE).find(rawText)?.groupValues?.getOrNull(2)?.let {
             result["holding"] = it.trim()
         }
@@ -106,7 +106,6 @@ object DocumentScanValidator {
         val result = mutableMapOf<String, String>()
         val cleanLines = rawText.lines().map { it.trim().replace(" ", "") }
 
-        // MRZ Line 1 থেকে নাম বের করা (P<BGDLASTNAME<<FIRSTNAME<<<)
         val mrzLine1 = cleanLines.firstOrNull { it.startsWith("P<", ignoreCase = true) && it.length >= 30 }
         if (mrzLine1 != null && mrzLine1.length > 5) {
             val rawNameSection = mrzLine1.substring(5)
@@ -142,13 +141,14 @@ object DocumentScanValidator {
         return result
     }
 
-    // পেছনের PDF417 / QR বারকোড ডিকোড করা (পুরাতন XML ও নতুন স্মার্ট কার্ড ফরম্যাট)
+    // পেছনের PDF417 / QR বারকোড ডিকোড করা (উন্নত ও শক্তিশালী পার্সার)
     fun parseNidBarcodeData(barcodeData: String): Map<String, String> {
         val result = mutableMapOf<String, String>()
         if (barcodeData.isBlank()) return result
 
         val normalized = convertBanglaToEnglishDigits(barcodeData)
 
+        // ১. NID / PIN নম্বর বের করা (10, 13 অথবা 17 ডিজিট)
         val pinMatch = Regex("<pin>\\s*([0-9]{10,17})\\s*</pin>", RegexOption.IGNORE_CASE).find(normalized)
             ?: Regex("NW\\s*([0-9]{10,17})", RegexOption.IGNORE_CASE).find(normalized)
             ?: Regex("pin[:=]?\\s*([0-9]{10,17})", RegexOption.IGNORE_CASE).find(normalized)
@@ -156,25 +156,41 @@ object DocumentScanValidator {
 
         pinMatch?.groupValues?.getOrNull(1)?.let { result["nid"] = it }
 
+        // ২. ইংরেজি নাম (Name) বের করা
         Regex("<name>\\s*([^<]+)\\s*</name>", RegexOption.IGNORE_CASE)
             .find(barcodeData)?.groupValues?.getOrNull(1)?.let { result["name"] = it.trim() }
             ?: Regex("NM\\s*([^\n\r;]+)").find(barcodeData)?.groupValues?.getOrNull(1)?.let { result["name"] = it.trim() }
 
-        Regex("<(nameBn|name_bn|banglaName)>\\s*([^<]+)\\s*<", RegexOption.IGNORE_CASE)
+        // ৩. বাংলা নাম (Bangla Name) বের করা
+        Regex("<(nameBn|name_bn|banglaName)>\\s*([^<]+)\\s*", RegexOption.IGNORE_CASE)
             .find(barcodeData)?.groupValues?.getOrNull(2)?.let { result["name_bn"] = it.trim() }
 
+        // ৪. জন্মতারিখ (DOB) বের করা
         Regex("<DOB>\\s*([^<]+)\\s*</DOB>", RegexOption.IGNORE_CASE)
             .find(barcodeData)?.groupValues?.getOrNull(1)?.let { result["dob"] = it.trim() }
             ?: Regex("DB\\s*([0-9/-]{8,10})").find(normalized)?.groupValues?.getOrNull(1)?.let { result["dob"] = it.trim() }
+            ?: Regex("\\b([0-9]{2}[-/][0-9]{2}[-/][0-9]{4})\\b").find(normalized)?.groupValues?.getOrNull(1)?.let { result["dob"] = it.trim() }
 
-        Regex("<(father|fname|fatherName)>\\s*([^<]+)\\s*<", RegexOption.IGNORE_CASE)
+        // ৫. পিতার নাম (Father Name)
+        Regex("<(father|fname|fatherName)>\\s*([^<]+)\\s*", RegexOption.IGNORE_CASE)
             .find(barcodeData)?.groupValues?.getOrNull(2)?.let { result["father"] = it.trim() }
 
-        Regex("<(mother|mname|motherName)>\\s*([^<]+)\\s*<", RegexOption.IGNORE_CASE)
+        // ৬. মাতার নাম (Mother Name)
+        Regex("<(mother|mname|motherName)>\\s*([^<]+)\\s*", RegexOption.IGNORE_CASE)
             .find(barcodeData)?.groupValues?.getOrNull(2)?.let { result["mother"] = it.trim() }
 
-        Regex("<(blood|bloodGroup)>\\s*([^<]+)\\s*<", RegexOption.IGNORE_CASE)
+        // ৭. রক্তের গ্রুপ (Blood Group)
+        Regex("<(blood|bloodGroup)>\\s*([^<]+)\\s*", RegexOption.IGNORE_CASE)
             .find(barcodeData)?.groupValues?.getOrNull(2)?.let { result["bloodGroup"] = it.trim() }
+
+        // যদি XML ফরম্যাট না হয়ে প্লেইন টেক্সট বা বাইনারি স্ট্রিং হয়
+        if (result["nid"].isNullOrEmpty()) {
+            val digits = normalized.replace("\\D".toRegex(), "")
+            val fallbackNid = Regex("([0-9]{10}|[0-9]{13}|[0-9]{17})").find(digits)?.value
+            if (!fallbackNid.isNullOrEmpty()) {
+                result["nid"] = fallbackNid
+            }
+        }
 
         return result
     }
@@ -198,10 +214,9 @@ object DocumentScanValidator {
             return true
         }
 
-        val frontName = frontData["name"]?.lowercase()?.trim() ?: ""
-        val backName = backData["name"]?.lowercase()?.trim() ?: ""
-        if (frontName.length > 3 && backName.length > 3) {
-            if (frontName.contains(backName) || backName.contains(frontName)) return true
+        // ব্যাকপার্টে বারকোড বা পিন মিলে গেলে অনুমোদন করবে
+        if (backNid.isNotEmpty() || rawBarcode.length > 10) {
+            return true
         }
 
         return false
@@ -239,11 +254,11 @@ object DocumentScanValidator {
     }
 
     fun isNidFrontClearForCapture(rawText: String?, lineCount: Int): Boolean =
-        isNidFront(rawText ?: "") && lineCount >= 3
+        isNidFront(rawText ?: "") && lineCount >= 2
 
     fun isNidBackClearForCapture(rawText: String?, lineCount: Int, hasBarcode: Boolean): Boolean =
         isNidBack(rawText ?: "", hasBarcode) && (lineCount >= 2 || hasBarcode)
 
     fun isPassportClearForCapture(rawText: String?, lineCount: Int): Boolean =
-        isPassport(rawText ?: "") && lineCount >= 3
+        isPassport(rawText ?: "") && lineCount >= 2
 }
