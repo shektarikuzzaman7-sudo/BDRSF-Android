@@ -1,10 +1,11 @@
-
 <?xml version="1.0" encoding="utf-8"?>
 <network-security-config>
+    <!-- Only trusted domain allowed over HTTPS -->
     <domain-config cleartextTrafficPermitted="false">
         <domain includeSubdomains="true">bdrsf.com</domain>
     </domain-config>
 
+    <!-- Strict default: HTTPS only -->
     <base-config cleartextTrafficPermitted="false">
         <trust-anchors>
             <certificates src="system" />
