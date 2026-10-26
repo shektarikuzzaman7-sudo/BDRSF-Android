@@ -46,8 +46,6 @@ import android.widget.ProgressBar
 import android.widget.RelativeLayout
 import android.widget.Toast
 import androidx.activity.OnBackPressedCallback
-import androidx.activity.result.IntentSenderRequest
-import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AppCompatActivity
 import androidx.camera.core.CameraSelector
 import androidx.camera.core.ImageAnalysis
@@ -65,9 +63,6 @@ import androidx.exifinterface.media.ExifInterface
 import com.google.mlkit.vision.barcode.BarcodeScanner
 import com.google.mlkit.vision.barcode.BarcodeScanning
 import com.google.mlkit.vision.common.InputImage
-import com.google.mlkit.vision.documentscanner.GmsDocumentScannerOptions
-import com.google.mlkit.vision.documentscanner.GmsDocumentScanning
-import com.google.mlkit.vision.documentscanner.GmsDocumentScanningResult
 import com.google.mlkit.vision.text.TextRecognition
 import com.google.mlkit.vision.text.TextRecognizer
 import com.google.mlkit.vision.text.latin.TextRecognizerOptions
@@ -133,7 +128,6 @@ class MainActivity : AppCompatActivity() {
     private val GALLERY_QR_REQUEST_CODE = 1004
     private val DOCUMENT_SCAN_REQUEST_CODE = 1005
 
-    // অফলাইন বারকোড ও ইংরেজি টেক্সট রিকগনাইজার
     private val barcodeScanner: BarcodeScanner by lazy { BarcodeScanning.getClient() }
     private val textRecognizer: TextRecognizer by lazy { TextRecognition.getClient(TextRecognizerOptions.DEFAULT_OPTIONS) }
 
@@ -143,24 +137,6 @@ class MainActivity : AppCompatActivity() {
         .readTimeout(45, TimeUnit.SECONDS)
         .retryOnConnectionFailure(true)
         .build()
-
-    private val documentScannerLauncher = registerForActivityResult(ActivityResultContracts.StartIntentSenderForResult()) { result ->
-        if (result.resultCode == RESULT_OK) {
-            val scanResult = GmsDocumentScanningResult.fromActivityResultIntent(result.data)
-            scanResult?.pages?.let { pages ->
-                if (pages.isNotEmpty()) {
-                    val imageUri = pages[0].imageUri
-                    bgProcessingExecutor.execute {
-                        val file = createImageFile()
-                        contentResolver.openInputStream(imageUri)?.use { input ->
-                            FileOutputStream(file).use { output -> input.copyTo(output) }
-                        }
-                        processSelectedDocumentFile(file, currentScanDocType)
-                    }
-                }
-            }
-        }
-    }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -387,7 +363,7 @@ class MainActivity : AppCompatActivity() {
             activity.runOnUiThread {
                 activity.currentScanDocType = slot
                 if (mode == "camera") {
-                    activity.launchAutoShotCameraScanner()
+                    activity.launchDirectCameraForDocument()
                 } else {
                     activity.launchDirectGalleryForDocument()
                 }
@@ -403,34 +379,15 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    private fun launchAutoShotCameraScanner() {
+    private fun launchDirectCameraForDocument() {
         if (!hasCameraPermission()) { requestAllRequiredPermissions(); return }
-        try {
-            val options = GmsDocumentScannerOptions.Builder()
-                .setGalleryImportAllowed(false)
-                .setPageLimit(1)
-                .setResultFormats(GmsDocumentScannerOptions.RESULT_FORMAT_JPEG)
-                .setScannerMode(GmsDocumentScannerOptions.SCANNER_MODE_FULL)
-                .build()
-
-            GmsDocumentScanning.getClient(options).getStartScanIntent(this)
-                .addOnSuccessListener { intentSender ->
-                    documentScannerLauncher.launch(IntentSenderRequest.Builder(intentSender).build())
-                }
-                .addOnFailureListener {
-                    launchDirectCameraForDocumentFallback()
-                }
-        } catch (e: Exception) {
-            launchDirectCameraForDocumentFallback()
-        }
-    }
-
-    private fun launchDirectCameraForDocumentFallback() {
         try {
             val photoFile = createImageFile()
             tempDocumentFile = photoFile
             tempDocumentUri = FileProvider.getUriForFile(this, "${packageName}.fileprovider", photoFile)
-            val captureIntent = Intent(MediaStore.ACTION_IMAGE_CAPTURE).apply { putExtra(MediaStore.EXTRA_OUTPUT, tempDocumentUri) }
+            val captureIntent = Intent(MediaStore.ACTION_IMAGE_CAPTURE).apply { 
+                putExtra(MediaStore.EXTRA_OUTPUT, tempDocumentUri) 
+            }
             @Suppress("DEPRECATION")
             startActivityForResult(captureIntent, DOCUMENT_SCAN_REQUEST_CODE)
         } catch (e: Exception) {
@@ -468,7 +425,6 @@ class MainActivity : AppCompatActivity() {
                         return@execute
                     }
 
-                    // সামনের পার্ট থেকে ইংরেজি টেক্সট (এনআইডি নম্বর) অফলাইনে পড়া
                     if (bmp != null) {
                         val inputImage = InputImage.fromBitmap(bmp, 0)
                         textRecognizer.process(inputImage)
@@ -516,7 +472,6 @@ class MainActivity : AppCompatActivity() {
                                 val parsedData = parseNidBarcodeData(rawUtf8)
                                 val barcodeNid = parsedData["nid"] ?: ""
 
-                                // ১. ভুয়া বা বারকোড ছাড়া কার্ড রিজেকশন
                                 if (parsedData.isEmpty() || barcodeNid.isEmpty()) {
                                     notifyValidationFailed(targetSlot, "পেছনের অংশে কোনো বৈধ বারকোড পাওয়া যায়নি! এটি ভুয়া কার্ড হতে পারে।")
                                     cachedBackBase64 = ""
@@ -526,7 +481,6 @@ class MainActivity : AppCompatActivity() {
                                     return@addOnSuccessListener
                                 }
 
-                                // ২. ইনস্ট্যান্ট লোকাল ক্রস-ম্যাচ (সামনের এনআইডি ও পেছনের বারকোড এনআইডি মিলছে কিনা)
                                 if (localExtractedNidFront.isNotEmpty() && barcodeNid.isNotEmpty()) {
                                     val isMatch = (localExtractedNidFront == barcodeNid) ||
                                             localExtractedNidFront.endsWith(barcodeNid) ||
