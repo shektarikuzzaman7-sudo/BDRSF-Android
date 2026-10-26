@@ -94,7 +94,6 @@ class CameraScannerController(
         val topMarginPx = (40 * density).toInt()
         val rightMarginPx = (20 * density).toInt()
 
-        // বাতিল বাটন
         val closeButton = Button(activity).apply {
             text = "✕ বাতিল"
             setTextColor(Color.WHITE)
@@ -111,7 +110,6 @@ class CameraScannerController(
         }
         scannerLayout?.addView(closeButton)
 
-        // ম্যানুয়াল ক্যাপচার বাটন (প্রয়োজন হলে ইউজার সরাসরি ট্যাপ করেও ছবি তুলতে পারবে)
         if (scanMode != "qr") {
             val captureButton = Button(activity).apply {
                 text = "● ছবি তুলুন"
@@ -163,9 +161,6 @@ class CameraScannerController(
             .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
             .build()
 
-        // ওয়েবসাইট থেকে আসা নির্দেশিকা দেখা
-        val checkType = activity.currentScanConfig?.optString("checkType", "none") ?: "none"
-
         imageAnalysis.setAnalyzer(cameraExecutor) { imageProxy ->
             if (!isScanningActive || isImageCaptured.get()) {
                 imageProxy.close()
@@ -198,20 +193,20 @@ class CameraScannerController(
                 return@setAnalyzer
             }
 
-            // ওয়েবসাইট যদি বলে কোনো চেক লাগবে না ("none"), তবে লেখা ফ্রেমের ভেতর এলেই সাথে সাথে ছবি তুলবে
+            // টেক্সট ফ্রেম দেখা মাত্রই অটো ক্যাপচার
             textRecognizer.process(inputImage)
                 .addOnSuccessListener { visionText ->
                     val lineCount = visionText.textBlocks.sumOf { it.lines.size }
 
-                    if (checkType == "none") {
-                        // কোনো বাধা বা জটিল চেক ছাড়া কার্ড সামনে আনা মাত্রই সরাসরি ছবি ক্যাপচার
+                    if (!activity.isStrictCheckEnabled) {
+                        // ডিফল্ট: কোনো বাধা ছাড়া লেখা ফ্রেমের ভেতরে আসলেই ক্যাপচার করবে
                         if (lineCount >= 2) {
                             if (isImageCaptured.compareAndSet(false, true)) {
                                 takeAutoCaptureAndCrop(scanMode)
                             }
                         }
                     } else {
-                        // যদি ওয়েবসাইট স্পষ্টভাবে "strict" চেক করতে বলে
+                        // যদি ওয়েবসাইট strict চেক এনাবল করে
                         when (scanMode) {
                             "nid_front" -> {
                                 if (DocumentScanValidator.isNidFrontClearForCapture(visionText.text, lineCount)) {
@@ -258,7 +253,7 @@ class CameraScannerController(
     private fun takeAutoCaptureAndCrop(scanMode: String) {
         val photoFile = try {
             activity.createImageFile()
-        } catch (e: Exception) {
+        } catch (_: Exception) {
             null
         }
 
