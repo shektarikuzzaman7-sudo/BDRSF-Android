@@ -17,16 +17,7 @@ import kotlin.math.max
 
 object DocumentUtils {
 
-    fun convertBanglaToEnglishDigits(input: String): String {
-        val banglaDigits = charArrayOf('০', '১', '২', '৩', '৪', '৫', '৬', '৭', '৮', '৯')
-        val englishDigits = charArrayOf('0', '1', '2', '3', '4', '5', '6', '7', '8', '9')
-        var result = input
-        for (i in 0..9) {
-            result = result.replace(banglaDigits[i], englishDigits[i])
-        }
-        return result
-    }
-
+    // NID/Passport স্ট্যান্ডার্ড রেশিও অনুযায়ী ক্রপ
     fun cropCenterBoxFromImage(file: File) {
         try {
             val exif = ExifInterface(file.absolutePath)
@@ -54,13 +45,10 @@ object DocumentUtils {
             val x = ((bitmap.width - cropW) / 2).coerceAtLeast(0)
             val y = ((bitmap.height - cropH) / 2).coerceAtLeast(0)
 
-            val croppedBitmap = Bitmap.createBitmap(
-                bitmap,
-                x,
-                y,
-                cropW.coerceAtMost(bitmap.width - x),
-                cropH.coerceAtMost(bitmap.height - y)
-            )
+            val safeW = cropW.coerceAtMost(bitmap.width - x)
+            val safeH = cropH.coerceAtMost(bitmap.height - y)
+
+            val croppedBitmap = Bitmap.createBitmap(bitmap, x, y, safeW, safeH)
 
             FileOutputStream(file).use {
                 croppedBitmap.compress(Bitmap.CompressFormat.JPEG, 90, it)
@@ -108,16 +96,16 @@ object DocumentUtils {
         val detector = FaceDetection.getClient(options)
 
         return try {
-            val faces = Tasks.await(detector.process(InputImage.fromBitmap(bitmap, 0)), 3, TimeUnit.SECONDS)
-            if (faces.isNullOrEmpty()) {
-                fallbackFaceCrop(bitmap)
-            } else {
+            val facesTask = detector.process(InputImage.fromBitmap(bitmap, 0))
+            val faces = Tasks.await(facesTask, 3, TimeUnit.SECONDS)
+
+            if (!faces.isNullOrEmpty()) {
                 val box = faces[0].boundingBox
                 val padX = (box.width() * 0.25f).toInt()
                 val padY = (box.height() * 0.35f).toInt()
 
-                val x = (box.left - padX).coerceAtLeast(0)
-                val y = (box.top - padY).coerceAtLeast(0)
+                val x = (box.left - padX).coerceIn(0, bitmap.width - 1)
+                val y = (box.top - padY).coerceIn(0, bitmap.height - 1)
                 val width = (box.width() + padX * 2).coerceAtMost(bitmap.width - x)
                 val height = (box.height() + padY * 2).coerceAtMost(bitmap.height - y)
 
@@ -129,18 +117,25 @@ object DocumentUtils {
                 } else {
                     fallbackFaceCrop(bitmap)
                 }
+            } else {
+                fallbackFaceCrop(bitmap)
             }
         } catch (_: Exception) {
             fallbackFaceCrop(bitmap)
+        } finally {
+            try {
+                detector.close() // মেমোরি লিক ও OOM ক্র্যাশ রোধে ক্লোজ নিশ্চিত করা হলো
+            } catch (_: Exception) {}
         }
     }
 
     private fun fallbackFaceCrop(bitmap: Bitmap): String {
         return try {
-            val x = (bitmap.width * 0.04).toInt()
-            val y = (bitmap.height * 0.16).toInt()
+            val x = (bitmap.width * 0.04).toInt().coerceIn(0, bitmap.width - 1)
+            val y = (bitmap.height * 0.16).toInt().coerceIn(0, bitmap.height - 1)
             val width = (bitmap.width * 0.36).toInt().coerceAtMost(bitmap.width - x)
             val height = (bitmap.height * 0.65).toInt().coerceAtMost(bitmap.height - y)
+
             val stream = ByteArrayOutputStream()
             Bitmap.createBitmap(bitmap, x, y, width, height).compress(Bitmap.CompressFormat.JPEG, 90, stream)
             "data:image/jpeg;base64," + Base64.encodeToString(stream.toByteArray(), Base64.NO_WRAP)
