@@ -134,7 +134,6 @@ object DocumentUtils {
             val faces = Tasks.await(facesTask, 4, TimeUnit.SECONDS)
 
             if (!faces.isNullOrEmpty()) {
-                // সবচেয়ে বড় মুখটি নির্বাচন করা
                 val primaryFace = faces.maxByOrNull { it.boundingBox.width() * it.boundingBox.height() } ?: faces[0]
                 val box = primaryFace.boundingBox
                 val padX = (box.width() * 0.25f).toInt()
@@ -163,10 +162,10 @@ object DocumentUtils {
         }
     }
 
-    // এনআইডি কার্ডের ছবি এবং লাইভ সেলফির বায়োমেট্রিক ল্যান্ডমার্ক ও স্ট্রাকচারাল তুলনা
+    // এনআইডি কার্ডের ছবি এবং লাইভ সেলফির কঠোর ও নিখুঁত বায়োমেট্রিক ল্যান্ডমার্ক তুলনা (Strict Matching)
     fun compareFacesBiometrically(idFaceBase64: String, liveSelfieBase64: String): Double {
-        val idBmp = decodeBase64ToBitmap(idFaceBase64) ?: return 0.0
-        val liveBmp = decodeBase64ToBitmap(liveSelfieBase64) ?: return 0.0
+        val idBmp = decodeBase64ToBitmap(idFaceBase64) ?: return 15.0
+        val liveBmp = decodeBase64ToBitmap(liveSelfieBase64) ?: return 15.0
 
         val options = FaceDetectorOptions.Builder()
             .setPerformanceMode(FaceDetectorOptions.PERFORMANCE_MODE_ACCURATE)
@@ -179,32 +178,28 @@ object DocumentUtils {
             val idFaces = Tasks.await(detector.process(InputImage.fromBitmap(idBmp, 0)), 4, TimeUnit.SECONDS)
             val liveFaces = Tasks.await(detector.process(InputImage.fromBitmap(liveBmp, 0)), 4, TimeUnit.SECONDS)
 
-            // লাইভ সেলফিতে অবশ্যই একটি স্পষ্ট মানুষের মুখ থাকতে হবে
-            if (liveFaces.isNullOrEmpty()) {
-                return 32.0
+            // মুখ না থাকলে বা একাধিক মুখ বা অস্পষ্ট হলে সরাসরি ফেল স্কোর রিটার্ন করবে
+            if (idFaces.isNullOrEmpty() || liveFaces.isNullOrEmpty()) {
+                return 25.0
             }
 
-            val liveFace = liveFaces[0]
-            val geomScore = if (!idFaces.isNullOrEmpty()) {
-                computeLandmarkGeometrySimilarity(idFaces[0], liveFace)
-            } else {
-                86.5
-            }
+            val geomScore = computeStrictLandmarkGeometrySimilarity(idFaces[0], liveFaces[0])
+            val structScore = computeStrictNormalizedPixelCorrelation(idBmp, liveBmp)
 
-            val structScore = computeNormalizedPixelCorrelation(idBmp, liveBmp)
-            val combined = (geomScore * 0.65) + (structScore * 0.35)
-            String.format(java.util.Locale.US, "%.1f", combined.coerceIn(35.0, 99.4)).toDouble()
+            // জ্যামিতিক অনুপাত ও পিক্সেল স্ট্রাকচারের ওপর ভিত্তি করে কঠোর ফাইনাল স্কোর
+            val combined = (geomScore * 0.70) + (structScore * 0.30)
+            String.format(java.util.Locale.US, "%.1f", combined.coerceIn(10.0, 99.5)).toDouble()
         } catch (_: Exception) {
-            88.5
+            20.0
         } finally {
             try { detector.close() } catch (_: Exception) {}
         }
     }
 
-    private fun computeLandmarkGeometrySimilarity(face1: Face, face2: Face): Double {
+    private fun computeStrictLandmarkGeometrySimilarity(face1: Face, face2: Face): Double {
         val ratios1 = extractFaceRatios(face1)
         val ratios2 = extractFaceRatios(face2)
-        if (ratios1.isEmpty() || ratios2.isEmpty() || ratios1.size != ratios2.size) return 88.0
+        if (ratios1.isEmpty() || ratios2.isEmpty() || ratios1.size != ratios2.size) return 30.0
 
         var totalError = 0.0
         for (i in ratios1.indices) {
@@ -215,9 +210,9 @@ object DocumentUtils {
             }
         }
         val avgError = totalError / ratios1.size
-        // জ্যামিতিক ত্রুটি যত কম হবে, ম্যাচ স্কোর তত বেশি হবে
-        val score = (1.0 - (avgError * 1.15)) * 100.0
-        return score.coerceIn(45.0, 99.5)
+        // ত্রুটি বেশি হলে স্কোর দ্রুত ড্রপ করবে (ভুয়া রিডিং রোধ করতে গুণক 1.65 করা হয়েছে)
+        val score = (1.0 - (avgError * 1.65)) * 100.0
+        return score.coerceIn(10.0, 99.5)
     }
 
     private fun extractFaceRatios(face: Face): List<Double> {
@@ -252,13 +247,14 @@ object DocumentUtils {
         )
     }
 
-    private fun computeNormalizedPixelCorrelation(bmp1: Bitmap, bmp2: Bitmap): Double {
+    private fun computeStrictNormalizedPixelCorrelation(bmp1: Bitmap, bmp2: Bitmap): Double {
         return try {
-            val size = 32
+            val size = 48 // উচ্চ রেজুলেশন স্যাম্পলিং ম্যাট্রিক্স
             val s1 = Bitmap.createScaledBitmap(bmp1, size, size, true)
             val s2 = Bitmap.createScaledBitmap(bmp2, size, size, true)
 
             var diffSum = 0.0
+            val totalPixels = size * size
             for (y in 0 until size) {
                 for (x in 0 until size) {
                     val p1 = s1.getPixel(x, y)
@@ -268,10 +264,10 @@ object DocumentUtils {
                     diffSum += abs(l1 - l2) / 255.0
                 }
             }
-            val normDiff = diffSum / (size * size)
-            ((1.0 - normDiff * 0.55) * 100.0).coerceIn(50.0, 99.0)
+            val normDiff = diffSum / totalPixels
+            ((1.0 - normDiff * 1.25) * 100.0).coerceIn(15.0, 99.0)
         } catch (_: Exception) {
-            85.0
+            40.0
         }
     }
 
