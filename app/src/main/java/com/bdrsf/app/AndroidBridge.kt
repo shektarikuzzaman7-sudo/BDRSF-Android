@@ -7,8 +7,8 @@ class AndroidBridge(private val activity: MainActivity) {
 
     @JavascriptInterface
     fun pickDocumentImage(slot: String?, mode: String?) {
-        val targetSlot = slot ?: "nid_front"
-        val targetMode = mode ?: "camera"
+        val targetSlot = slot?.trim()?.takeIf { it.isNotEmpty() } ?: "nid_front"
+        val targetMode = mode?.trim()?.lowercase() ?: "camera"
 
         activity.runOnUiThread {
             activity.currentScanDocType = targetSlot
@@ -22,9 +22,19 @@ class AndroidBridge(private val activity: MainActivity) {
 
     @JavascriptInterface
     fun triggerFullDocumentProcessing(docType: String?) {
-        val type = docType ?: "NID"
+        val type = docType?.trim()?.takeIf { it.isNotEmpty() } ?: "NID"
         activity.bgProcessingExecutor.execute {
             activity.processSavedDocumentsHybrid(type)
+        }
+    }
+
+    @JavascriptInterface
+    fun startBiometricFaceLiveness(idFaceBase64: String?) {
+        activity.runOnUiThread {
+            if (!idFaceBase64.isNullOrBlank() && idFaceBase64.length > 50) {
+                activity.updateCachedFaceIfNeeded(idFaceBase64)
+            }
+            activity.startLiveCameraScanner("face_liveness")
         }
     }
 
