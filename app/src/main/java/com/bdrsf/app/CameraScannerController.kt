@@ -110,27 +110,6 @@ class CameraScannerController(
         }
         scannerLayout?.addView(closeButton)
 
-        if (scanMode != "qr") {
-            val captureButton = Button(activity).apply {
-                text = "● ছবি তুলুন"
-                setTextColor(Color.BLACK)
-                setBackgroundColor(Color.parseColor("#10B981"))
-                layoutParams = FrameLayout.LayoutParams(
-                    FrameLayout.LayoutParams.WRAP_CONTENT,
-                    FrameLayout.LayoutParams.WRAP_CONTENT
-                ).apply {
-                    gravity = Gravity.BOTTOM or Gravity.CENTER_HORIZONTAL
-                    bottomMargin = (35 * density).toInt()
-                }
-                setOnClickListener {
-                    if (isImageCaptured.compareAndSet(false, true)) {
-                        takeAutoCaptureAndCrop(scanMode)
-                    }
-                }
-            }
-            scannerLayout?.addView(captureButton)
-        }
-
         activity.mainLayout.addView(scannerLayout)
 
         val cameraProviderFuture = ProcessCameraProvider.getInstance(activity)
@@ -193,41 +172,24 @@ class CameraScannerController(
                 return@setAnalyzer
             }
 
-            // টেক্সট ফ্রেম দেখা মাত্রই অটো ক্যাপচার
             textRecognizer.process(inputImage)
                 .addOnSuccessListener { visionText ->
                     val lineCount = visionText.textBlocks.sumOf { it.lines.size }
-
-                    if (!activity.isStrictCheckEnabled) {
-                        // ডিফল্ট: কোনো বাধা ছাড়া লেখা ফ্রেমের ভেতরে আসলেই ক্যাপচার করবে
-                        if (lineCount >= 2) {
-                            if (isImageCaptured.compareAndSet(false, true)) {
-                                takeAutoCaptureAndCrop(scanMode)
+                    // কঠোরভাবে চেক করবে লাইভ ফ্রেমেই
+                    when (scanMode) {
+                        "nid_front" -> {
+                            if (DocumentScanValidator.isNidFrontClearForCapture(visionText.text, lineCount)) {
+                                if (isImageCaptured.compareAndSet(false, true)) takeAutoCaptureAndCrop(scanMode)
                             }
                         }
-                    } else {
-                        // যদি ওয়েবসাইট strict চেক এনাবল করে
-                        when (scanMode) {
-                            "nid_front" -> {
-                                if (DocumentScanValidator.isNidFrontClearForCapture(visionText.text, lineCount)) {
-                                    if (isImageCaptured.compareAndSet(false, true)) {
-                                        takeAutoCaptureAndCrop(scanMode)
-                                    }
-                                }
+                        "nid_back" -> {
+                            if (DocumentScanValidator.isNidBackClearForCapture(visionText.text, lineCount, false)) {
+                                if (isImageCaptured.compareAndSet(false, true)) takeAutoCaptureAndCrop(scanMode)
                             }
-                            "nid_back" -> {
-                                if (DocumentScanValidator.isNidBackClearForCapture(visionText.text, lineCount, false)) {
-                                    if (isImageCaptured.compareAndSet(false, true)) {
-                                        takeAutoCaptureAndCrop(scanMode)
-                                    }
-                                }
-                            }
-                            "passport" -> {
-                                if (DocumentScanValidator.isPassportClearForCapture(visionText.text, lineCount)) {
-                                    if (isImageCaptured.compareAndSet(false, true)) {
-                                        takeAutoCaptureAndCrop(scanMode)
-                                    }
-                                }
+                        }
+                        "passport" -> {
+                            if (DocumentScanValidator.isPassportClearForCapture(visionText.text, lineCount)) {
+                                if (isImageCaptured.compareAndSet(false, true)) takeAutoCaptureAndCrop(scanMode)
                             }
                         }
                     }
@@ -253,9 +215,7 @@ class CameraScannerController(
     private fun takeAutoCaptureAndCrop(scanMode: String) {
         val photoFile = try {
             activity.createImageFile()
-        } catch (_: Exception) {
-            null
-        }
+        } catch (_: Exception) { null }
 
         if (photoFile == null) {
             isImageCaptured.set(false)
@@ -271,6 +231,7 @@ class CameraScannerController(
                     stopLiveCameraScanner()
                     activity.bgProcessingExecutor.execute {
                         DocumentUtils.cropCenterBoxFromImage(photoFile)
+                        // ছবি তুলে নেওয়ার পর আসল হাই-কোয়ালিটি ইমেজ থেকে বারকোড স্ক্যান হবে
                         activity.processDeepDocumentFile(photoFile, scanMode)
                     }
                 }
@@ -279,11 +240,7 @@ class CameraScannerController(
                     stopLiveCameraScanner()
                     isImageCaptured.set(false)
                     activity.runOnUiThread {
-                        Toast.makeText(
-                            activity,
-                            "ছবি ক্যাপচার ব্যর্থ হয়েছে",
-                            Toast.LENGTH_SHORT
-                        ).show()
+                        Toast.makeText(activity, "ছবি ক্যাপচার ব্যর্থ হয়েছে", Toast.LENGTH_SHORT).show()
                     }
                 }
             }
@@ -292,10 +249,7 @@ class CameraScannerController(
 
     fun stopLiveCameraScanner() {
         isScanningActive = false
-        try {
-            cameraProvider?.unbindAll()
-        } catch (_: Exception) {
-        }
+        try { cameraProvider?.unbindAll() } catch (_: Exception) {}
 
         scannerLayout?.let {
             activity.mainLayout.removeView(it)
@@ -310,15 +264,11 @@ class CameraScannerController(
             barcodeScanner.close()
             textRecognizer.close()
             cameraExecutor.shutdown()
-        } catch (_: Exception) {
-        }
+        } catch (_: Exception) {}
     }
 
     private fun hasCameraPermission(): Boolean {
-        return ContextCompat.checkSelfPermission(
-            activity,
-            Manifest.permission.CAMERA
-        ) == PackageManager.PERMISSION_GRANTED
+        return ContextCompat.checkSelfPermission(activity, Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED
     }
 
     inner class DocumentOverlayView(context: Context, private val mode: String) : View(context) {
@@ -358,16 +308,14 @@ class CameraScannerController(
             canvas.drawRect(0f, bottom, w, h, shadePaint)
             canvas.drawRect(0f, top, left, bottom, shadePaint)
             canvas.drawRect(right, top, w, bottom, shadePaint)
-
             canvas.drawRoundRect(RectF(left, top, right, bottom), 22f, 22f, boxPaint)
 
             val guideText = when (mode) {
-                "nid_front" -> "কার্ডের সামনের অংশ ফ্রেমে সোজা রাখুন"
-                "nid_back" -> "কার্ডের পেছনের অংশ ফ্রেমে সোজা রাখুন"
+                "nid_front" -> "এনআইডি কার্ডের সামনের অংশ ফ্রেমে সোজা রাখুন"
+                "nid_back" -> "এনআইডি কার্ডের পেছনের অংশ ফ্রেমে সোজা রাখুন"
                 "passport" -> "পাসপোর্টের পৃষ্ঠাটি ফ্রেমের ভেতরে স্পষ্ট রাখুন"
                 else -> "ডকুমেন্টটি ফ্রেমের ভেতরে স্পষ্ট রাখুন"
             }
-
             canvas.drawText(guideText, w / 2f, top - 45f, textPaint)
         }
     }
