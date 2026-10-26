@@ -44,7 +44,7 @@ class ApiClient {
             }
 
             val request = Request.Builder()
-                .url("${AppSecurityConfig.APP_BASE_URL}/api/ocr_scan")
+                .url("${AppSecurityConfig.APP_BASE_URL.trimEnd('/')}/api/ocr_scan")
                 .post(
                     jsonBody.toString()
                         .toRequestBody("application/json; charset=utf-8".toMediaTypeOrNull())
@@ -55,31 +55,38 @@ class ApiClient {
 
             client.newCall(request).enqueue(object : Callback {
                 override fun onFailure(call: Call, e: IOException) {
-                    onFailure("সার্ভার কানেকশন ব্যর্থ হয়েছে।")
+                    onFailure("সার্ভার কানেকশন ব্যর্থ হয়েছে। ইন্টারনেট চেক করুন।")
                 }
 
                 override fun onResponse(call: Call, response: Response) {
-                    val responseBody = response.body?.string()
-                    if (!response.isSuccessful || responseBody.isNullOrBlank()) {
-                        onFailure("সার্ভার রেসপন্স গ্রহণ করা যায়নি।")
-                        return
-                    }
-
-                    try {
-                        val json = JSONObject(responseBody)
-                        if (json.optString("status") == "success") {
-                            onSuccess(json)
-                        } else {
-                            onFailure(json.optString("message", "ডকুমেন্ট প্রসেসিং ব্যর্থ হয়েছে।"))
+                    response.use { res ->
+                        val responseBody = try {
+                            res.body?.string()
+                        } catch (_: Exception) {
+                            null
                         }
-                    } catch (_: Exception) {
-                        onFailure("সার্ভার ডাটা parse করা যায়নি।")
+
+                        if (!res.isSuccessful || responseBody.isNullOrBlank()) {
+                            onFailure("সার্ভার এরর: HTTP ${res.code}")
+                            return
+                        }
+
+                        try {
+                            val json = JSONObject(responseBody)
+                            if (json.optString("status") == "success") {
+                                onSuccess(json)
+                            } else {
+                                onFailure(json.optString("message", "ডকুমেন্ট প্রসেসিং ব্যর্থ হয়েছে।"))
+                            }
+                        } catch (_: Exception) {
+                            onFailure("সার্ভার ডাটা প্রসেস করতে ব্যর্থ হয়েছে।")
+                        }
                     }
                 }
             })
 
         } catch (_: Exception) {
-            onFailure("API request তৈরি করতে সমস্যা হয়েছে।")
+            onFailure("API রিকোয়েস্ট তৈরি করতে সমস্যা হয়েছে।")
         }
     }
 }
