@@ -3,6 +3,7 @@ package com.bdrsf.app
 object DocumentScanValidator {
 
     fun convertBanglaToEnglishDigits(input: String): String {
+        if (input.isEmpty()) return ""
         val banglaDigits = charArrayOf('০', '১', '২', '৩', '৪', '৫', '৬', '৭', '৮', '৯')
         val englishDigits = charArrayOf('0', '1', '2', '3', '4', '5', '6', '7', '8', '9')
 
@@ -13,8 +14,8 @@ object DocumentScanValidator {
         return result
     }
 
-    fun isValidNidFrontText(rawText: String): Boolean {
-        val text = rawText ?: ""
+    fun isValidNidFrontText(rawText: String?): Boolean {
+        val text = rawText ?: return false
         val normalized = convertBanglaToEnglishDigits(text)
         val cleanDigitsOnly = normalized.replace("\\s+".toRegex(), "")
 
@@ -31,8 +32,8 @@ object DocumentScanValidator {
         return hasNidPattern && hasKeywords
     }
 
-    fun isValidNidBackText(rawText: String): Boolean {
-        val text = rawText ?: ""
+    fun isValidNidBackText(rawText: String?): Boolean {
+        val text = rawText ?: return false
         val normalized = convertBanglaToEnglishDigits(text)
 
         val hasAddressKeyword = normalized.contains("ঠিকানা") ||
@@ -42,15 +43,16 @@ object DocumentScanValidator {
             normalized.contains("রক্তের") ||
             normalized.contains("বাসা") ||
             normalized.contains("গ্রাম") ||
-            normalized.contains("Village", true)
+            normalized.contains("Village", true) ||
+            normalized.contains("প্রদানকারী")
 
         val hasBarcodeOrPattern = Regex("([0-9]{10}|[0-9]{13}|[0-9]{17})").containsMatchIn(normalized)
 
         return hasAddressKeyword || hasBarcodeOrPattern
     }
 
-    fun isValidPassportText(rawText: String): Boolean {
-        val text = rawText ?: ""
+    fun isValidPassportText(rawText: String?): Boolean {
+        val text = rawText ?: return false
         val normalized = convertBanglaToEnglishDigits(text)
 
         return normalized.contains("P<") ||
@@ -62,7 +64,7 @@ object DocumentScanValidator {
 
     fun parseNidBarcodeData(barcodeData: String): Map<String, String> {
         val result = mutableMapOf<String, String>()
-        if (barcodeData.isEmpty()) return result
+        if (barcodeData.isBlank()) return result
 
         val normalized = convertBanglaToEnglishDigits(barcodeData)
 
@@ -112,8 +114,11 @@ object DocumentScanValidator {
         val back = backNid.replace("\\D".toRegex(), "")
         if (front.isEmpty() || back.isEmpty()) return false
 
+        // ডিরেক্ট ম্যাচ অথবা ১৭ ডিজিট ও ১৩ ডিজিটের ক্রস ম্যাচিং সাপোর্ট
         return front == back ||
             front.endsWith(back) ||
-            back.endsWith(front)
+            back.endsWith(front) ||
+            (front.length == 17 && front.substring(4) == back) ||
+            (back.length == 17 && back.substring(4) == front)
     }
 }
