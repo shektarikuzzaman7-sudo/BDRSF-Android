@@ -1,4 +1,3 @@
-
 package com.bdrsf.app
 
 import android.content.Context
@@ -45,7 +44,6 @@ object AppSecurityConfig {
                 return scheme == "https" || scheme == "about" || scheme == "data"
             }
 
-            // Allow only explicitly trusted external schemes when needed
             when (scheme) {
                 "tel", "mailto", "whatsapp", "intent" -> true
                 else -> false
@@ -87,7 +85,6 @@ object AppSecurityConfig {
             val uri = Uri.parse(rawUrl)
             val scheme = uri.scheme?.lowercase(Locale.US)
             val host = uri.host?.lowercase(Locale.US)
-
             if (scheme == "https" && isTrustedHost(host)) {
                 rawUrl
             } else {
