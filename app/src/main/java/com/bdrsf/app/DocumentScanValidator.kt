@@ -14,69 +14,82 @@ object DocumentScanValidator {
         return result
     }
 
-    // ফ্রন্ট পার্ট থেকে গুরুত্বপূর্ণ তথ্যগুলো এক্সট্র্যাক্ট করা
+    // ১. ফ্রন্ট পার্ট থেকে ইংরেজি নাম, NID নম্বর ও জন্মতারিখ পড়া
     fun extractNidFrontData(rawText: String): Map<String, String> {
         val result = mutableMapOf<String, String>()
         val normalized = convertBanglaToEnglishDigits(rawText)
         val cleanDigitsOnly = normalized.replace("\\s+".toRegex(), "")
 
-        // NID নম্বর
+        // ১০, ১৩ বা ১৭ ডিজিটের এনআইডি নম্বর
         val nidMatch = Regex("([0-9]{10}|[0-9]{13}|[0-9]{17})").find(cleanDigitsOnly)
         nidMatch?.groupValues?.getOrNull(1)?.let { result["nid"] = it }
 
-        // জন্ম তারিখ (DD/MM/YYYY বা DD-MM-YYYY বা DD MMM YYYY)
-        val dobMatch = Regex("(DOB|Date of Birth|জন্ম তারিখ|তারিখ)[:\\s]*([0-9]{1,2}[\\s/\\-.A-Za-z]{1,4}[0-9]{4})", RegexOption.IGNORE_CASE).find(normalized)
+        // জন্ম তারিখ খোঁজা (যেমন: 21 Jan 2001 অথবা 02 Feb 1994)
+        val dobMatch = Regex("(Date of Birth|Birth|জন্ম তারিখ)[:\\s]*([0-9]{1,2}[\\s/\\-.A-Za-z]{3,5}[0-9]{4})", RegexOption.IGNORE_CASE).find(rawText)
+            ?: Regex("([0-9]{2}[\\s/\\-.A-Za-z]{3,5}[0-9]{4})").find(rawText)
             ?: Regex("([0-9]{2}[/-][0-9]{2}[/-][0-9]{4})").find(normalized)
-        dobMatch?.groupValues?.getOrNull(2)?.let { result["dob"] = it.trim() }
 
-        // নাম (Name / নাম)
-        val nameMatch = Regex("(Name|নাম)[:\\s]*([^\\n\\r]+)", RegexOption.IGNORE_CASE).find(rawText)
-        nameMatch?.groupValues?.getOrNull(2)?.let { result["name"] = it.trim() }
+        val foundDob = dobMatch?.groupValues?.getOrNull(2) ?: dobMatch?.value
+        if (!foundDob.isNullOrBlank()) {
+            result["dob"] = foundDob.trim()
+        }
 
-        return result
-    }
-
-    // পাসপোর্টের MRZ কোড ভ্যালিডেশন এবং ডেটা এক্সট্র্যাক্ট
-    fun parsePassportMRZ(rawText: String): Map<String, String> {
-        val result = mutableMapOf<String, String>()
-        val lines = rawText.lines().map { it.trim().replace(" ", "") }
-        
-        // MRZ লাইন 1: P<BGD বা P<
-        // MRZ লাইন 2: পাসপোর্ট নম্বর, দেশ, জন্মতারিখ
-        val mrzLine1 = lines.firstOrNull { it.startsWith("P<") }
-        val mrzLine2 = lines.firstOrNull { it.length >= 30 && it.contains(Regex("[0-9]{6}[0-9MF<]")) }
-
-        if (mrzLine2 != null) {
-            // পাসপোর্ট নম্বর সাধারণত প্রথম ৯ ক্যারেক্টার থাকে
-            val passportNo = mrzLine2.substring(0, 9).replace("<", "").trim()
-            val dobPart = if (mrzLine2.length >= 19) mrzLine2.substring(13, 19) else "" // YYMMDD
-            
-            result["passportNo"] = passportNo
-            result["dob"] = dobPart
-            result["isValid"] = "true"
-        } else if (rawText.contains("PASSPORT", true) || rawText.contains("BANGLADESH", true)) {
-            val passMatch = Regex("([A-Z]{1,2}[0-9]{7,8})").find(rawText)
-            passMatch?.groupValues?.getOrNull(1)?.let {
-                result["passportNo"] = it
-                result["isValid"] = "true"
+        // ইংরেজি নাম (Name এর পরের টেক্সট)
+        val lines = rawText.lines().map { it.trim() }
+        for (i in lines.indices) {
+            val line = lines[i]
+            if (line.startsWith("Name", ignoreCase = true)) {
+                val namePart = line.replace(Regex("(?i)^Name[:\\s]*"), "").trim()
+                if (namePart.isNotEmpty()) {
+                    result["name"] = namePart
+                    break
+                } else if (i + 1 < lines.size) {
+                    result["name"] = lines[i + 1]
+                    break
+                }
             }
         }
+
         return result
     }
 
-    // পেছনের বারকোড ডিকোড করা
+    // ২. পাসপোর্ট থেকে নাম ও পাসপোর্ট নম্বর এক্সট্র্যাক্ট করা
+    fun extractPassportData(rawText: String): Map<String, String> {
+        val result = mutableMapOf<String, String>()
+        val lines = rawText.lines().map { it.trim().replace(" ", "") }
+
+        // MRZ লাইন: P<BGD...
+        val mrzLine2 = lines.firstOrNull { it.length >= 35 && it.contains(Regex("[0-9]{6}[0-9MF<]")) }
+        if (mrzLine2 != null) {
+            val passNo = mrzLine2.substring(0, 9).replace("<", "").trim()
+            val dobPart = if (mrzLine2.length >= 19) mrzLine2.substring(13, 19) else ""
+            result["passportNo"] = passNo
+            result["dob"] = dobPart
+            result["isMrzValid"] = "true"
+        }
+
+        val passMatch = Regex("([A-Z][0-9]{8})").find(rawText)
+        if (result["passportNo"].isNullOrEmpty()) {
+            passMatch?.groupValues?.getOrNull(1)?.let {
+                result["passportNo"] = it
+            }
+        }
+
+        return result
+    }
+
+    // ৩. পেছনের বারকোড (PDF417 / 1D / QR) ডিকোড করা
     fun parseNidBarcodeData(barcodeData: String): Map<String, String> {
         val result = mutableMapOf<String, String>()
         if (barcodeData.isBlank()) return result
 
         val normalized = convertBanglaToEnglishDigits(barcodeData)
 
-        val nidMatch = Regex("<pin>\\s*([0-9]{10,17})\\s*</pin>", RegexOption.IGNORE_CASE)
-            .find(normalized)
+        val pinMatch = Regex("<pin>\\s*([0-9]{10,17})\\s*</pin>", RegexOption.IGNORE_CASE).find(normalized)
             ?: Regex("pin[:=]?\\s*([0-9]{10,17})", RegexOption.IGNORE_CASE).find(normalized)
             ?: Regex("([0-9]{10}|[0-9]{13}|[0-9]{17})").find(normalized)
 
-        nidMatch?.groupValues?.getOrNull(1)?.let { result["nid"] = it }
+        pinMatch?.groupValues?.getOrNull(1)?.let { result["nid"] = it }
 
         Regex("<name>\\s*([^<]+)\\s*</name>", RegexOption.IGNORE_CASE)
             .find(barcodeData)?.groupValues?.getOrNull(1)?.let { result["name"] = it.trim() }
@@ -96,91 +109,61 @@ object DocumentScanValidator {
         return result
     }
 
-    // ফ্রন্ট এবং ব্যাক পার্টের কঠোর ক্রস-ম্যাচিং (কম্পিউটারে বানানো বা ফেক কার্ড ধরা)
-    fun validateNidMatch(frontNid: String, backNid: String): Boolean {
-        val front = frontNid.replace("\\D".toRegex(), "")
-        val back = backNid.replace("\\D".toRegex(), "")
-        if (front.isEmpty() || back.isEmpty()) return false
+    // ৪. ফ্রন্ট ও ব্যাক পার্ট ক্রস-ম্যাচিং (আসল কার্ড ভেরিফিকেশন)
+    fun validateNidCrossMatch(frontData: Map<String, String>, backData: Map<String, String>, rawBarcode: String): Boolean {
+        val frontNid = frontData["nid"]?.replace("\\D".toRegex(), "") ?: ""
+        val backNid = backData["nid"]?.replace("\\D".toRegex(), "") ?: ""
 
-        return front == back ||
-                front.endsWith(back) ||
-                back.endsWith(front) ||
-                (front.length == 17 && front.substring(4) == back) ||
-                (back.length == 17 && back.substring(4) == front)
+        // ১. বারকোডের এনআইডি নম্বরের সাথে মিলানো
+        if (frontNid.isNotEmpty() && backNid.isNotEmpty()) {
+            val isNidMatched = frontNid == backNid ||
+                    frontNid.endsWith(backNid) ||
+                    backNid.endsWith(frontNid) ||
+                    (frontNid.length == 17 && frontNid.substring(4) == backNid) ||
+                    (backNid.length == 17 && backNid.substring(4) == frontNid)
+
+            if (isNidMatched) return true
+        }
+
+        // ২. বারকোডের র-টেক্সটে যদি ফ্রন্টের এনআইডি নম্বরের অংশ থাকে
+        if (frontNid.isNotEmpty() && rawBarcode.contains(frontNid)) {
+            return true
+        }
+
+        // ৩. বারকোডের নামের সাথে ফ্রন্টের নামের মিল
+        val frontName = frontData["name"]?.lowercase() ?: ""
+        val backName = backData["name"]?.lowercase() ?: ""
+        if (frontName.isNotEmpty() && backName.isNotEmpty()) {
+            if (frontName.contains(backName) || backName.contains(frontName)) return true
+        }
+
+        return false
     }
 
-    // ক্যামেরা অটো ক্যাপচারের লাইভ ফ্রন্ট চেক
-    fun isNidFrontClearForCapture(rawText: String?, lineCount: Int): Boolean {
-        val text = rawText ?: return false
-        val cleanDigitsOnly = convertBanglaToEnglishDigits(text).replace("\\s+".toRegex(), "")
-
-        val hasGovHeader = text.contains("People's Republic", true) ||
-                text.contains("Government", true) ||
-                text.contains("National ID", true) ||
-                text.contains("Identity Card", true) ||
-                text.contains("গণপ্রজাতন্ত্রী", true) ||
-                text.contains("বাংলাদেশ সরকার", true) ||
-                text.contains("জাতীয় পরিচয়", true) ||
-                text.contains("পরিচয়পত্র", true)
-
-        val hasDataFields = text.contains("Name", true) ||
-                text.contains("নাম", true) ||
-                text.contains("Date of Birth", true) ||
-                text.contains("জন্ম", true) ||
-                text.contains("Father", true) ||
-                text.contains("Mother", true) ||
-                text.contains("পিতা", true) ||
-                text.contains("মাতা", true) ||
-                text.contains("NID", true)
-
-        val hasNidNumber = Regex("([0-9]{10}|[0-9]{13}|[0-9]{17})").containsMatchIn(cleanDigitsOnly)
-        val isNotPassport = !text.contains("PASSPORT", true) && !text.contains("P<", true)
-
-        return (hasGovHeader || (hasDataFields && hasNidNumber)) && lineCount >= 3 && isNotPassport
+    // ডকুমেন্ট আইসোলেশন ও লাইভ ক্যাপচার চেকার
+    fun isNidFront(rawText: String): Boolean {
+        if (rawText.contains("PASSPORT", true) || rawText.contains("P<", true)) return false
+        return rawText.contains("Government", true) ||
+                rawText.contains("Republic", true) ||
+                rawText.contains("গণপ্রজাতন্ত্রী", true) ||
+                rawText.contains("National ID", true) ||
+                rawText.contains("জাতীয় পরিচয়", true)
     }
 
-    // ক্যামেরা অটো ক্যাপচারের লাইভ ব্যাক চেক
-    fun isNidBackClearForCapture(rawText: String?, lineCount: Int, hasAnyBarcode: Boolean): Boolean {
-        if (hasAnyBarcode) return true
-
-        val text = rawText ?: return false
-        val normalized = convertBanglaToEnglishDigits(text)
-
-        val hasAddress = normalized.contains("ঠিকানা") ||
-                normalized.contains("ডাকঘর") ||
-                normalized.contains("গ্রাম") ||
-                normalized.contains("রাস্তা") ||
-                normalized.contains("বাসা/হোল্ডিং") ||
-                normalized.contains("উপজেলা") ||
-                normalized.contains("জেলা") ||
-                normalized.contains("Address", true) ||
-                normalized.contains("Village", true) ||
-                normalized.contains("Post Office", true)
-
-        val hasAuthorityOrBlood = normalized.contains("প্রদানকারী") ||
-                normalized.contains("কর্তৃপক্ষ") ||
-                normalized.contains("রক্তের গ্রুপ") ||
-                normalized.contains("Blood Group", true) ||
-                normalized.contains("Authority", true)
-
-        val isNotPassport = !text.contains("P<", true) && !text.contains("PASSPORT", true)
-
-        return (hasAddress || hasAuthorityOrBlood) && lineCount >= 2 && isNotPassport
+    fun isNidBack(rawText: String, hasBarcode: Boolean): Boolean {
+        if (rawText.contains("PASSPORT", true) || rawText.contains("P<", true)) return false
+        if (hasBarcode) return true
+        return rawText.contains("ঠিকানা") || rawText.contains("ডাকঘর") || rawText.contains("গ্রাম") ||
+                rawText.contains("Address", true) || rawText.contains("Blood", true)
     }
 
-    fun isPassportClearForCapture(rawText: String?, lineCount: Int): Boolean {
-        val text = rawText ?: return false
-        val cleanText = text.trim()
-        val hasPassportTitle = cleanText.contains("PASSPORT", true) ||
-                cleanText.contains("REPUBLIC OF BANGLADESH", true) ||
-                cleanText.contains("PEOPLE'S REPUBLIC", true)
-        val hasMRZ = cleanText.contains("P<BGD", true) || cleanText.contains("P<", true)
-        val isNotNid = !cleanText.contains("National ID", true) && !cleanText.contains("জাতীয় পরিচয়পত্র", true)
-
-        return (hasPassportTitle || hasMRZ) && isNotNid && lineCount >= 3
+    fun isPassport(rawText: String): Boolean {
+        return rawText.contains("PASSPORT", true) ||
+                rawText.contains("P<BGD", true) ||
+                (rawText.contains("P<", true) && rawText.contains("BANGLADESH", true))
     }
 
-    fun isValidNidFrontText(rawText: String?): Boolean = isNidFrontClearForCapture(rawText, 3)
-    fun isValidNidBackText(rawText: String?): Boolean = isNidBackClearForCapture(rawText, 2, false)
-    fun isValidPassportText(rawText: String?): Boolean = isPassportClearForCapture(rawText, 3)
+    fun isNidFrontClearForCapture(rawText: String?, lineCount: Int): Boolean = isNidFront(rawText ?: "") && lineCount >= 2
+    fun isNidBackClearForCapture(rawText: String?, lineCount: Int, hasBarcode: Boolean): Boolean = isNidBack(rawText ?: "", hasBarcode) && (lineCount >= 2 || hasBarcode)
+    fun isPassportClearForCapture(rawText: String?, lineCount: Int): Boolean = isPassport(rawText ?: "") && lineCount >= 2
 }
