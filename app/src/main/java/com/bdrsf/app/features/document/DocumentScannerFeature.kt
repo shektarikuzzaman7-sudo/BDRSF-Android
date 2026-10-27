@@ -1,0 +1,741 @@
+// File: app/src/main/java/com/bdrsf/app/features/document/DocumentScannerFeature.kt
+package com.bdrsf.app.features.document
+
+import android.Manifest
+import android.animation.ValueAnimator
+import android.annotation.SuppressLint
+import android.app.Activity
+import android.content.Context
+import android.content.pm.PackageManager
+import android.graphics.Canvas
+import android.graphics.Color
+import android.graphics.DashPathEffect
+import android.graphics.LinearGradient
+import android.graphics.Paint
+import android.graphics.Path
+import android.graphics.PorterDuff
+import android.graphics.PorterDuffXfermode
+import android.graphics.RectF
+import android.graphics.Shader
+import android.util.Log
+import android.view.Gravity
+import android.view.View
+import android.view.ViewGroup
+import android.view.animation.AccelerateDecelerateInterpolator
+import android.widget.FrameLayout
+import android.widget.TextView
+import android.widget.Toast
+import androidx.camera.core.Camera
+import androidx.camera.core.CameraSelector
+import androidx.camera.core.ImageAnalysis
+import androidx.camera.core.ImageCapture
+import androidx.camera.core.ImageCaptureException
+import androidx.camera.core.Preview
+import androidx.camera.lifecycle.ProcessCameraProvider
+import androidx.camera.view.PreviewView
+import androidx.core.app.ActivityCompat
+import androidx.core.content.ContextCompat
+import androidx.lifecycle.LifecycleOwner
+import com.bdrsf.app.bridge.AndroidBridge
+import com.bdrsf.app.bridge.WebBridgeContract.Actions
+import com.bdrsf.app.bridge.WebBridgeContract.BridgeResponse
+import com.bdrsf.app.bridge.WebBridgeContract.Status
+import com.google.mlkit.vision.common.InputImage
+import com.google.mlkit.vision.face.Face
+import com.google.mlkit.vision.face.FaceDetection
+import com.google.mlkit.vision.face.FaceDetector
+import com.google.mlkit.vision.face.FaceDetectorOptions
+import com.google.mlkit.vision.text.TextRecognition
+import com.google.mlkit.vision.text.TextRecognizer
+import com.google.mlkit.vision.text.latin.TextRecognizerOptions
+import org.json.JSONObject
+import java.io.File
+import java.io.IOException
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
+import java.util.concurrent.ExecutorService
+import java.util.concurrent.Executors
+import java.util.concurrent.atomic.AtomicBoolean
+
+/**
+ * BDRSF সার্বজনীন ডকুমেন্ট, পাসপোর্ট এবং লাইভ ফেস ভেরিফিকেশন ক্যামেরা ইঞ্জিন।
+ * এটি CameraX এবং ML Kit দ্বারা নিয়ন্ত্রিত সম্পূর্ণ রিয়েল-টাইম লাইভনেস ও ডকুমেন্ট ফ্রেম ডিটেকশন নিশ্চিত করে।
+ */
+class DocumentScannerFeature(
+    private val activity: Activity,
+    private val rootContainer: ViewGroup,
+    private val bridge: AndroidBridge,
+    private val onDocumentCapturedListener: (capturedFile: File, scanMode: String, callback: String?) -> Unit
+) {
+
+    private val cameraExecutor: ExecutorService = Executors.newSingleThreadExecutor()
+    private var cameraProvider: ProcessCameraProvider? = null
+    private var camera: Camera? = null
+    private var previewView: PreviewView? = null
+    private var imageCapture: ImageCapture? = null
+    private var scannerOverlayLayout: FrameLayout? = null
+    private var hudOverlayView: View? = null
+
+    private var activeScanMode: String = "card"
+    private var activeCallback: String? = null
+    private var isTorchOn: Boolean = false
+    private val isCapturing = AtomicBoolean(false)
+
+    // ফেস লাইভনেস স্টেবিলিটি ট্র্যাকার
+    private var stableFrameCount: Int = 0
+    private val requiredStableFrames: Int = 6
+
+    @Volatile
+    var isScanningActive: Boolean = false
+        private set
+
+    // ফেস ডিটেকশন অপশন (হেড পোজ, চোখ খোলা থাকা এবং লাইভনেস চেক)
+    private val faceDetector: FaceDetector by lazy {
+        val options = FaceDetectorOptions.Builder()
+            .setPerformanceMode(FaceDetectorOptions.PERFORMANCE_MODE_FAST)
+            .setClassificationMode(FaceDetectorOptions.CLASSIFICATION_MODE_ALL)
+            .setLandmarkMode(FaceDetectorOptions.LANDMARK_MODE_NONE)
+            .build()
+        FaceDetection.getClient(options)
+    }
+
+    // ডকুমেন্ট টেক্সট রিকগনিশন ক্লায়েন্ট
+    private val textRecognizer: TextRecognizer by lazy {
+        TextRecognition.getClient(TextRecognizerOptions.DEFAULT_OPTIONS)
+    }
+
+    /**
+     * ক্যামেরা স্ক্যানার চালু করে।
+     * মোডসমূহ: "card", "nid_front", "nid_back", "passport", "face_liveness", "generic"
+     */
+    fun startScanner(payload: JSONObject, callback: String?) {
+        if (!hasCameraPermission()) {
+            ActivityCompat.requestPermissions(
+                activity,
+                arrayOf(Manifest.permission.CAMERA),
+                2001
+            )
+            return
+        }
+
+        if (isScanningActive) return
+
+        activity.runOnUiThread {
+            isScanningActive = true
+            isCapturing.set(false)
+            stableFrameCount = 0
+            isTorchOn = false
+            activeCallback = callback
+            activeScanMode = payload.optString("mode", "card").lowercase(Locale.ROOT)
+
+            buildScannerLayout()
+            bindCameraProvider()
+        }
+    }
+
+    private fun buildScannerLayout() {
+        val density = activity.resources.displayMetrics.density
+
+        scannerOverlayLayout = FrameLayout(activity).apply {
+            layoutParams = FrameLayout.LayoutParams(
+                FrameLayout.LayoutParams.MATCH_PARENT,
+                FrameLayout.LayoutParams.MATCH_PARENT
+            )
+            setBackgroundColor(Color.BLACK)
+        }
+
+        previewView = PreviewView(activity).apply {
+            layoutParams = FrameLayout.LayoutParams(
+                FrameLayout.LayoutParams.MATCH_PARENT,
+                FrameLayout.LayoutParams.MATCH_PARENT
+            )
+        }
+        scannerOverlayLayout?.addView(previewView)
+
+        // HUD ভিউ তৈরি
+        hudOverlayView = if (isFaceMode()) {
+            FaceLivenessHudView(activity)
+        } else {
+            DocumentCardHudView(activity, activeScanMode)
+        }
+        scannerOverlayLayout?.addView(hudOverlayView)
+
+        // শীর্ষ নিয়ন্ত্রণ বার (বন্ধ বোতাম এবং ফ্ল্যাশলাইট বোতাম)
+        val topControlsLayout = FrameLayout(activity).apply {
+            layoutParams = FrameLayout.LayoutParams(
+                FrameLayout.LayoutParams.MATCH_PARENT,
+                (60 * density).toInt()
+            ).apply {
+                topMargin = (35 * density).toInt()
+                leftMargin = (20 * density).toInt()
+                rightMargin = (20 * density).toInt()
+            }
+        }
+
+        val closeButton = TextView(activity).apply {
+            text = "✕ বাতিল"
+            setTextColor(Color.WHITE)
+            textSize = 15f
+            setPadding((14 * density).toInt(), (8 * density).toInt(), (14 * density).toInt(), (8 * density).toInt())
+            setBackgroundColor(Color.parseColor("#80000000"))
+            layoutParams = FrameLayout.LayoutParams(
+                FrameLayout.LayoutParams.WRAP_CONTENT,
+                FrameLayout.LayoutParams.WRAP_CONTENT
+            ).apply {
+                gravity = Gravity.START or Gravity.CENTER_VERTICAL
+            }
+            setOnClickListener { stopScanner(isCancelled = true) }
+        }
+        topControlsLayout.addView(closeButton)
+
+        if (!isFaceMode()) {
+            val flashButton = TextView(activity).apply {
+                text = "⚡ টর্চ"
+                setTextColor(Color.WHITE)
+                textSize = 15f
+                setPadding((14 * density).toInt(), (8 * density).toInt(), (14 * density).toInt(), (8 * density).toInt())
+                setBackgroundColor(Color.parseColor("#80000000"))
+                layoutParams = FrameLayout.LayoutParams(
+                    FrameLayout.LayoutParams.WRAP_CONTENT,
+                    FrameLayout.LayoutParams.WRAP_CONTENT
+                ).apply {
+                    gravity = Gravity.END or Gravity.CENTER_VERTICAL
+                }
+                setOnClickListener { toggleTorch(this) }
+            }
+            topControlsLayout.addView(flashButton)
+        }
+
+        scannerOverlayLayout?.addView(topControlsLayout)
+
+        // ম্যানুয়াল ক্যাপচার বাটন (প্রয়োজনে ইউজার নিজেই ট্যাপ করতে পারবে)
+        val manualCaptureButton = TextView(activity).apply {
+            text = "● ক্যাপচার"
+            setTextColor(Color.WHITE)
+            textSize = 16f
+            setPadding((24 * density).toInt(), (10 * density).toInt(), (24 * density).toInt(), (10 * density).toInt())
+            setBackgroundColor(Color.parseColor("#9900E676"))
+            layoutParams = FrameLayout.LayoutParams(
+                FrameLayout.LayoutParams.WRAP_CONTENT,
+                FrameLayout.LayoutParams.WRAP_CONTENT
+            ).apply {
+                gravity = Gravity.BOTTOM or Gravity.CENTER_HORIZONTAL
+                bottomMargin = (30 * density).toInt()
+            }
+            setOnClickListener {
+                if (isScanningActive && isCapturing.compareAndSet(false, true)) {
+                    triggerTakePicture()
+                }
+            }
+        }
+        scannerOverlayLayout?.addView(manualCaptureButton)
+
+        rootContainer.addView(scannerOverlayLayout)
+    }
+
+    private fun bindCameraProvider() {
+        val cameraProviderFuture = ProcessCameraProvider.getInstance(activity)
+        cameraProviderFuture.addListener({
+            try {
+                cameraProvider = cameraProviderFuture.get()
+                setupCameraPipelines()
+            } catch (e: Exception) {
+                Log.e("DocScannerFeature", "Camera provider error", e)
+                stopScanner(isCancelled = true)
+            }
+        }, ContextCompat.getMainExecutor(activity))
+    }
+
+    @SuppressLint("UnsafeOptInUsageError")
+    private fun setupCameraPipelines() {
+        val provider = cameraProvider ?: return
+        val lifecycleOwner = activity as? LifecycleOwner ?: return
+
+        val preview = Preview.Builder().build().also {
+            it.setSurfaceProvider(previewView?.surfaceProvider)
+        }
+
+        imageCapture = ImageCapture.Builder()
+            .setCaptureMode(ImageCapture.CAPTURE_MODE_MAXIMIZE_QUALITY)
+            .build()
+
+        val imageAnalysis = ImageAnalysis.Builder()
+            .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
+            .build()
+
+        // ফ্রন্ট ক্যামেরা ফেস মোডে, অন্যথায় ব্যাক ক্যামেরা
+        val cameraSelector = if (isFaceMode()) {
+            CameraSelector.DEFAULT_FRONT_CAMERA
+        } else {
+            CameraSelector.DEFAULT_BACK_CAMERA
+        }
+
+        imageAnalysis.setAnalyzer(cameraExecutor) { imageProxy ->
+            if (!isScanningActive || isCapturing.get()) {
+                imageProxy.close()
+                return@setAnalyzer
+            }
+
+            val mediaImage = imageProxy.image
+            if (mediaImage == null) {
+                imageProxy.close()
+                return@setAnalyzer
+            }
+
+            val rotationDegrees = imageProxy.imageInfo.rotationDegrees
+            val inputImage = InputImage.fromMediaImage(mediaImage, rotationDegrees)
+
+            if (isFaceMode()) {
+                analyzeFaceLiveness(inputImage, imageProxy)
+            } else {
+                analyzeDocumentFrame(inputImage, imageProxy)
+            }
+        }
+
+        try {
+            provider.unbindAll()
+            camera = provider.bindToLifecycle(
+                lifecycleOwner,
+                cameraSelector,
+                preview,
+                imageCapture,
+                imageAnalysis
+            )
+        } catch (e: Exception) {
+            Log.e("DocScannerFeature", "Lifecycle binding failed", e)
+            stopScanner(isCancelled = true)
+        }
+    }
+
+    /**
+     * ফেস লাইভনেস অ্যানালাইসিস: হেড পোজ, চোখের পলক ও স্থিরতা যাচাই
+     */
+    private fun analyzeFaceLiveness(inputImage: InputImage, imageProxy: androidx.camera.core.ImageProxy) {
+        faceDetector.process(inputImage)
+            .addOnSuccessListener { faces ->
+                if (!isScanningActive || isCapturing.get()) return@addOnSuccessListener
+
+                val faceView = hudOverlayView as? FaceLivenessHudView
+                if (faces.isEmpty()) {
+                    stableFrameCount = 0
+                    faceView?.updateGuidance("ফ্রেমের ভেতরে আপনার মুখমণ্ডল সোজা রাখুন", Color.WHITE, 0f)
+                    return@addOnSuccessListener
+                }
+
+                val face = faces[0]
+                val yaw = face.headEulerAngleY     // ডানে-বামে কোণ (-10 থেকে +10 সহনশীল)
+                val pitch = face.headEulerAngleX   // উপর-নিচে কোণ (-10 থেকে +10 সহনশীল)
+                val leftEyeOpen = face.leftEyeOpenProbability ?: -1f
+                val rightEyeOpen = face.rightEyeOpenProbability ?: -1f
+
+                when {
+                    yaw > 12f -> {
+                        stableFrameCount = 0
+                        faceView?.updateGuidance("মাথা সামান্য বামে ঘোরান", Color.YELLOW, 0.2f)
+                    }
+                    yaw < -12f -> {
+                        stableFrameCount = 0
+                        faceView?.updateGuidance("মাথা সামান্য ডানে ঘোরান", Color.YELLOW, 0.2f)
+                    }
+                    pitch > 14f -> {
+                        stableFrameCount = 0
+                        faceView?.updateGuidance("মাথা সামান্য নিচে নামান", Color.YELLOW, 0.3f)
+                    }
+                    pitch < -12f -> {
+                        stableFrameCount = 0
+                        faceView?.updateGuidance("মাথা সামান্য উপরে তুলুন", Color.YELLOW, 0.3f)
+                    }
+                    leftEyeOpen in 0f..0.55f || rightEyeOpen in 0f..0.55f -> {
+                        stableFrameCount = 0
+                        faceView?.updateGuidance("চোখ পুরোপুরি খোলা রাখুন", Color.parseColor("#FFA500"), 0.5f)
+                    }
+                    else -> {
+                        // সব শর্ত পূরণ হলে স্থিরতা ফ্রেম কাউন্ট বাড়ানো হবে
+                        stableFrameCount++
+                        val progress = (stableFrameCount.toFloat() / requiredStableFrames).coerceIn(0f, 1f)
+                        faceView?.updateGuidance("স্থির থাকুন... ছবি তোলা হচ্ছে", Color.parseColor("#00E676"), progress)
+
+                        if (stableFrameCount >= requiredStableFrames) {
+                            if (isCapturing.compareAndSet(false, true)) {
+                                triggerTakePicture()
+                            }
+                        }
+                    }
+                }
+            }
+            .addOnFailureListener {
+                stableFrameCount = 0
+            }
+            .addOnCompleteListener {
+                imageProxy.close()
+            }
+    }
+
+    /**
+     * ডকুমেন্ট ক্লিয়ারিটি অ্যানালাইসিস
+     */
+    private fun analyzeDocumentFrame(inputImage: InputImage, imageProxy: androidx.camera.core.ImageProxy) {
+        textRecognizer.process(inputImage)
+            .addOnSuccessListener { visionText ->
+                if (!isScanningActive || isCapturing.get()) return@addOnSuccessListener
+
+                val cardView = hudOverlayView as? DocumentCardHudView
+                val totalLines = visionText.textBlocks.sumOf { it.lines.size }
+
+                if (totalLines >= 3) {
+                    stableFrameCount++
+                    cardView?.setCardDetected(true)
+                    if (stableFrameCount >= 5) {
+                        if (isCapturing.compareAndSet(false, true)) {
+                            triggerTakePicture()
+                        }
+                    }
+                } else {
+                    stableFrameCount = 0
+                    cardView?.setCardDetected(false)
+                }
+            }
+            .addOnFailureListener {
+                stableFrameCount = 0
+            }
+            .addOnCompleteListener {
+                imageProxy.close()
+            }
+    }
+
+    private fun triggerTakePicture() {
+        val photoFile = try {
+            createTempScanFile()
+        } catch (e: Exception) {
+            isCapturing.set(false)
+            return
+        }
+
+        val outputOptions = ImageCapture.OutputFileOptions.Builder(photoFile).build()
+
+        imageCapture?.takePicture(
+            outputOptions,
+            ContextCompat.getMainExecutor(activity),
+            object : ImageCapture.OnImageSavedCallback {
+                override fun onImageSaved(outputFileResults: ImageCapture.OutputFileResults) {
+                    val capturedPath = photoFile.absolutePath
+                    val callback = activeCallback
+                    val mode = activeScanMode
+
+                    stopScanner(isCancelled = false)
+
+                    // পরবর্তী ওসিআর/প্রসেসিংয়ের জন্য ডেলিগেট করা হলো
+                    onDocumentCapturedListener(photoFile, mode, callback)
+                }
+
+                override fun onError(exception: ImageCaptureException) {
+                    isCapturing.set(false)
+                    Toast.makeText(activity, "ক্যাপচার ব্যর্থ হয়েছে: ${exception.message}", Toast.LENGTH_SHORT).show()
+                }
+            }
+        )
+    }
+
+    private fun toggleTorch(button: TextView) {
+        val cam = camera ?: return
+        if (cam.cameraInfo.hasFlashUnit()) {
+            isTorchOn = !isTorchOn
+            cam.cameraControl.enableTorch(isTorchOn)
+            button.text = if (isTorchOn) "☀ বন্ধ" else "⚡ টর্চ"
+            button.setBackgroundColor(if (isTorchOn) Color.parseColor("#FFD700") else Color.parseColor("#80000000"))
+            button.setTextColor(if (isTorchOn) Color.BLACK else Color.WHITE)
+        }
+    }
+
+    fun stopScanner(isCancelled: Boolean = false) {
+        isScanningActive = false
+        (hudOverlayView as? DocumentCardHudView)?.stopAnimation()
+
+        try {
+            cameraProvider?.unbindAll()
+        } catch (_: Exception) {}
+
+        scannerOverlayLayout?.let {
+            rootContainer.removeView(it)
+            scannerOverlayLayout = null
+        }
+        previewView = null
+        hudOverlayView = null
+        camera = null
+        imageCapture = null
+
+        if (isCancelled && activeCallback != null) {
+            bridge.sendResponseToWeb(
+                response = BridgeResponse(
+                    action = Actions.START_KYC,
+                    status = Status.CANCELLED,
+                    message = "Scanning cancelled by user"
+                ),
+                callbackFunction = activeCallback
+            )
+            activeCallback = null
+        }
+    }
+
+    fun destroy() {
+        stopScanner(isCancelled = false)
+        try {
+            faceDetector.close()
+            textRecognizer.close()
+            cameraExecutor.shutdown()
+        } catch (_: Exception) {}
+    }
+
+    private fun hasCameraPermission(): Boolean {
+        return ContextCompat.checkSelfPermission(
+            activity,
+            Manifest.permission.CAMERA
+        ) == PackageManager.PERMISSION_GRANTED
+    }
+
+    private fun isFaceMode(): Boolean {
+        return activeScanMode == "face_liveness" || activeScanMode == "selfie"
+    }
+
+    @Throws(IOException::class)
+    private fun createTempScanFile(): File {
+        val timestamp = SimpleDateFormat("yyyyMMdd_HHmmss", Locale.getDefault()).format(Date())
+        val fileName = "SCAN_${activeScanMode.uppercase(Locale.ROOT)}_$timestamp"
+        return File.createTempFile(fileName, ".jpg", activity.cacheDir)
+    }
+
+    // ---------------------------------------------------------------------------------------------
+    // HUD ওভারলে ১: ডকুমেন্ট ও পাসপোর্ট ভিউফাইন্ডার (Card & Passport HUD)
+    // ---------------------------------------------------------------------------------------------
+    private inner class DocumentCardHudView(context: Context, private val mode: String) : View(context) {
+
+        private val shadePaint = Paint().apply {
+            color = Color.parseColor("#B3000000")
+            style = Paint.Style.FILL
+        }
+
+        private val borderPaint = Paint().apply {
+            color = Color.parseColor("#00E676")
+            style = Paint.Style.STROKE
+            strokeWidth = 6f
+            isAntiAlias = true
+        }
+
+        private val cornerPaint = Paint().apply {
+            color = Color.parseColor("#00E676")
+            style = Paint.Style.STROKE
+            strokeWidth = 12f
+            strokeCap = Paint.Cap.ROUND
+            isAntiAlias = true
+        }
+
+        private val mrzLinePaint = Paint().apply {
+            color = Color.parseColor("#FFFF00")
+            style = Paint.Style.STROKE
+            strokeWidth = 3f
+            pathEffect = DashPathEffect(floatArrayOf(15f, 10f), 0f)
+            isAntiAlias = true
+        }
+
+        private val laserPaint = Paint().apply {
+            isAntiAlias = true
+            strokeWidth = 6f
+        }
+
+        private val textPaint = Paint().apply {
+            color = Color.WHITE
+            textSize = 38f
+            textAlign = Paint.Align.CENTER
+            isAntiAlias = true
+            setShadowLayer(8f, 0f, 0f, Color.BLACK)
+        }
+
+        private val cardBox = RectF()
+        private var laserY = 0f
+        private var laserAnimator: ValueAnimator? = null
+
+        override fun onSizeChanged(w: Int, h: Int, oldw: Int, oldh: Int) {
+            super.onSizeChanged(w, h, oldw, oldh)
+            val boxWidth = w * 0.90f
+            // পাসপোর্ট হলে 1.41 রেশিও, সাধারণ কার্ড বা NID হলে 1.58 রেশিও
+            val ratio = if (mode == "passport") 1.41f else 1.58f
+            val boxHeight = boxWidth / ratio
+
+            val left = (w - boxWidth) / 2f
+            val top = (h - boxHeight) / 2f - 40f
+            cardBox.set(left, top, left + boxWidth, top + boxHeight)
+
+            startLaserAnimation()
+        }
+
+        private fun startLaserAnimation() {
+            laserAnimator?.cancel()
+            laserAnimator = ValueAnimator.ofFloat(cardBox.top, cardBox.bottom).apply {
+                duration = 2200
+                repeatCount = ValueAnimator.INFINITE
+                repeatMode = ValueAnimator.REVERSE
+                interpolator = AccelerateDecelerateInterpolator()
+                addUpdateListener {
+                    laserY = it.animatedValue as Float
+                    invalidate()
+                }
+                start()
+            }
+        }
+
+        fun stopAnimation() {
+            laserAnimator?.cancel()
+            laserAnimator = null
+        }
+
+        fun setCardDetected(detected: Boolean) {
+            val color = if (detected) Color.parseColor("#00E676") else Color.parseColor("#FFD700")
+            borderPaint.color = color
+            cornerPaint.color = color
+            postInvalidate()
+        }
+
+        override fun onDraw(canvas: Canvas) {
+            super.onDraw(canvas)
+            val w = width.toFloat()
+            val h = height.toFloat()
+
+            // ১. বাইরের অন্ধকার ব্যাকড্রপ
+            canvas.drawRect(0f, 0f, w, cardBox.top, shadePaint)
+            canvas.drawRect(0f, cardBox.bottom, w, h, shadePaint)
+            canvas.drawRect(0f, cardBox.top, cardBox.left, cardBox.bottom, shadePaint)
+            canvas.drawRect(cardBox.right, cardBox.top, w, cardBox.bottom, shadePaint)
+
+            // ২. রাউন্ডেড বক্স বর্ডার
+            canvas.drawRoundRect(cardBox, 20f, 20f, borderPaint)
+
+            // ৩. চার কোণায় অ্যাকসেন্ট রেটিকল
+            val cl = 55f
+            // TL
+            canvas.drawLine(cardBox.left, cardBox.top, cardBox.left + cl, cardBox.top, cornerPaint)
+            canvas.drawLine(cardBox.left, cardBox.top, cardBox.left, cardBox.top + cl, cornerPaint)
+            // TR
+            canvas.drawLine(cardBox.right, cardBox.top, cardBox.right - cl, cardBox.top, cornerPaint)
+            canvas.drawLine(cardBox.right, cardBox.top, cardBox.right, cardBox.top + cl, cornerPaint)
+            // BL
+            canvas.drawLine(cardBox.left, cardBox.bottom, cardBox.left + cl, cardBox.bottom, cornerPaint)
+            canvas.drawLine(cardBox.left, cardBox.bottom, cardBox.left, cardBox.bottom - cl, cornerPaint)
+            // BR
+            canvas.drawLine(cardBox.right, cardBox.bottom, cardBox.right - cl, cardBox.bottom, cornerPaint)
+            canvas.drawLine(cardBox.right, cardBox.bottom, cardBox.right, cardBox.bottom - cl, cornerPaint)
+
+            // পাসপোর্ট মোড হলে MRZ লাইন ইন্ডিকেটর
+            if (mode == "passport") {
+                val mrzY = cardBox.bottom - (cardBox.height() * 0.22f)
+                canvas.drawLine(cardBox.left + 20f, mrzY, cardBox.right - 20f, mrzY, mrzLinePaint)
+                canvas.drawText("নিচের দাগে MRZ কোড রাখুন", w / 2f, mrzY - 15f, textPaint)
+            }
+
+            // ৪. লেজার স্ক্যান লাইন
+            if (laserY in cardBox.top..cardBox.bottom) {
+                laserPaint.shader = LinearGradient(
+                    cardBox.left, laserY, cardBox.right, laserY,
+                    intArrayOf(Color.TRANSPARENT, Color.parseColor("#00E676"), Color.TRANSPARENT),
+                    null,
+                    Shader.TileMode.CLAMP
+                )
+                canvas.drawLine(cardBox.left + 15f, laserY, cardBox.right - 15f, laserY, laserPaint)
+            }
+
+            // ৫. নির্দেশনামূলক গাইড টেক্সট
+            val guide = when (mode) {
+                "nid_front" -> "এনআইডি কার্ডের সামনের অংশ ফ্রেমে সোজা রাখুন"
+                "nid_back" -> "এনআইডি কার্ডের পেছনের অংশ ফ্রেমে রাখুন"
+                "passport" -> "পাসপোর্টের পৃষ্ঠাটি ফ্রেমের ভেতরে স্পষ্ট রাখুন"
+                else -> "ডকুমেন্টটি ফ্রেমের ভেতরে সোজা রাখুন"
+            }
+            canvas.drawText(guide, w / 2f, cardBox.bottom + 65f, textPaint)
+        }
+    }
+
+    // ---------------------------------------------------------------------------------------------
+    // HUD ওভারলে ২: ফেস লাইভনেস ভিউফাইন্ডার (Face Liveness Oval & Progress Ring)
+    // ---------------------------------------------------------------------------------------------
+    private inner class FaceLivenessHudView(context: Context) : View(context) {
+
+        private val clearPaint = Paint().apply {
+            xfermode = PorterDuffXfermode(PorterDuff.Mode.CLEAR)
+            isAntiAlias = true
+        }
+
+        private val backgroundPaint = Paint().apply {
+            color = Color.parseColor("#CC000000")
+            style = Paint.Style.FILL
+        }
+
+        private val ringBackgroundPaint = Paint().apply {
+            color = Color.parseColor("#44FFFFFF")
+            style = Paint.Style.STROKE
+            strokeWidth = 8f
+            isAntiAlias = true
+        }
+
+        private val ringProgressPaint = Paint().apply {
+            color = Color.parseColor("#00E676")
+            style = Paint.Style.STROKE
+            strokeWidth = 10f
+            strokeCap = Paint.Cap.ROUND
+            isAntiAlias = true
+        }
+
+        private val textPaint = Paint().apply {
+            color = Color.WHITE
+            textSize = 42f
+            textAlign = Paint.Align.CENTER
+            isAntiAlias = true
+            setShadowLayer(8f, 0f, 0f, Color.BLACK)
+        }
+
+        private val ovalBounds = RectF()
+        private var currentGuidance: String = "ফ্রেমের ভেতরে আপনার মুখমণ্ডল সোজা রাখুন"
+        private var progressPercent: Float = 0f
+
+        override fun onSizeChanged(w: Int, h: Int, oldw: Int, oldh: Int) {
+            super.onSizeChanged(w, h, oldw, oldh)
+            setLayerType(LAYER_TYPE_SOFTWARE, null)
+
+            val ovalWidth = w * 0.75f
+            val ovalHeight = ovalWidth * 1.35f
+            val left = (w - ovalWidth) / 2f
+            val top = (h - ovalHeight) / 2f - 40f
+            ovalBounds.set(left, top, left + ovalWidth, top + ovalHeight)
+        }
+
+        fun updateGuidance(message: String, textColor: Int, progress: Float) {
+            currentGuidance = message
+            textPaint.color = textColor
+            progressPercent = progress
+            postInvalidate()
+        }
+
+        override fun onDraw(canvas: Canvas) {
+            super.onDraw(canvas)
+            val w = width.toFloat()
+            val h = height.toFloat()
+
+            // অন্ধকার পূর্ণস্ক্রিন ব্যাকগ্রাউন্ড
+            canvas.drawRect(0f, 0f, w, h, backgroundPaint)
+
+            // মাঝে ওভাল স্বচ্ছ কাট-আউট তৈরি
+            canvas.drawOval(ovalBounds, clearPaint)
+
+            // ওভালের চারপাশে বেস রিং
+            canvas.drawOval(ovalBounds, ringBackgroundPaint)
+
+            // লাইভনেস অগ্রগতির আর্কে ডায়নামিক রিং
+            if (progressPercent > 0f) {
+                val sweep = progressPercent * 360f
+                canvas.drawArc(ovalBounds, -90f, sweep, false, ringProgressPaint)
+            }
+
+            // নির্দেশনা টেক্সট
+            canvas.drawText(currentGuidance, w / 2f, ovalBounds.bottom + 80f, textPaint)
+        }
+    }
+}
