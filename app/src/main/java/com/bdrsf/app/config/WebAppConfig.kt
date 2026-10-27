@@ -9,8 +9,8 @@ import android.webkit.WebView
 
 object WebAppConfig {
 
-    // আপনার যে ডোমেনটি ব্রাউজারে সক্রিয়ভাবে চলছে সেটি এখানে নিশ্চিত করুন
-    const val BASE_URL: String = "https://bdrsn.com"
+    // মূল কার্যকর ওয়েবসাইটের লাইভ ডোমেন URL
+    const val BASE_URL: String = "https://bdrsf.com"
     const val APP_USER_AGENT_TAG: String = "BDRSF-Android-NativeClient/1.0"
     const val JS_BRIDGE_NAME: String = "AndroidBridge"
 
@@ -18,35 +18,35 @@ object WebAppConfig {
     fun applyDefaultSettings(context: Context, webView: WebView) {
         val settings: WebSettings = webView.settings
 
-        // JavaScript & DOM Storage
+        // JavaScript ও DOM Storage সক্রিয়করণ
         settings.javaScriptEnabled = true
         settings.domStorageEnabled = true
         settings.databaseEnabled = true
 
-        // Viewport & Zoom Configuration
+        // ভিউপোর্ট ও উইন্ডো স্কেলিং
         settings.useWideViewPort = true
         settings.loadWithOverviewMode = true
         settings.setSupportZoom(false)
         settings.builtInZoomControls = false
         settings.displayZoomControls = false
 
-        // Cache Configuration
+        // ক্যাশ মোড (অনলাইন ফার্স্ট)
         settings.cacheMode = WebSettings.LOAD_DEFAULT
 
-        // File & Content Access
+        // ফাইল ও কনটেন্ট অ্যাক্সেস
         settings.allowFileAccess = false
         settings.allowContentAccess = true
 
-        // Mixed Content Security
+        // নিরাপদ HTTPS কানেকশন
         settings.mixedContentMode = WebSettings.MIXED_CONTENT_NEVER_ALLOW
 
-        // Custom User Agent Integration
+        // কাস্টম নেটিভ ইউজার এজেন্ট ট্যাগ ইন্টিগ্রেশন
         val defaultUserAgent: String = settings.userAgentString ?: ""
         if (!defaultUserAgent.contains(APP_USER_AGENT_TAG)) {
             settings.userAgentString = "$defaultUserAgent $APP_USER_AGENT_TAG"
         }
 
-        // Cookie Configuration
+        // কুকি পলিসি কনফিগারেশন
         setupCookies(webView)
     }
 
