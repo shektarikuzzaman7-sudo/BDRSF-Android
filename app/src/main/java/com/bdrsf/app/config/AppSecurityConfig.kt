@@ -1,3 +1,4 @@
+// File: app/src/main/java/com/bdrsf/app/config/AppSecurityConfig.kt
 package com.bdrsf.app.config
 
 import android.net.Uri
@@ -5,11 +6,11 @@ import java.util.Locale
 
 object AppSecurityConfig {
 
-    // বিশ্বস্ত মূল ডোমেন এবং অনুমোদিত সাব-ডোমেন তালিকা
+    // বিশ্বস্ত মূল ডোমেন এবং সাব-ডোমেন তালিকা
     private val WHITELISTED_DOMAINS: Set<String> = setOf(
-        "bdrsn.com",
-        "bdremittancesupportngo.com",
-        "intelwebhost.com"
+        "bdrsf.com",
+        "www.bdrsf.com",
+        "bdremittancesupportngo.com"
     )
 
     // অনুমোদিত পেমেন্ট গেটওয়ে হোস্ট তালিকা
@@ -40,10 +41,9 @@ object AppSecurityConfig {
         val host: String = uri.host?.lowercase(Locale.ROOT) ?: return false
         val scheme: String = uri.scheme?.lowercase(Locale.ROOT) ?: return false
 
-        // শুধু HTTPS রিকোয়েস্ট অনুমোদিত
+        // শুধু নিরাপদ HTTPS ট্রাফিক অনুমোদিত
         if (scheme != "https") return false
 
-        // ডোমেন অথবা সাব-ডোমেন চেক
         return WHITELISTED_DOMAINS.any { allowedDomain ->
             host == allowedDomain || host.endsWith(".$allowedDomain")
         }
