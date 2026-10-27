@@ -1,11 +1,12 @@
 <?xml version="1.0" encoding="utf-8"?>
-<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools">
 
-    <!-- Internet -->
+    <!-- ইন্টারনেট ও নেটওয়ার্ক স্টেট পারমিশন (এটি না থাকলে ERR_NAME_NOT_RESOLVED হয়) -->
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
 
-    <!-- Camera -->
+    <!-- ক্যামেরা ও হার্ডওয়্যার পারমিশন -->
     <uses-permission android:name="android.permission.CAMERA" />
     <uses-feature
         android:name="android.hardware.camera"
@@ -14,47 +15,60 @@
         android:name="android.hardware.camera.autofocus"
         android:required="false" />
 
-    <!-- Storage / Media -->
+    <!-- মিডিয়া ও স্টোরেজ পারমিশন -->
+    <uses-permission android:name="android.permission.READ_MEDIA_IMAGES" />
     <uses-permission
         android:name="android.permission.READ_EXTERNAL_STORAGE"
         android:maxSdkVersion="32" />
     <uses-permission
         android:name="android.permission.WRITE_EXTERNAL_STORAGE"
-        android:maxSdkVersion="29" />
-    <uses-permission android:name="android.permission.READ_MEDIA_IMAGES" />
+        android:maxSdkVersion="28"
+        tools:ignore="ScopedStorage" />
 
-    <!-- Notifications -->
-    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
-
-    <!-- Location -->
+    <!-- লোকেশন পারমিশন (ওয়েবভিউ জিও-লোকেশন) -->
     <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />
     <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" />
 
+    <!-- অন্যান্য অ্যাপ প্যাকেজ কোয়েরি (bKash, Nagad, WhatsApp Intent চালুর জন্য) -->
+    <queries>
+        <package android:name="com.bKash.customerapp" />
+        <package android:name="com.konasl.nagad" />
+        <package android:name="com.whatsapp" />
+        <intent>
+            <action android:name="android.intent.action.VIEW" />
+            <data android:scheme="https" />
+        </intent>
+        <intent>
+            <action android:name="android.intent.action.VIEW" />
+            <data android:scheme="tel" />
+        </intent>
+    </queries>
+
     <application
-        android:allowBackup="false"
-        android:fullBackupContent="false"
+        android:allowBackup="true"
         android:icon="@drawable/ic_launcher"
-        android:roundIcon="@drawable/ic_launcher"
         android:label="@string/app_name"
-        android:theme="@style/Theme.BDRSF"
-        android:supportsRtl="true"
-        android:usesCleartextTraffic="false"
         android:networkSecurityConfig="@xml/network_security_config"
-        android:requestLegacyExternalStorage="true">
+        android:roundIcon="@drawable/ic_launcher"
+        android:supportsRtl="true"
+        android:theme="@style/Theme.BDRSFAndroid"
+        android:usesCleartextTraffic="false"
+        tools:targetApi="35">
 
         <activity
             android:name=".MainActivity"
+            android:configChanges="orientation|screenSize|keyboardHidden"
             android:exported="true"
             android:screenOrientation="portrait"
             android:windowSoftInputMode="adjustResize"
-            android:configChanges="screenSize|smallestScreenSize|screenLayout|keyboardHidden|orientation">
-
+            tools:ignore="LockedOrientationActivity">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
         </activity>
 
+        <!-- ক্যামেরা ফটো এবং ফাইল চুজারের জন্য FileProvider -->
         <provider
             android:name="androidx.core.content.FileProvider"
             android:authorities="${applicationId}.fileprovider"
@@ -64,11 +78,6 @@
                 android:name="android.support.FILE_PROVIDER_PATHS"
                 android:resource="@xml/file_paths" />
         </provider>
-
-        <!-- ML Kit মডেলসমূহ অ্যাপ ইন্সটল হওয়ার সাথে সাথেই ব্যাকগ্রাউন্ডে প্রি-লোড রাখার ট্যাগ -->
-        <meta-data
-            android:name="com.google.mlkit.vision.DEPENDENCIES"
-            android:value="barcode,face,ocr" />
 
     </application>
 
