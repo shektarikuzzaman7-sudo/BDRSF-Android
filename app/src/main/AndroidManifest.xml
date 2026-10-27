@@ -2,11 +2,11 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
     xmlns:tools="http://schemas.android.com/tools">
 
-    <!-- ইন্টারনেট ও নেটওয়ার্ক স্টেট পারমিশন (এটি না থাকলে ERR_NAME_NOT_RESOLVED হয়) -->
+    <!-- ইন্টারনেট ও নেটওয়ার্ক স্টেট পারমিশন (ERR_NAME_NOT_RESOLVED সমাধান) -->
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
 
-    <!-- ক্যামেরা ও হার্ডওয়্যার পারমিশন -->
+    <!-- ক্যামেরা ও হার্ডওয়্যার ফিচার পারমিশন -->
     <uses-permission android:name="android.permission.CAMERA" />
     <uses-feature
         android:name="android.hardware.camera"
@@ -25,11 +25,11 @@
         android:maxSdkVersion="28"
         tools:ignore="ScopedStorage" />
 
-    <!-- লোকেশন পারমিশন (ওয়েবভিউ জিও-লোকেশন) -->
+    <!-- লোকেশন পারমিশন -->
     <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />
     <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" />
 
-    <!-- অন্যান্য অ্যাপ প্যাকেজ কোয়েরি (bKash, Nagad, WhatsApp Intent চালুর জন্য) -->
+    <!-- থার্ড পার্টি পেমেন্ট ও মেসেজিং অ্যাপ প্যাকেজ কোয়েরিজ -->
     <queries>
         <package android:name="com.bKash.customerapp" />
         <package android:name="com.konasl.nagad" />
@@ -68,7 +68,7 @@
             </intent-filter>
         </activity>
 
-        <!-- ক্যামেরা ফটো এবং ফাইল চুজারের জন্য FileProvider -->
+        <!-- ফাইল ও ক্যামেরা ফটো আপলোডের জন্য FileProvider -->
         <provider
             android:name="androidx.core.content.FileProvider"
             android:authorities="${applicationId}.fileprovider"
