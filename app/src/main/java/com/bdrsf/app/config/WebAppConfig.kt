@@ -1,14 +1,15 @@
+// File: app/src/main/java/com/bdrsf/app/config/WebAppConfig.kt
 package com.bdrsf.app.config
 
 import android.annotation.SuppressLint
 import android.content.Context
-import android.os.Build
 import android.webkit.CookieManager
 import android.webkit.WebSettings
 import android.webkit.WebView
 
 object WebAppConfig {
 
+    // আপনার যে ডোমেনটি ব্রাউজারে সক্রিয়ভাবে চলছে সেটি এখানে নিশ্চিত করুন
     const val BASE_URL: String = "https://bdrsn.com"
     const val APP_USER_AGENT_TAG: String = "BDRSF-Android-NativeClient/1.0"
     const val JS_BRIDGE_NAME: String = "AndroidBridge"
