@@ -8,8 +8,8 @@
     </base-config>
 
     <domain-config cleartextTrafficPermitted="false">
-        <domain includeSubdomains="true">bdrsn.com</domain>
         <domain includeSubdomains="true">bdrsf.com</domain>
+        <domain includeSubdomains="true">www.bdrsf.com</domain>
         <domain includeSubdomains="true">bdremittancesupportngo.com</domain>
         <trust-anchors>
             <certificates src="system" />
