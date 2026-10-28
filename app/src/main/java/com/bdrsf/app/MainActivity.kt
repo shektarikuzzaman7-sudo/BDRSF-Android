@@ -13,8 +13,6 @@ import android.os.Bundle
 import android.provider.MediaStore
 import android.view.Gravity
 import android.view.View
-import android.view.WindowInsets
-import android.view.WindowInsetsController
 import android.view.WindowManager
 import android.webkit.WebView
 import android.widget.FrameLayout
@@ -81,23 +79,36 @@ class MainActivity : AppCompatActivity(), AndroidBridge.BridgeActionHandler {
         setupBackNavigation()
 
         PermissionHelper.requestAllInitialPermissions(this)
-        hideSystemNavigationBar()
 
         // ওয়েবসাইট লোড শুরু
         webView.loadUrl(WebAppConfig.BASE_URL)
     }
 
     /**
-     * স্ট্যাটাস বার ও এজ-টু-এজ উইন্ডো ইনসেটস হ্যান্ডলিং
+     * স্ট্যাটাস বার ও নেভিগেশন বার ওয়েবসাইটের থিম কালার অনুযায়ী ফিক্সড রাখা
      */
     private fun setupSystemWindows() {
         try {
+            val themeColor = Color.parseColor("#0A2F1D")
             WindowCompat.setDecorFitsSystemWindows(window, false)
+
             @Suppress("DEPRECATION")
-            window.statusBarColor = Color.parseColor("#0A2F1D")
+            window.statusBarColor = themeColor
+
             @Suppress("DEPRECATION")
-            window.navigationBarColor = Color.BLACK
-            WindowInsetsControllerCompat(window, window.decorView).isAppearanceLightStatusBars = false
+            window.navigationBarColor = themeColor
+
+            // Android 10+ এ নেভিগেশন বারের ওপর সিস্টেমের ধূসর স্ক্রিম বন্ধ করা
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                window.isNavigationBarContrastEnforced = false
+                window.isStatusBarContrastEnforced = false
+            }
+
+            // ডার্ক গ্রিন ব্যাকগ্রাউন্ডে আইকনগুলো উজ্জ্বল/সাদা রাখা
+            val insetsController = WindowInsetsControllerCompat(window, window.decorView)
+            insetsController.isAppearanceLightStatusBars = false
+            insetsController.isAppearanceLightNavigationBars = false
+
             @Suppress("DEPRECATION")
             window.setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE)
         } catch (_: Exception) {}
@@ -112,12 +123,16 @@ class MainActivity : AppCompatActivity(), AndroidBridge.BridgeActionHandler {
             setBackgroundColor(Color.parseColor("#0A2F1D"))
         }
 
-        // কীবোর্ড (IME) ও স্ট্যাটাস বার ইনসেটস ডায়নামিক প্যাডিং
+        // স্ট্যাটাস বার, নেভিগেশন বার এবং কীবোর্ড (IME) ইনসেটস ডায়নামিক প্যাডিং
+        // এর ফলে ওয়েবসাইটের কনটেন্ট ফোনের ব্যাক/হোম বাটনের ঠিক ওপর পর্যন্ত থাকবে
         ViewCompat.setOnApplyWindowInsetsListener(mainLayout) { view, insets ->
             val statusBars = insets.getInsets(WindowInsetsCompat.Type.statusBars())
+            val navBars = insets.getInsets(WindowInsetsCompat.Type.navigationBars())
             val ime = insets.getInsets(WindowInsetsCompat.Type.ime())
-            view.setPadding(0, statusBars.top, 0, ime.bottom)
-            if (ime.bottom == 0) hideSystemNavigationBar()
+
+            val bottomInset = if (ime.bottom > 0) ime.bottom else navBars.bottom
+            view.setPadding(0, statusBars.top, 0, bottomInset)
+
             WindowInsetsCompat.CONSUMED
         }
 
@@ -376,22 +391,6 @@ class MainActivity : AppCompatActivity(), AndroidBridge.BridgeActionHandler {
         } else {
             super.onActivityResult(requestCode, resultCode, data)
         }
-    }
-
-    private fun hideSystemNavigationBar() {
-        try {
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
-                window.insetsController?.let {
-                    it.hide(WindowInsets.Type.navigationBars())
-                    // টাইপো ফিক্স করা হয়েছে: BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
-                    it.systemBarsBehavior = WindowInsetsController.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
-                }
-            } else {
-                @Suppress("DEPRECATION")
-                window.decorView.systemUiVisibility =
-                    (View.SYSTEM_UI_FLAG_HIDE_NAVIGATION or View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY)
-            }
-        } catch (_: Exception) {}
     }
 
     override fun onDestroy() {
