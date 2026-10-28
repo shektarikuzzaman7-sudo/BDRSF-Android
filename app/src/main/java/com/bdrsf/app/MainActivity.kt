@@ -45,6 +45,7 @@ import org.json.JSONObject
 
 /**
  * BDRSF-Android কেন্দ্রীয় কোঅর্ডিনেটর ও লাইফসাইকেল ম্যানেজার।
+ * এটি সম্পূর্ণ ডিকাপলড আর্কিটেকচারে ফিচার ক্লাসগুলোর মধ্যে সমন্বয় রক্ষা করে।
  */
 class MainActivity : AppCompatActivity(), AndroidBridge.BridgeActionHandler {
 
@@ -56,6 +57,7 @@ class MainActivity : AppCompatActivity(), AndroidBridge.BridgeActionHandler {
     private lateinit var splashLayout: FrameLayout
     private lateinit var webView: WebView
 
+    // ফিচার ও হেল্পার ক্লাসের রেফারেন্স
     private lateinit var androidBridge: AndroidBridge
     private lateinit var webViewClient: NativeWebViewClient
     private lateinit var webChromeClient: NativeWebChromeClient
@@ -81,9 +83,13 @@ class MainActivity : AppCompatActivity(), AndroidBridge.BridgeActionHandler {
         PermissionHelper.requestAllInitialPermissions(this)
         hideSystemNavigationBar()
 
+        // ওয়েবসাইট লোড শুরু
         webView.loadUrl(WebAppConfig.BASE_URL)
     }
 
+    /**
+     * স্ট্যাটাস বার ও এজ-টু-এজ উইন্ডো ইনসেটস হ্যান্ডলিং
+     */
     private fun setupSystemWindows() {
         try {
             WindowCompat.setDecorFitsSystemWindows(window, false)
@@ -106,6 +112,7 @@ class MainActivity : AppCompatActivity(), AndroidBridge.BridgeActionHandler {
             setBackgroundColor(Color.parseColor("#0A2F1D"))
         }
 
+        // কীবোর্ড (IME) ও স্ট্যাটাস বার ইনসেটস ডায়নামিক প্যাডিং
         ViewCompat.setOnApplyWindowInsetsListener(mainLayout) { view, insets ->
             val statusBars = insets.getInsets(WindowInsetsCompat.Type.statusBars())
             val ime = insets.getInsets(WindowInsetsCompat.Type.ime())
@@ -122,6 +129,7 @@ class MainActivity : AppCompatActivity(), AndroidBridge.BridgeActionHandler {
         }
         mainLayout.addView(webView)
 
+        // স্প্ল্যাশ স্ক্রিন ও ব্র্যান্ডিং লোডার
         splashLayout = FrameLayout(this).apply {
             layoutParams = RelativeLayout.LayoutParams(
                 RelativeLayout.LayoutParams.MATCH_PARENT,
@@ -174,6 +182,7 @@ class MainActivity : AppCompatActivity(), AndroidBridge.BridgeActionHandler {
             webView = webView
         )
 
+        // ডকুমেন্ট ক্যামেরা থেকে ছবি ক্যাপচার হলে ওসিআর ইঞ্জিনে ডেলিগেট করা হবে
         documentScannerFeature = DocumentScannerFeature(
             activity = this,
             rootContainer = mainLayout,
@@ -206,14 +215,15 @@ class MainActivity : AppCompatActivity(), AndroidBridge.BridgeActionHandler {
         webView.webViewClient = webViewClient
         webView.webChromeClient = webChromeClient
 
+        // ওয়েবভিউ থেকে ফাইল ডাউনলোডের লিসেনার
         webView.setDownloadListener { url, userAgent, contentDisposition, mimetype, _ ->
             downloadFeature.handleWebViewDownload(url, userAgent, contentDisposition, mimetype)
         }
     }
 
     /**
-     * ব্যাক বাটন নিয়ন্ত্রণ:
-     * ড্যাশবোর্ড বা হোম পেজে থাকলে অ্যাপ কখনোই কাটবে না; পুরানো ক্যাশ ডিলিট করে নতুন আপডেট রিলোড হবে।
+     * নেভিগেশন ব্যাক-প্রেস হ্যান্ডলিং:
+     * ড্যাশবোর্ড বা হোমে থাকলে অ্যাপ কখনোই বন্ধ হবে না; পুরানো ক্যাশ মুছে সাইট ফ্রেশ রিলোড হবে।
      */
     private fun setupBackNavigation() {
         onBackPressedDispatcher.addCallback(this, object : OnBackPressedCallback(true) {
@@ -373,7 +383,8 @@ class MainActivity : AppCompatActivity(), AndroidBridge.BridgeActionHandler {
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
                 window.insetsController?.let {
                     it.hide(WindowInsets.Type.navigationBars())
-                    it.systemBarsBehavior = WindowInsetsController.BEHAVIOR_SHOW_TRANSIENT_ARS_BY_SWIPE
+                    // টাইপো ফিক্স করা হয়েছে: BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
+                    it.systemBarsBehavior = WindowInsetsController.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
                 }
             } else {
                 @Suppress("DEPRECATION")
