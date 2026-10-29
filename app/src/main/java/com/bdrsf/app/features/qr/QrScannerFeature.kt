@@ -1,3 +1,4 @@
+// File: app/src/main/java/com/bdrsf/app/features/qr/QrScannerFeature.kt
 package com.bdrsf.app.features.qr
 
 import android.Manifest
@@ -5,8 +6,10 @@ import android.animation.ValueAnimator
 import android.annotation.SuppressLint
 import android.app.Activity
 import android.content.Context
+import android.content.Intent
 import android.content.pm.PackageManager
 import android.graphics.Bitmap
+import android.graphics.BitmapFactory
 import android.graphics.Canvas
 import android.graphics.Color
 import android.graphics.LinearGradient
@@ -19,9 +22,7 @@ import android.view.View
 import android.view.ViewGroup
 import android.view.animation.AccelerateDecelerateInterpolator
 import android.widget.FrameLayout
-import android.widget.ImageView
 import android.widget.TextView
-import android.widget.Toast
 import androidx.camera.core.Camera
 import androidx.camera.core.CameraSelector
 import androidx.camera.core.ImageAnalysis
@@ -52,7 +53,7 @@ import java.util.concurrent.atomic.AtomicBoolean
 
 /**
  * BDRSF সার্বজনীন QR ও মাল্টি-ফরম্যাট বারকোড স্ক্যানার ফিচার।
- * যেকোনো ওয়েব পেজ থেকে ক্যামেরা ও গ্যালারি উভয় মাধ্যমে স্ক্যান করতে পারে।
+ * bdrsf-bridge.js এর window.processScannedData ও onScanFailed এর সাথে সরাসরি যুক্ত।
  */
 class QrScannerFeature(
     private val activity: Activity,
@@ -68,6 +69,7 @@ class QrScannerFeature(
     private var hudView: ScannerHudView? = null
 
     private var activeCallback: String? = null
+    private var activeErrorCallback: String? = null
     private var isTorchOn: Boolean = false
     private val isProcessingResult = AtomicBoolean(false)
 
@@ -75,7 +77,6 @@ class QrScannerFeature(
     var isScanningActive: Boolean = false
         private set
 
-    // Google ML Kit মাল্টি-ফরম্যাট স্ক্যানার (QR + PDF417 + 1D Barcodes)
     private val mlKitScanner: BarcodeScanner by lazy {
         val options = BarcodeScannerOptions.Builder()
             .setBarcodeFormats(
@@ -94,16 +95,9 @@ class QrScannerFeature(
         BarcodeScanning.getClient(options)
     }
 
-    /**
-     * ক্যামেরা ভিউ সহ লাইভ স্ক্যানার চালু করে
-     */
     fun startScanner(payload: JSONObject, callback: String?) {
         if (!hasCameraPermission()) {
-            ActivityCompat.requestPermissions(
-                activity,
-                arrayOf(Manifest.permission.CAMERA),
-                1001
-            )
+            ActivityCompat.requestPermissions(activity, arrayOf(Manifest.permission.CAMERA), 1001)
             return
         }
 
@@ -112,11 +106,11 @@ class QrScannerFeature(
         activity.runOnUiThread {
             isScanningActive = true
             isProcessingResult.set(false)
-            activeCallback = callback
+            activeCallback = if (!callback.isNullOrBlank()) callback else payload.optString("callback", "processScannedData")
+            activeErrorCallback = payload.optString("errorCallback", "onScanFailed")
             isTorchOn = false
 
-            val promptText = payload.optString("prompt", "ফ্রেমের ভেতরে QR বা বারকোডটি রাখুন")
-
+            val promptText = payload.optString("prompt", "ফ্রেমের ভেতরে QR বা বারকোডটি সোজা রাখুন")
             buildScannerLayout(promptText)
             bindCameraProvider()
         }
@@ -126,30 +120,20 @@ class QrScannerFeature(
         val density = activity.resources.displayMetrics.density
 
         scannerOverlayLayout = FrameLayout(activity).apply {
-            layoutParams = FrameLayout.LayoutParams(
-                FrameLayout.LayoutParams.MATCH_PARENT,
-                FrameLayout.LayoutParams.MATCH_PARENT
-            )
+            layoutParams = FrameLayout.LayoutParams(FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT)
             setBackgroundColor(Color.BLACK)
         }
 
         previewView = PreviewView(activity).apply {
-            layoutParams = FrameLayout.LayoutParams(
-                FrameLayout.LayoutParams.MATCH_PARENT,
-                FrameLayout.LayoutParams.MATCH_PARENT
-            )
+            layoutParams = FrameLayout.LayoutParams(FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT)
         }
         scannerOverlayLayout?.addView(previewView)
 
         hudView = ScannerHudView(activity, promptText)
         scannerOverlayLayout?.addView(hudView)
 
-        // উপরের বার: বন্ধ করার বোতাম এবং ফ্ল্যাশলাইট বোতাম
         val topControlsLayout = FrameLayout(activity).apply {
-            layoutParams = FrameLayout.LayoutParams(
-                FrameLayout.LayoutParams.MATCH_PARENT,
-                (60 * density).toInt()
-            ).apply {
+            layoutParams = FrameLayout.LayoutParams(FrameLayout.LayoutParams.MATCH_PARENT, (60 * density).toInt()).apply {
                 topMargin = (35 * density).toInt()
                 leftMargin = (20 * density).toInt()
                 rightMargin = (20 * density).toInt()
@@ -162,10 +146,7 @@ class QrScannerFeature(
             textSize = 15f
             setPadding((14 * density).toInt(), (8 * density).toInt(), (14 * density).toInt(), (8 * density).toInt())
             setBackgroundColor(Color.parseColor("#80000000"))
-            layoutParams = FrameLayout.LayoutParams(
-                FrameLayout.LayoutParams.WRAP_CONTENT,
-                FrameLayout.LayoutParams.WRAP_CONTENT
-            ).apply {
+            layoutParams = FrameLayout.LayoutParams(FrameLayout.LayoutParams.WRAP_CONTENT, FrameLayout.LayoutParams.WRAP_CONTENT).apply {
                 gravity = Gravity.START or Gravity.CENTER_VERTICAL
             }
             setOnClickListener { stopScanner(isCancelled = true) }
@@ -178,10 +159,7 @@ class QrScannerFeature(
             textSize = 15f
             setPadding((14 * density).toInt(), (8 * density).toInt(), (14 * density).toInt(), (8 * density).toInt())
             setBackgroundColor(Color.parseColor("#80000000"))
-            layoutParams = FrameLayout.LayoutParams(
-                FrameLayout.LayoutParams.WRAP_CONTENT,
-                FrameLayout.LayoutParams.WRAP_CONTENT
-            ).apply {
+            layoutParams = FrameLayout.LayoutParams(FrameLayout.LayoutParams.WRAP_CONTENT, FrameLayout.LayoutParams.WRAP_CONTENT).apply {
                 gravity = Gravity.END or Gravity.CENTER_VERTICAL
             }
             setOnClickListener { toggleTorch(this) }
@@ -237,26 +215,15 @@ class QrScannerFeature(
                     val matchedBarcode = barcodes.firstOrNull { !it.rawValue.isNullOrBlank() }
                     if (matchedBarcode != null && isProcessingResult.compareAndSet(false, true)) {
                         val rawContent = matchedBarcode.rawValue ?: ""
-                        val formatName = getBarcodeFormatName(matchedBarcode.format)
-                        handleScanSuccess(rawContent, formatName)
+                        handleScanSuccess(rawContent)
                     }
                 }
-                .addOnFailureListener {
-                    // ফ্রেম প্রসেসিং এরর হলে নীরবে পরবর্তী ফ্রেম নিবে
-                }
-                .addOnCompleteListener {
-                    imageProxy.close()
-                }
+                .addOnCompleteListener { imageProxy.close() }
         }
 
         try {
             provider.unbindAll()
-            camera = provider.bindToLifecycle(
-                lifecycleOwner,
-                CameraSelector.DEFAULT_BACK_CAMERA,
-                preview,
-                imageAnalysis
-            )
+            camera = provider.bindToLifecycle(lifecycleOwner, CameraSelector.DEFAULT_BACK_CAMERA, preview, imageAnalysis)
         } catch (e: Exception) {
             Log.e("QrScannerFeature", "bindToLifecycle failed", e)
             stopScanner(isCancelled = true)
@@ -274,80 +241,57 @@ class QrScannerFeature(
         }
     }
 
-    private fun handleScanSuccess(rawContent: String, formatName: String) {
+    private fun handleScanSuccess(rawContent: String) {
         activity.runOnUiThread {
             stopScanner(isCancelled = false)
-
-            val data = JSONObject().apply {
-                put("content", rawContent)
-                put("format", formatName)
-            }
-
-            bridge.sendResponseToWeb(
-                response = BridgeResponse(
-                    action = Actions.SCAN_QR,
-                    status = Status.SUCCESS,
-                    data = data,
-                    message = "Code scanned successfully"
-                ),
-                callbackFunction = activeCallback
-            )
+            bridge.sendQrSuccessToWeb(activeCallback, rawContent)
         }
     }
 
-    /**
-     * গ্যালারি থেকে সিলেক্ট করা Bitmap ডিকোড করে (ML Kit ও ZXing ডুয়াল ইঞ্জিন)
-     */
+    fun handleGalleryResult(resultCode: Int, data: Intent?, callback: String?) {
+        val cb = if (!callback.isNullOrBlank()) callback else "processScannedData"
+        if (resultCode != Activity.RESULT_OK || data?.data == null) {
+            bridge.sendQrErrorToWeb("onScanFailed", "গ্যালারি থেকে কোনো ছবি নির্বাচন করা হয়নি")
+            return
+        }
+
+        try {
+            val imageUri = data.data!!
+            activity.contentResolver.openInputStream(imageUri)?.use { inputStream ->
+                val bitmap = BitmapFactory.decodeStream(inputStream)
+                if (bitmap != null) {
+                    decodeFromBitmap(bitmap, cb)
+                } else {
+                    bridge.sendQrErrorToWeb("onScanFailed", "ছবি লোড করা সম্ভব হয়নি")
+                }
+            }
+        } catch (e: Exception) {
+            bridge.sendQrErrorToWeb("onScanFailed", e.localizedMessage ?: "গ্যালারি প্রসেসিং ত্রুটি")
+        }
+    }
+
     fun decodeFromBitmap(bitmap: Bitmap, callback: String?) {
         val inputImage = InputImage.fromBitmap(bitmap, 0)
         mlKitScanner.process(inputImage)
             .addOnSuccessListener { barcodes ->
                 val matched = barcodes.firstOrNull { !it.rawValue.isNullOrBlank() }
                 if (matched != null) {
-                    val data = JSONObject().apply {
-                        put("content", matched.rawValue)
-                        put("format", getBarcodeFormatName(matched.format))
-                    }
-                    bridge.sendResponseToWeb(
-                        response = BridgeResponse(action = Actions.SCAN_QR, status = Status.SUCCESS, data = data),
-                        callbackFunction = callback
-                    )
+                    bridge.sendQrSuccessToWeb(callback, matched.rawValue ?: "")
                 } else {
-                    // ML Kit না পারলে ZXing MultiFormat ফলব্যাক চেষ্টা করবে
                     val zxingResult = decodeWithZxingFallback(bitmap)
                     if (zxingResult != null) {
-                        val data = JSONObject().apply {
-                            put("content", zxingResult)
-                            put("format", "ZXING_FALLBACK")
-                        }
-                        bridge.sendResponseToWeb(
-                            response = BridgeResponse(action = Actions.SCAN_QR, status = Status.SUCCESS, data = data),
-                            callbackFunction = callback
-                        )
+                        bridge.sendQrSuccessToWeb(callback, zxingResult)
                     } else {
-                        bridge.sendResponseToWeb(
-                            response = BridgeResponse(action = Actions.SCAN_QR, status = Status.ERROR, message = "ছবিতে কোনো কোড সনাক্ত করা যায়নি"),
-                            callbackFunction = callback
-                        )
+                        bridge.sendQrErrorToWeb("onScanFailed", "ছবিতে কোনো সঠিক কিউআর বা বারকোড পাওয়া যায়নি")
                     }
                 }
             }
             .addOnFailureListener {
                 val zxingResult = decodeWithZxingFallback(bitmap)
                 if (zxingResult != null) {
-                    val data = JSONObject().apply {
-                        put("content", zxingResult)
-                        put("format", "ZXING_FALLBACK")
-                    }
-                    bridge.sendResponseToWeb(
-                        response = BridgeResponse(action = Actions.SCAN_QR, status = Status.SUCCESS, data = data),
-                        callbackFunction = callback
-                    )
+                    bridge.sendQrSuccessToWeb(callback, zxingResult)
                 } else {
-                    bridge.sendResponseToWeb(
-                        response = BridgeResponse(action = Actions.SCAN_QR, status = Status.ERROR, message = "বারকোড প্রসেসিং ব্যর্থ হয়েছে"),
-                        callbackFunction = callback
-                    )
+                    bridge.sendQrErrorToWeb("onScanFailed", "বারকোড প্রসেসিং ব্যর্থ হয়েছে")
                 }
             }
     }
@@ -370,7 +314,6 @@ class QrScannerFeature(
                     com.google.zxing.BarcodeFormat.CODE_39
                 )
             )
-
             MultiFormatReader().decode(binaryBitmap, hints).text
         } catch (_: Exception) {
             null
@@ -394,15 +337,9 @@ class QrScannerFeature(
         camera = null
 
         if (isCancelled && activeCallback != null) {
-            bridge.sendResponseToWeb(
-                response = BridgeResponse(
-                    action = Actions.SCAN_QR,
-                    status = Status.CANCELLED,
-                    message = "Scanner closed by user"
-                ),
-                callbackFunction = activeCallback
-            )
+            bridge.sendQrErrorToWeb(activeErrorCallback, "স্ক্যানার ব্যবহারকারী দ্বারা বাতিল করা হয়েছে")
             activeCallback = null
+            activeErrorCallback = null
         }
     }
 
@@ -415,54 +352,14 @@ class QrScannerFeature(
     }
 
     private fun hasCameraPermission(): Boolean {
-        return ContextCompat.checkSelfPermission(
-            activity,
-            Manifest.permission.CAMERA
-        ) == PackageManager.PERMISSION_GRANTED
+        return ContextCompat.checkSelfPermission(activity, Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED
     }
 
-    private fun getBarcodeFormatName(format: Int): String {
-        return when (format) {
-            Barcode.FORMAT_QR_CODE -> "QR_CODE"
-            Barcode.FORMAT_PDF417 -> "PDF417"
-            Barcode.FORMAT_CODE_128 -> "CODE_128"
-            Barcode.FORMAT_CODE_39 -> "CODE_39"
-            Barcode.FORMAT_DATA_MATRIX -> "DATA_MATRIX"
-            Barcode.FORMAT_EAN_13 -> "EAN_13"
-            else -> "BARCODE_$format"
-        }
-    }
-
-    /**
-     * কাস্টম ভিউফাইন্ডার ওভারলে: অ্যানিমেটেড স্ক্যানিং লেজার ও ফোকাস কর্নার
-     */
     private inner class ScannerHudView(context: Context, private val guideText: String) : View(context) {
-
-        private val shadePaint = Paint().apply {
-            color = Color.parseColor("#99000000")
-            style = Paint.Style.FILL
-        }
-
-        private val cornerPaint = Paint().apply {
-            color = Color.parseColor("#00E676")
-            style = Paint.Style.STROKE
-            strokeWidth = 10f
-            strokeCap = Paint.Cap.ROUND
-            isAntiAlias = true
-        }
-
-        private val laserPaint = Paint().apply {
-            isAntiAlias = true
-            strokeWidth = 6f
-        }
-
-        private val textPaint = Paint().apply {
-            color = Color.WHITE
-            textSize = 40f
-            textAlign = Paint.Align.CENTER
-            isAntiAlias = true
-            setShadowLayer(8f, 0f, 0f, Color.BLACK)
-        }
+        private val shadePaint = Paint().apply { color = Color.parseColor("#99000000"); style = Paint.Style.FILL }
+        private val cornerPaint = Paint().apply { color = Color.parseColor("#00E676"); style = Paint.Style.STROKE; strokeWidth = 10f; strokeCap = Paint.Cap.ROUND; isAntiAlias = true }
+        private val laserPaint = Paint().apply { isAntiAlias = true; strokeWidth = 6f }
+        private val textPaint = Paint().apply { color = Color.WHITE; textSize = 38f; textAlign = Paint.Align.CENTER; isAntiAlias = true; setShadowLayer(8f, 0f, 0f, Color.BLACK) }
 
         private var scanBox = RectF()
         private var laserY = 0f
@@ -474,7 +371,6 @@ class QrScannerFeature(
             val left = (w - boxSize) / 2f
             val top = (h - boxSize) / 2f
             scanBox.set(left, top, left + boxSize, top + boxSize)
-
             startLaserAnimation()
         }
 
@@ -503,28 +399,21 @@ class QrScannerFeature(
             val w = width.toFloat()
             val h = height.toFloat()
 
-            // ১. চারপাশের অন্ধকার শেড
             canvas.drawRect(0f, 0f, w, scanBox.top, shadePaint)
             canvas.drawRect(0f, scanBox.bottom, w, h, shadePaint)
             canvas.drawRect(0f, scanBox.top, scanBox.left, scanBox.bottom, shadePaint)
             canvas.drawRect(scanBox.right, scanBox.top, w, scanBox.bottom, shadePaint)
 
-            // ২. চার কোণার মার্কার
             val cornerLen = 50f
-            // Top-Left
             canvas.drawLine(scanBox.left, scanBox.top, scanBox.left + cornerLen, scanBox.top, cornerPaint)
             canvas.drawLine(scanBox.left, scanBox.top, scanBox.left, scanBox.top + cornerLen, cornerPaint)
-            // Top-Right
             canvas.drawLine(scanBox.right, scanBox.top, scanBox.right - cornerLen, scanBox.top, cornerPaint)
             canvas.drawLine(scanBox.right, scanBox.top, scanBox.right, scanBox.top + cornerLen, cornerPaint)
-            // Bottom-Left
             canvas.drawLine(scanBox.left, scanBox.bottom, scanBox.left + cornerLen, scanBox.bottom, cornerPaint)
             canvas.drawLine(scanBox.left, scanBox.bottom, scanBox.left, scanBox.bottom - cornerLen, cornerPaint)
-            // Bottom-Right
             canvas.drawLine(scanBox.right, scanBox.bottom, scanBox.right - cornerLen, scanBox.bottom, cornerPaint)
             canvas.drawLine(scanBox.right, scanBox.bottom, scanBox.right, scanBox.bottom - cornerLen, cornerPaint)
 
-            // ৩. অ্যানিমেটেড লেজার রশ্মি
             if (laserY in scanBox.top..scanBox.bottom) {
                 laserPaint.shader = LinearGradient(
                     scanBox.left, laserY, scanBox.right, laserY,
@@ -535,7 +424,6 @@ class QrScannerFeature(
                 canvas.drawLine(scanBox.left + 10f, laserY, scanBox.right - 10f, laserY, laserPaint)
             }
 
-            // ৪. নির্দেশনামূলক টেক্সট
             canvas.drawText(guideText, w / 2f, scanBox.bottom + 70f, textPaint)
         }
     }
