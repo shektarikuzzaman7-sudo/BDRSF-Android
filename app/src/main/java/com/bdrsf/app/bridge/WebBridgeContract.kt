@@ -1,99 +1,136 @@
+// File: app/src/main/java/com/bdrsf/app/bridge/WebBridgeContract.kt
 package com.bdrsf.app.bridge
 
 import org.json.JSONObject
 
 /**
- * Web-to-Native ইন্টারফেসের ইউনিভার্সাল কন্ট্রাক্ট এবং ডাটা ট্রান্সফার অবজেক্ট (DTO)।
- * এটি ওয়েব থেকে পাঠানো JSON রিকোয়েস্ট পার্স এবং ওয়েবে রেসপন্স ফরম্যাট করার দায়িত্ব পালন করে।
+ * BDRSF ওয়েব-টু-নেটিভ সার্বজনীন কন্ট্রাক্ট ও অ্যাকশন রেজিস্ট্রি।
+ * bdrsf-bridge.js এর সাথে শতভাগ সংগতিপূর্ণ।
  */
 object WebBridgeContract {
 
-    // নেটিভ ফিচারের জন্য অ্যাকশন কনস্ট্যান্ট
     object Actions {
         const val SCAN_QR = "SCAN_QR"
+        const val PICK_GALLERY_QR = "PICK_GALLERY_QR"
         const val START_KYC = "START_KYC"
+        const val CLEAR_KYC_CACHE = "CLEAR_KYC_CACHE"
+        const val SHOW_TOAST = "SHOW_TOAST"
         const val DOWNLOAD_FILE = "DOWNLOAD_FILE"
         const val SHARE_CONTENT = "SHARE_CONTENT"
-        const val GET_APP_INFO = "GET_APP_INFO"
-        const val SHOW_TOAST = "SHOW_TOAST"
         const val OPEN_EXTERNAL_URL = "OPEN_EXTERNAL_URL"
+        const val GET_APP_INFO = "GET_APP_INFO"
+        const val CLEAR_WEBVIEW_HISTORY = "CLEAR_WEBVIEW_HISTORY"
+        const val HANDLE_BACK_PRESS = "HANDLE_BACK_PRESS"
+        const val SET_SYSTEM_BARS = "SET_SYSTEM_BARS"
+        const val TRIGGER_HAPTIC = "TRIGGER_HAPTIC"
+        const val FORCE_REFRESH = "FORCE_REFRESH"
+        const val PROCESS_SAVED_DOCUMENTS = "PROCESS_SAVED_DOCUMENTS"
     }
 
-    // রেসপন্স স্ট্যাটাস কনস্ট্যান্ট
     object Status {
         const val SUCCESS = "SUCCESS"
         const val ERROR = "ERROR"
         const val CANCELLED = "CANCELLED"
     }
 
-    /**
-     * ওয়েব থেকে প্রাপ্ত রিকোয়েস্ট মডেল
-     */
-    data class BridgeRequest(
-        val action: String,
-        val payload: JSONObject,
-        val callbackFunction: String? = null
-    ) {
-        companion object {
-            fun fromJson(jsonString: String?): BridgeRequest {
-                if (jsonString.isNullOrBlank()) {
-                    return BridgeRequest(action = "UNKNOWN", payload = JSONObject())
-                }
-                return try {
-                    val root = JSONObject(jsonString)
-                    val action = root.optString("action", "UNKNOWN")
-                    val payload = root.optJSONObject("payload") ?: JSONObject()
-                    val callback = root.optString("callback", "").takeIf { it.isNotBlank() }
-                    BridgeRequest(action = action, payload = payload, callbackFunction = callback)
-                } catch (_: Exception) {
-                    BridgeRequest(action = "UNKNOWN", payload = JSONObject())
-                }
-            }
-        }
-    }
-
-    /**
-     * নেটিভ থেকে ওয়েবে পাঠানোর রেসপন্স মডেল
-     */
     data class BridgeResponse(
         val action: String,
         val status: String,
         val data: JSONObject? = null,
-        val message: String? = null
+        val message: String = ""
     ) {
         fun toJsonString(): String {
-            val root = JSONObject()
-            root.put("action", action)
-            root.put("status", status)
-            if (data != null) {
-                root.put("data", data)
-            } else {
-                root.put("data", JSONObject())
-            }
-            if (!message.isNullOrBlank()) {
-                root.put("message", message)
-            }
-            return root.toString()
+            return JSONObject().apply {
+                put("action", action)
+                put("status", status)
+                put("data", data ?: JSONObject())
+                put("message", message)
+            }.toString()
         }
     }
 
-    /**
-     * ওয়েবভিউতে কলব্যাক চালানোর জন্য এক্সিকিউটেবল JavaScript কোড প্রস্তুত করে।
-     * যদি কাস্টম কলব্যাক ফাংশনের নাম দেওয়া থাকে, তবে সেটিতে কল করবে;
-     * অন্যথায় ডিফল্ট window.onNativeResponse(action, status, data) মেথড ট্রিগার করবে।
-     */
-    fun buildCallbackScript(callbackFunction: String?, response: BridgeResponse): String {
-        val jsonPayload = response.toJsonString()
-        val escapedJson = jsonPayload
-            .replace("\\", "\\\\")
+    fun escapeJsString(text: String): String {
+        return text.replace("\\", "\\\\")
             .replace("'", "\\'")
+            .replace("\"", "\\\"")
             .replace("\n", "\\n")
             .replace("\r", "\\r")
+    }
 
-        return if (!callbackFunction.isNullOrBlank()) {
-            "javascript:(function() { if (typeof window['$callbackFunction'] === 'function') { window['$callbackFunction'](JSON.parse('$escapedJson')); } else if (typeof window.onNativeResponse === 'function') { window.onNativeResponse(JSON.parse('$escapedJson')); } })();"
-        } else {
-            "javascript:(function() { if (typeof window.onNativeResponse === 'function') { window.onNativeResponse(JSON.parse('$escapedJson')); } })();"
-        }
+    /**
+     * স্ট্যান্ডার্ড ব্রিজ রেসপন্স স্ক্রিপ্ট বিল্ডার
+     */
+    fun buildCallbackScript(callbackName: String, response: BridgeResponse): String {
+        val safeJson = escapeJsString(response.toJsonString())
+        return """
+            (function() {
+                try {
+                    var cbName = '${escapeJsString(callbackName)}';
+                    var payload = JSON.parse('$safeJson');
+                    if (cbName && typeof window[cbName] === 'function') {
+                        window[cbName](payload);
+                    }
+                } catch(e) {
+                    console.error('[Bridge Callback Error]', e);
+                }
+            })();
+        """.trimIndent()
+    }
+
+    /**
+     * কিউআর স্ক্যান সফল হওয়ার গ্লোবাল লিসেনার স্ক্রিপ্ট বিল্ডার
+     * bdrsf-bridge.js এর window.processScannedData, window.onNativeQrScanned এবং window.onQrScanned কে সিঙ্ক করে।
+     */
+    fun buildQrSuccessScripts(callbackName: String?, scannedContent: String): String {
+        val safeText = escapeJsString(scannedContent)
+        val customCb = callbackName?.trim() ?: ""
+        return """
+            (function() {
+                try {
+                    var text = '$safeText';
+                    if (typeof window.onNativeQrScanned === 'function') {
+                        window.onNativeQrScanned(text);
+                    } else if (typeof window.onQrScanned === 'function') {
+                        window.onQrScanned(text);
+                    } else if (typeof window.processScannedData === 'function') {
+                        window.processScannedData(text);
+                    }
+                    var custom = '${escapeJsString(customCb)}';
+                    if (custom && custom !== 'processScannedData' && typeof window[custom] === 'function') {
+                        window[custom](text);
+                    }
+                } catch(e) {
+                    console.error('[QR Success Dispatch Error]', e);
+                }
+            })();
+        """.trimIndent()
+    }
+
+    /**
+     * কিউআর স্ক্যান ব্যর্থ হওয়ার গ্লোবাল লিসেনার স্ক্রিপ্ট বিল্ডার
+     */
+    fun buildQrErrorScripts(errorCallbackName: String?, errorMessage: String): String {
+        val safeErr = escapeJsString(errorMessage)
+        val customCb = errorCallbackName?.trim() ?: ""
+        return """
+            (function() {
+                try {
+                    var err = '$safeErr';
+                    if (typeof window.onNativeQrScanFailed === 'function') {
+                        window.onNativeQrScanFailed(err);
+                    } else if (typeof window.onQrScanFailed === 'function') {
+                        window.onQrScanFailed(err);
+                    } else if (typeof window.onScanFailed === 'function') {
+                        window.onScanFailed(err);
+                    }
+                    var custom = '${escapeJsString(customCb)}';
+                    if (custom && custom !== 'onScanFailed' && typeof window[custom] === 'function') {
+                        window[custom](err);
+                    }
+                } catch(e) {
+                    console.error('[QR Error Dispatch Error]', e);
+                }
+            })();
+        """.trimIndent()
     }
 }
