@@ -4,7 +4,6 @@ package com.bdrsf.app
 import android.app.Activity
 import android.content.Intent
 import android.content.pm.ActivityInfo
-import android.graphics.BitmapFactory
 import android.graphics.Color
 import android.graphics.PorterDuff
 import android.net.Uri
@@ -12,6 +11,7 @@ import android.os.Build
 import android.os.Bundle
 import android.provider.MediaStore
 import android.view.Gravity
+import android.view.HapticFeedbackConstants
 import android.view.View
 import android.view.WindowManager
 import android.webkit.WebView
@@ -43,7 +43,7 @@ import org.json.JSONObject
 
 /**
  * BDRSF-Android কেন্দ্রীয় কোঅর্ডিনেটর ও লাইফসাইকেল ম্যানেজার।
- * এটি সম্পূর্ণ ডিকাপলড আর্কিটেকচারে ফিচার ক্লাসগুলোর মধ্যে সমন্বয় রক্ষা করে।
+ * bdrsf-bridge.js এর সমস্ত অ্যাকশন নির্ভুলভাবে রাউট করে।
  */
 class MainActivity : AppCompatActivity(), AndroidBridge.BridgeActionHandler {
 
@@ -55,7 +55,6 @@ class MainActivity : AppCompatActivity(), AndroidBridge.BridgeActionHandler {
     private lateinit var splashLayout: FrameLayout
     private lateinit var webView: WebView
 
-    // ফিচার ও হেল্পার ক্লাসের রেফারেন্স
     private lateinit var androidBridge: AndroidBridge
     private lateinit var webViewClient: NativeWebViewClient
     private lateinit var webChromeClient: NativeWebChromeClient
@@ -66,6 +65,7 @@ class MainActivity : AppCompatActivity(), AndroidBridge.BridgeActionHandler {
     private lateinit var ocrProcessorFeature: OcrProcessorFeature
 
     private var pendingGalleryQrCallback: String? = null
+    private var lastBackPressTime: Long = 0L
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -79,14 +79,9 @@ class MainActivity : AppCompatActivity(), AndroidBridge.BridgeActionHandler {
         setupBackNavigation()
 
         PermissionHelper.requestAllInitialPermissions(this)
-
-        // ওয়েবসাইট লোড শুরু
         webView.loadUrl(WebAppConfig.BASE_URL)
     }
 
-    /**
-     * স্ট্যাটাস বার ও নেভিগেশন বার ওয়েবসাইটের থিম কালার অনুযায়ী ফিক্সড রাখা
-     */
     private fun setupSystemWindows() {
         try {
             val themeColor = Color.parseColor("#0A2F1D")
@@ -98,13 +93,11 @@ class MainActivity : AppCompatActivity(), AndroidBridge.BridgeActionHandler {
             @Suppress("DEPRECATION")
             window.navigationBarColor = themeColor
 
-            // Android 10+ এ নেভিগেশন বারের ওপর সিস্টেমের ধূসর স্ক্রিম বন্ধ করা
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
                 window.isNavigationBarContrastEnforced = false
                 window.isStatusBarContrastEnforced = false
             }
 
-            // ডার্ক গ্রিন ব্যাকগ্রাউন্ডে আইকনগুলো উজ্জ্বল/সাদা রাখা
             val insetsController = WindowInsetsControllerCompat(window, window.decorView)
             insetsController.isAppearanceLightStatusBars = false
             insetsController.isAppearanceLightNavigationBars = false
@@ -116,15 +109,10 @@ class MainActivity : AppCompatActivity(), AndroidBridge.BridgeActionHandler {
 
     private fun initViews() {
         mainLayout = RelativeLayout(this).apply {
-            layoutParams = RelativeLayout.LayoutParams(
-                RelativeLayout.LayoutParams.MATCH_PARENT,
-                RelativeLayout.LayoutParams.MATCH_PARENT
-            )
+            layoutParams = RelativeLayout.LayoutParams(RelativeLayout.LayoutParams.MATCH_PARENT, RelativeLayout.LayoutParams.MATCH_PARENT)
             setBackgroundColor(Color.parseColor("#0A2F1D"))
         }
 
-        // স্ট্যাটাস বার, নেভিগেশন বার এবং কীবোর্ড (IME) ইনসেটস ডায়নামিক প্যাডিং
-        // এর ফলে ওয়েবসাইটের কনটেন্ট ফোনের ব্যাক/হোম বাটনের ঠিক ওপর পর্যন্ত থাকবে
         ViewCompat.setOnApplyWindowInsetsListener(mainLayout) { view, insets ->
             val statusBars = insets.getInsets(WindowInsetsCompat.Type.statusBars())
             val navBars = insets.getInsets(WindowInsetsCompat.Type.navigationBars())
@@ -132,33 +120,23 @@ class MainActivity : AppCompatActivity(), AndroidBridge.BridgeActionHandler {
 
             val bottomInset = if (ime.bottom > 0) ime.bottom else navBars.bottom
             view.setPadding(0, statusBars.top, 0, bottomInset)
-
             WindowInsetsCompat.CONSUMED
         }
 
         webView = WebView(this).apply {
-            layoutParams = RelativeLayout.LayoutParams(
-                RelativeLayout.LayoutParams.MATCH_PARENT,
-                RelativeLayout.LayoutParams.MATCH_PARENT
-            )
+            layoutParams = RelativeLayout.LayoutParams(RelativeLayout.LayoutParams.MATCH_PARENT, RelativeLayout.LayoutParams.MATCH_PARENT)
         }
         mainLayout.addView(webView)
 
-        // স্প্ল্যাশ স্ক্রিন ও ব্র্যান্ডিং লোডার
         splashLayout = FrameLayout(this).apply {
-            layoutParams = RelativeLayout.LayoutParams(
-                RelativeLayout.LayoutParams.MATCH_PARENT,
-                RelativeLayout.LayoutParams.MATCH_PARENT
-            )
+            layoutParams = RelativeLayout.LayoutParams(RelativeLayout.LayoutParams.MATCH_PARENT, RelativeLayout.LayoutParams.MATCH_PARENT)
             setBackgroundColor(Color.parseColor("#0A2F1D"))
         }
 
         val density = resources.displayMetrics.density
         val loaderSizePx = (155 * density).toInt()
         val circularProgressBar = ProgressBar(this, null, android.R.attr.progressBarStyleLarge).apply {
-            layoutParams = FrameLayout.LayoutParams(loaderSizePx, loaderSizePx).apply {
-                gravity = Gravity.CENTER
-            }
+            layoutParams = FrameLayout.LayoutParams(loaderSizePx, loaderSizePx).apply { gravity = Gravity.CENTER }
             try {
                 @Suppress("DEPRECATION")
                 indeterminateDrawable.setColorFilter(Color.parseColor("#FFD700"), PorterDuff.Mode.SRC_IN)
@@ -168,9 +146,7 @@ class MainActivity : AppCompatActivity(), AndroidBridge.BridgeActionHandler {
 
         val logoSizePx = (130 * density).toInt()
         val logoImageView = ImageView(this).apply {
-            layoutParams = FrameLayout.LayoutParams(logoSizePx, logoSizePx).apply {
-                gravity = Gravity.CENTER
-            }
+            layoutParams = FrameLayout.LayoutParams(logoSizePx, logoSizePx).apply { gravity = Gravity.CENTER }
             val logoResId = resources.getIdentifier("ic_logo", "drawable", packageName)
             if (logoResId != 0) setImageResource(logoResId)
         }
@@ -184,28 +160,12 @@ class MainActivity : AppCompatActivity(), AndroidBridge.BridgeActionHandler {
         androidBridge = AndroidBridge(this, webView, this)
         downloadFeature = DownloadFeature(this)
         shareFeature = ShareFeature(this)
+        qrScannerFeature = QrScannerFeature(this, mainLayout, androidBridge)
+        ocrProcessorFeature = OcrProcessorFeature(this, androidBridge, webView)
 
-        qrScannerFeature = QrScannerFeature(
-            activity = this,
-            rootContainer = mainLayout,
-            bridge = androidBridge
-        )
-
-        ocrProcessorFeature = OcrProcessorFeature(
-            activity = this,
-            bridge = androidBridge,
-            webView = webView
-        )
-
-        // ডকুমেন্ট ক্যামেরা থেকে ছবি ক্যাপচার হলে ওসিআর ইঞ্জিনে ডেলিগেট করা হবে
-        documentScannerFeature = DocumentScannerFeature(
-            activity = this,
-            rootContainer = mainLayout,
-            bridge = androidBridge,
-            onDocumentCapturedListener = { capturedFile, scanMode, callback ->
-                ocrProcessorFeature.processDocumentFile(capturedFile, scanMode, callback)
-            }
-        )
+        documentScannerFeature = DocumentScannerFeature(this, mainLayout, androidBridge) { capturedFile, scanMode, callback ->
+            ocrProcessorFeature.processDocumentFile(capturedFile, scanMode, callback)
+        }
 
         webViewClient = NativeWebViewClient(
             activity = this,
@@ -221,7 +181,7 @@ class MainActivity : AppCompatActivity(), AndroidBridge.BridgeActionHandler {
             }
         )
 
-        webChromeClient = NativeWebChromeClient(activity = this)
+        webChromeClient = NativeWebChromeClient(this)
     }
 
     private fun setupWebView() {
@@ -230,33 +190,36 @@ class MainActivity : AppCompatActivity(), AndroidBridge.BridgeActionHandler {
         webView.webViewClient = webViewClient
         webView.webChromeClient = webChromeClient
 
-        // ওয়েবভিউ থেকে ফাইল ডাউনলোডের লিসেনার
         webView.setDownloadListener { url, userAgent, contentDisposition, mimetype, _ ->
             downloadFeature.handleWebViewDownload(url, userAgent, contentDisposition, mimetype)
         }
     }
 
     /**
-     * নেভিগেশন ব্যাক-প্রেস হ্যান্ডলিং:
-     * ড্যাশবোর্ড বা হোমে থাকলে অ্যাপ কখনোই বন্ধ হবে না; পুরানো ক্যাশ মুছে সাইট ফ্রেশ রিলোড হবে।
+     * ব্যাক-বাটন হ্যান্ডলিং:
+     * bdrsf-bridge.js এর window.onAndroidBackPressed() কে প্রথমে সুযোগ দেয়।
+     * যদি পেজে কোনো ব্যাক-হ্যান্ডলার না থাকে তবে স্বাভাবিক হিস্ট্রি অথবা ডাবল-ট্যাপ এক্সিট রান করে।
      */
     private fun setupBackNavigation() {
         onBackPressedDispatcher.addCallback(this, object : OnBackPressedCallback(true) {
             override fun handleOnBackPressed() {
                 when {
-                    qrScannerFeature.isScanningActive -> {
-                        qrScannerFeature.stopScanner(isCancelled = true)
-                    }
-                    documentScannerFeature.isScanningActive -> {
-                        documentScannerFeature.stopScanner(isCancelled = true)
-                    }
+                    qrScannerFeature.isScanningActive -> qrScannerFeature.stopScanner(isCancelled = true)
+                    documentScannerFeature.isScanningActive -> documentScannerFeature.stopScanner(isCancelled = true)
                     else -> {
-                        val currentUrl = webView.url ?: ""
-                        if (WebAppConfig.isHomeOrDashboard(currentUrl) || !webView.canGoBack()) {
-                            Toast.makeText(this@MainActivity, "রিফ্রেশ হচ্ছে...", Toast.LENGTH_SHORT).show()
-                            WebAppConfig.forceRefreshWithCacheBypass(webView)
-                        } else {
-                            webView.goBack()
+                        webView.evaluateJavascript(
+                            "(function() { if (typeof window.onAndroidBackPressed === 'function') { window.onAndroidBackPressed(); return true; } return false; })();"
+                        ) { result ->
+                            val handledByWeb = result == "true"
+                            if (!handledByWeb) {
+                                runOnUiThread {
+                                    if (WebAppConfig.isHomeOrDashboard(webView.url) || !webView.canGoBack()) {
+                                        onHandleBackPressRequested()
+                                    } else {
+                                        webView.goBack()
+                                    }
+                                }
+                            }
                         }
                     }
                 }
@@ -264,7 +227,6 @@ class MainActivity : AppCompatActivity(), AndroidBridge.BridgeActionHandler {
         })
     }
 
-    // অ্যাপ মিনিমাইজ বা কেটে দিলে লগইন সেশন ও কুকি সংরক্ষণ
     override fun onPause() {
         super.onPause()
         WebAppConfig.syncCookies()
@@ -283,15 +245,36 @@ class MainActivity : AppCompatActivity(), AndroidBridge.BridgeActionHandler {
         qrScannerFeature.startScanner(payload, callback)
     }
 
+    override fun onPickGalleryQrRequested(payload: JSONObject, callback: String?) {
+        pendingGalleryQrCallback = callback
+        val intent = Intent(Intent.ACTION_PICK, MediaStore.Images.Media.EXTERNAL_CONTENT_URI).apply {
+            type = "image/*"
+        }
+        try {
+            @Suppress("DEPRECATION")
+            startActivityForResult(intent, RC_GALLERY_QR)
+        } catch (_: Exception) {
+            Toast.makeText(this, "গ্যালারি ওপেন করা যায়নি", Toast.LENGTH_SHORT).show()
+        }
+    }
+
     override fun onStartKycRequested(payload: JSONObject, callback: String?) {
         val actionType = payload.optString("actionType", "").lowercase()
-        val docType = payload.optString("docType", "NID")
+        val docType = payload.optString("documentType", payload.optString("docType", "NID"))
 
         if (actionType == "process_hybrid" || actionType == "submit") {
             ocrProcessorFeature.processSavedDocumentsHybrid(docType, callback)
         } else {
             documentScannerFeature.startScanner(payload, callback)
         }
+    }
+
+    override fun onClearKycCacheRequested(callback: String?) {
+        ocrProcessorFeature.clearCache()
+        androidBridge.sendResponseToWeb(
+            BridgeResponse(action = Actions.CLEAR_KYC_CACHE, status = Status.SUCCESS, message = "Cache cleared"),
+            callback
+        )
     }
 
     override fun onDownloadFileRequested(payload: JSONObject, callback: String?) {
@@ -303,7 +286,9 @@ class MainActivity : AppCompatActivity(), AndroidBridge.BridgeActionHandler {
     }
 
     override fun onShowToastRequested(message: String) {
-        Toast.makeText(this, message, Toast.LENGTH_SHORT).show()
+        if (message.isNotBlank()) {
+            Toast.makeText(this, message, Toast.LENGTH_SHORT).show()
+        }
     }
 
     override fun onOpenExternalUrlRequested(url: String) {
@@ -317,77 +302,99 @@ class MainActivity : AppCompatActivity(), AndroidBridge.BridgeActionHandler {
         }
     }
 
+    override fun onGetAppInfoRequested(callback: String?) {
+        try {
+            val pInfo = packageManager.getPackageInfo(packageName, 0)
+            val info = JSONObject().apply {
+                put("packageName", packageName)
+                put("versionName", pInfo.versionName ?: "1.0.0")
+                put("versionCode", if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) pInfo.longVersionCode else pInfo.versionCode.toLong())
+                put("osVersion", Build.VERSION.RELEASE)
+                put("sdkVersion", Build.VERSION.SDK_INT)
+                put("deviceModel", "${Build.MANUFACTURER} ${Build.MODEL}")
+                put("isNative", true)
+            }
+            val cb = if (!callback.isNullOrBlank()) callback else "onAppInfoReceived"
+            androidBridge.sendResponseToWeb(
+                BridgeResponse(action = Actions.GET_APP_INFO, status = Status.SUCCESS, data = info),
+                cb
+            )
+        } catch (e: Exception) {
+            androidBridge.sendResponseToWeb(
+                BridgeResponse(action = Actions.GET_APP_INFO, status = Status.ERROR, message = e.localizedMessage ?: "Error"),
+                callback
+            )
+        }
+    }
+
+    override fun onClearWebviewHistoryRequested() {
+        webView.clearHistory()
+    }
+
+    override fun onHandleBackPressRequested() {
+        val currentTime = System.currentTimeMillis()
+        if (currentTime - lastBackPressTime < 2000L) {
+            finish()
+        } else {
+            lastBackPressTime = currentTime
+            Toast.makeText(this, "অ্যাপ থেকে বের হতে আবার ব্যাক প্রেস করুন", Toast.LENGTH_SHORT).show()
+        }
+    }
+
+    override fun onSetSystemBarsRequested(statusBarColor: String, navBarColor: String, lightIcons: Boolean) {
+        try {
+            val sColor = Color.parseColor(statusBarColor)
+            val nColor = Color.parseColor(navBarColor)
+            window.statusBarColor = sColor
+            window.navigationBarColor = nColor
+            mainLayout.setBackgroundColor(sColor)
+            val insetsController = WindowInsetsControllerCompat(window, window.decorView)
+            insetsController.isAppearanceLightStatusBars = lightIcons
+            insetsController.isAppearanceLightNavigationBars = lightIcons
+        } catch (_: Exception) {}
+    }
+
+    override fun onTriggerHapticRequested(type: String) {
+        try {
+            when (type.lowercase()) {
+                "light" -> mainLayout.performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP)
+                "medium" -> mainLayout.performHapticFeedback(HapticFeedbackConstants.VIRTUAL_KEY)
+                "heavy" -> mainLayout.performHapticFeedback(HapticFeedbackConstants.LONG_PRESS)
+                "error", "warning" -> {
+                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                        mainLayout.performHapticFeedback(HapticFeedbackConstants.REJECT)
+                    } else {
+                        mainLayout.performHapticFeedback(HapticFeedbackConstants.LONG_PRESS)
+                    }
+                }
+                else -> mainLayout.performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP)
+            }
+        } catch (_: Exception) {}
+    }
+
     override fun onCustomActionRequested(action: String, payload: JSONObject, callback: String?) {
         when (action) {
-            "PICK_GALLERY_QR" -> {
-                pendingGalleryQrCallback = callback
-                val intent = Intent(Intent.ACTION_PICK, MediaStore.Images.Media.EXTERNAL_CONTENT_URI).apply {
-                    type = "image/*"
-                }
-                try {
-                    @Suppress("DEPRECATION")
-                    startActivityForResult(intent, RC_GALLERY_QR)
-                } catch (_: Exception) {
-                    Toast.makeText(this, "গ্যালারি ওপেন করা যায়নি", Toast.LENGTH_SHORT).show()
-                }
-            }
-            "CLEAR_KYC_CACHE" -> {
-                ocrProcessorFeature.clearCache()
-                androidBridge.sendResponseToWeb(
-                    response = BridgeResponse(action = action, status = Status.SUCCESS, message = "Cache cleared"),
-                    callbackFunction = callback
-                )
-            }
+            "FORCE_REFRESH" -> WebAppConfig.forceRefreshWithCacheBypass(webView)
             "PROCESS_SAVED_DOCUMENTS" -> {
                 val docType = payload.optString("docType", "NID")
                 ocrProcessorFeature.processSavedDocumentsHybrid(docType, callback)
             }
-            "FORCE_REFRESH" -> {
-                WebAppConfig.forceRefreshWithCacheBypass(webView)
-            }
             else -> {
                 androidBridge.sendResponseToWeb(
-                    response = BridgeResponse(action = action, status = Status.ERROR, message = "Unknown action: $action"),
-                    callbackFunction = callback
+                    BridgeResponse(action = action, status = Status.ERROR, message = "Unknown action: $action"),
+                    callback
                 )
             }
         }
     }
-
-    // ---------------------------------------------------------------------------------------------
-    // অ্যাক্টিভিটি রেজাল্ট ডেলিগেশন
-    // ---------------------------------------------------------------------------------------------
 
     @Deprecated("Deprecated in Java")
     override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
         if (requestCode == NativeWebChromeClient.FILE_CHOOSER_REQUEST_CODE) {
             webChromeClient.handleFileChooserResult(requestCode, resultCode, data)
         } else if (requestCode == RC_GALLERY_QR) {
-            if (resultCode == Activity.RESULT_OK && data?.data != null) {
-                try {
-                    val imageUri = data.data!!
-                    contentResolver.openInputStream(imageUri)?.use { inputStream ->
-                        val bitmap = BitmapFactory.decodeStream(inputStream)
-                        if (bitmap != null) {
-                            qrScannerFeature.decodeFromBitmap(bitmap, pendingGalleryQrCallback)
-                        } else {
-                            androidBridge.sendResponseToWeb(
-                                response = BridgeResponse(action = Actions.SCAN_QR, status = Status.ERROR, message = "ইমেজ লোড ব্যর্থ"),
-                                callbackFunction = pendingGalleryQrCallback
-                            )
-                        }
-                    }
-                } catch (e: Exception) {
-                    androidBridge.sendResponseToWeb(
-                        response = BridgeResponse(action = Actions.SCAN_QR, status = Status.ERROR, message = e.localizedMessage ?: "Error"),
-                        callbackFunction = pendingGalleryQrCallback
-                    )
-                } finally {
-                    pendingGalleryQrCallback = null
-                }
-            } else {
-                pendingGalleryQrCallback = null
-            }
+            qrScannerFeature.handleGalleryResult(resultCode, data, pendingGalleryQrCallback)
+            pendingGalleryQrCallback = null
         } else {
             super.onActivityResult(requestCode, resultCode, data)
         }
