@@ -1,11 +1,12 @@
+// File: app/src/main/java/com/bdrsf/app/features/download/DownloadFeature.kt
 package com.bdrsf.app.features.download
 
-import android.app.Activity
 import android.app.DownloadManager
 import android.content.Context
 import android.net.Uri
 import android.os.Environment
 import android.webkit.CookieManager
+import android.webkit.MimeTypeMap
 import android.webkit.URLUtil
 import android.widget.Toast
 import com.bdrsf.app.bridge.AndroidBridge
@@ -13,124 +14,89 @@ import com.bdrsf.app.bridge.WebBridgeContract.Actions
 import com.bdrsf.app.bridge.WebBridgeContract.BridgeResponse
 import com.bdrsf.app.bridge.WebBridgeContract.Status
 import org.json.JSONObject
-import java.io.File
 
 /**
- * ওয়েবভিউ ও ব্রিজ থেকে ফাইল ডাউনলোড পরিচালনার জন্য স্বয়ংসম্পূর্ণ ফিচার ক্লাস।
+ * BDRSF সার্বজনীন ডাউনলোড ফিচার।
+ * ওয়েবভিউ ডিরেক্ট ডাউনলোড এবং bdrsf-bridge.js এর DOWNLOAD_FILE হ্যান্ডল করে।
  */
-class DownloadFeature(
-    private val activity: Activity
-) {
+class DownloadFeature(private val context: Context) {
 
-    private val downloadManager: DownloadManager by lazy {
-        activity.getSystemService(Context.DOWNLOAD_SERVICE) as DownloadManager
+    fun handleBridgeDownload(payload: JSONObject, callback: String?, bridge: AndroidBridge) {
+        val url = payload.optString("url", "").trim()
+        val fileName = payload.optString("fileName", "download").trim()
+        val mimeType = payload.optString("mimeType", "application/octet-stream").trim()
+
+        if (url.isBlank()) {
+            bridge.sendResponseToWeb(
+                BridgeResponse(action = Actions.DOWNLOAD_FILE, status = Status.ERROR, message = "ডাউনলোড ইউআরএল পাওয়া যায়নি"),
+                callback
+            )
+            return
+        }
+
+        val success = executeDownload(url, null, null, mimeType, fileName)
+        if (success) {
+            bridge.sendResponseToWeb(
+                BridgeResponse(action = Actions.DOWNLOAD_FILE, status = Status.SUCCESS, message = "ডাউনলোড শুরু হয়েছে"),
+                callback
+            )
+        } else {
+            bridge.sendResponseToWeb(
+                BridgeResponse(action = Actions.DOWNLOAD_FILE, status = Status.ERROR, message = "ডাউনলোড শুরু করা সম্ভব হয়নি"),
+                callback
+            )
+        }
     }
 
-    /**
-     * WebView এর setDownloadListener থেকে কল করা হয়
-     */
     fun handleWebViewDownload(
         url: String?,
         userAgent: String?,
         contentDisposition: String?,
         mimetype: String?
     ) {
-        if (url.isNullOrBlank()) {
-            Toast.makeText(activity, "ডাউনলোড লিঙ্ক সঠিক নয়", Toast.LENGTH_SHORT).show()
-            return
-        }
-
-        try {
-            val fileName = URLUtil.guessFileName(url, contentDisposition, mimetype)
-            enqueueDownload(url, fileName, userAgent, mimetype)
-            Toast.makeText(activity, "ডাউনলোড শুরু হয়েছে: $fileName", Toast.LENGTH_SHORT).show()
-        } catch (e: Exception) {
-            Toast.makeText(activity, "ডাউনলোড শুরু করা যায়নি", Toast.LENGTH_SHORT).show()
-        }
+        if (url.isNullOrBlank()) return
+        executeDownload(url, userAgent, contentDisposition, mimetype, null)
     }
 
-    /**
-     * AndroidBridge এর executeFeature("DOWNLOAD_FILE") থেকে কল করা হয়
-     */
-    fun handleBridgeDownload(
-        payload: JSONObject,
-        callback: String?,
-        bridge: AndroidBridge
-    ) {
-        val url = payload.optString("url", "")
-        val customName = payload.optString("fileName", "")
-
-        if (url.isBlank()) {
-            bridge.sendResponseToWeb(
-                response = BridgeResponse(
-                    action = Actions.DOWNLOAD_FILE,
-                    status = Status.ERROR,
-                    message = "URL parameter is missing"
-                ),
-                callbackFunction = callback
-            )
-            return
-        }
-
-        try {
-            val fileName = if (customName.isNotBlank()) customName else URLUtil.guessFileName(url, null, null)
-            val downloadId = enqueueDownload(url, fileName, null, null)
-
-            val data = JSONObject().apply {
-                put("downloadId", downloadId)
-                put("fileName", fileName)
-            }
-
-            bridge.sendResponseToWeb(
-                response = BridgeResponse(
-                    action = Actions.DOWNLOAD_FILE,
-                    status = Status.SUCCESS,
-                    data = data,
-                    message = "Download queued successfully"
-                ),
-                callbackFunction = callback
-            )
-            Toast.makeText(activity, "ডাউনলোড শুরু হয়েছে: $fileName", Toast.LENGTH_SHORT).show()
-        } catch (e: Exception) {
-            bridge.sendResponseToWeb(
-                response = BridgeResponse(
-                    action = Actions.DOWNLOAD_FILE,
-                    status = Status.ERROR,
-                    message = e.localizedMessage ?: "Download failed"
-                ),
-                callbackFunction = callback
-            )
-        }
-    }
-
-    private fun enqueueDownload(
+    private fun executeDownload(
         url: String,
-        fileName: String,
         userAgent: String?,
-        mimeType: String?
-    ): Long {
-        val request = DownloadManager.Request(Uri.parse(url)).apply {
-            setTitle(fileName)
-            setDescription("BDRSF ফাইল ডাউনলোড হচ্ছে...")
-            setNotificationVisibility(DownloadManager.Request.VISIBILITY_VISIBLE_NOTIFY_COMPLETED)
-            setDestinationInExternalPublicDir(Environment.DIRECTORY_DOWNLOADS, fileName)
-            setAllowedOverMetered(true)
-            setAllowedOverRoaming(true)
-
-            if (!mimeType.isNullOrBlank()) {
-                setMimeType(mimeType)
+        contentDisposition: String?,
+        mimetype: String?,
+        customFileName: String?
+    ): Boolean {
+        return try {
+            val resolvedFileName = if (!customFileName.isNullOrBlank()) {
+                if (!customFileName.contains(".")) {
+                    val ext = MimeTypeMap.getSingleton().getExtensionFromMimeType(mimetype) ?: "pdf"
+                    "$customFileName.$ext"
+                } else customFileName
+            } else {
+                URLUtil.guessFileName(url, contentDisposition, mimetype)
             }
 
-            val cookies = CookieManager.getInstance().getCookie(url)
-            if (!cookies.isNullOrEmpty()) {
-                addRequestHeader("Cookie", cookies)
+            val request = DownloadManager.Request(Uri.parse(url)).apply {
+                setMimeType(mimetype ?: "application/octet-stream")
+                val cookies = CookieManager.getInstance().getCookie(url)
+                if (!cookies.isNullOrBlank()) {
+                    addRequestHeader("cookie", cookies)
+                }
+                if (!userAgent.isNullOrBlank()) {
+                    addRequestHeader("User-Agent", userAgent)
+                }
+                setDescription("ফাইল ডাউনলোড হচ্ছে...")
+                setTitle(resolvedFileName)
+                setNotificationVisibility(DownloadManager.Request.VISIBILITY_VISIBLE_NOTIFY_COMPLETED)
+                setDestinationInExternalPublicDir(Environment.DIRECTORY_DOWNLOADS, resolvedFileName)
             }
 
-            if (!userAgent.isNullOrBlank()) {
-                addRequestHeader("User-Agent", userAgent)
-            }
+            val downloadManager = context.getSystemService(Context.DOWNLOAD_SERVICE) as DownloadManager
+            downloadManager.enqueue(request)
+            Toast.makeText(context, "ডাউনলোড শুরু হয়েছে: $resolvedFileName", Toast.LENGTH_SHORT).show()
+            true
+        } catch (e: Exception) {
+            Toast.makeText(context, "ডাউনলোড ব্যর্থ হয়েছে", Toast.LENGTH_SHORT).show()
+            false
         }
-
-        return downloadManager.enqueue(request)
     }
 }
