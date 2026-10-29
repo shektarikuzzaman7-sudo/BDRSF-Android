@@ -1,188 +1,174 @@
+// File: app/src/main/java/com/bdrsf/app/bridge/AndroidBridge.kt
 package com.bdrsf.app.bridge
 
-import android.content.Context
+import android.app.Activity
 import android.os.Build
 import android.os.Handler
 import android.os.Looper
+import android.util.Log
 import android.webkit.JavascriptInterface
 import android.webkit.WebView
 import com.bdrsf.app.bridge.WebBridgeContract.Actions
 import com.bdrsf.app.bridge.WebBridgeContract.BridgeResponse
-import com.bdrsf.app.bridge.WebBridgeContract.Status
 import org.json.JSONObject
-import java.lang.ref.WeakReference
 
 /**
- * BDRSF-Android ইউনিভার্সাল ওয়েব-টু-নেটিভ ব্রিজ।
- * ওয়েবের জাভাস্ক্রিপ্ট এবং অ্যান্ড্রয়েড নেটিভ লেয়ারের মধ্যে একক গেটওয়ে হিসেবে কাজ করে।
+ * BDRSF থ্রেড-সেফ জাভাস্ক্রিপ্ট গেটওয়ে।
+ * ওয়েবের সমস্ত executeFeature কল গ্রহণ করে UI থ্রেডে ব্রিজ হ্যান্ডলারকে পাঠায়।
  */
 class AndroidBridge(
-    private val context: Context,
-    webView: WebView,
+    private val activity: Activity,
+    private val webView: WebView,
     private val actionHandler: BridgeActionHandler
 ) {
 
-    private val webViewRef: WeakReference<WebView> = WeakReference(webView)
-    private val mainHandler: Handler = Handler(Looper.getMainLooper())
+    private val mainHandler = Handler(Looper.getMainLooper())
 
-    /**
-     * বিভিন্ন ফিচারের সাথে সংযোগ স্থাপনের অ্যাকশন হ্যান্ডলার ইন্টারফেস
-     */
     interface BridgeActionHandler {
         fun onScanQrRequested(payload: JSONObject, callback: String?)
+        fun onPickGalleryQrRequested(payload: JSONObject, callback: String?)
         fun onStartKycRequested(payload: JSONObject, callback: String?)
+        fun onClearKycCacheRequested(callback: String?)
         fun onDownloadFileRequested(payload: JSONObject, callback: String?)
         fun onShareContentRequested(payload: JSONObject, callback: String?)
         fun onShowToastRequested(message: String)
         fun onOpenExternalUrlRequested(url: String)
+        fun onGetAppInfoRequested(callback: String?)
+        fun onClearWebviewHistoryRequested()
+        fun onHandleBackPressRequested()
+        fun onSetSystemBarsRequested(statusBarColor: String, navBarColor: String, lightIcons: Boolean)
+        fun onTriggerHapticRequested(type: String)
         fun onCustomActionRequested(action: String, payload: JSONObject, callback: String?)
     }
 
     /**
-     * ইউনিভার্সাল মেথড: ওয়েব থেকে যেকোনো নেটিভ ফিচারের জন্য রিকোয়েস্ট গ্রহণ করা।
-     * জাভাস্ক্রিপ্ট সিনট্যাক্স: AndroidBridge.executeFeature(actionName, payloadJson, callbackJsFunction)
+     * bdrsf-bridge.js এর মূল ইউনিভার্সাল এক্সিকিউশন মেথড
      */
     @JavascriptInterface
-    fun executeFeature(actionName: String?, payloadJson: String?, callbackJsFunction: String?) {
-        val action = actionName?.trim() ?: "UNKNOWN"
+    fun executeFeature(actionName: String?, payloadJson: String?, callbackName: String?) {
+        if (actionName.isNullOrBlank()) return
+
         val payload = try {
             if (!payloadJson.isNullOrBlank()) JSONObject(payloadJson) else JSONObject()
         } catch (_: Exception) {
             JSONObject()
         }
-        val callback = callbackJsFunction?.trim()?.takeIf { it.isNotBlank() }
+
+        val cb = callbackName?.trim()
 
         mainHandler.post {
-            when (action) {
-                Actions.SCAN_QR -> actionHandler.onScanQrRequested(payload, callback)
-                Actions.START_KYC -> actionHandler.onStartKycRequested(payload, callback)
-                Actions.DOWNLOAD_FILE -> actionHandler.onDownloadFileRequested(payload, callback)
-                Actions.SHARE_CONTENT -> actionHandler.onShareContentRequested(payload, callback)
+            when (actionName.trim()) {
+                Actions.SCAN_QR -> actionHandler.onScanQrRequested(payload, cb)
+                Actions.PICK_GALLERY_QR -> actionHandler.onPickGalleryQrRequested(payload, cb)
+                Actions.START_KYC -> actionHandler.onStartKycRequested(payload, cb)
+                Actions.CLEAR_KYC_CACHE -> actionHandler.onClearKycCacheRequested(cb)
+                Actions.DOWNLOAD_FILE -> actionHandler.onDownloadFileRequested(payload, cb)
+                Actions.SHARE_CONTENT -> actionHandler.onShareContentRequested(payload, cb)
                 Actions.SHOW_TOAST -> {
                     val msg = payload.optString("message", "")
-                    if (msg.isNotBlank()) {
-                        actionHandler.onShowToastRequested(msg)
-                    }
+                    actionHandler.onShowToastRequested(msg)
                 }
                 Actions.OPEN_EXTERNAL_URL -> {
                     val url = payload.optString("url", "")
-                    if (url.isNotBlank()) {
-                        actionHandler.onOpenExternalUrlRequested(url)
-                    }
+                    actionHandler.onOpenExternalUrlRequested(url)
                 }
-                Actions.GET_APP_INFO -> {
-                    sendResponseToWeb(
-                        response = BridgeResponse(
-                            action = Actions.GET_APP_INFO,
-                            status = Status.SUCCESS,
-                            data = getAppInfoJson()
-                        ),
-                        callbackFunction = callback
-                    )
+                Actions.GET_APP_INFO -> actionHandler.onGetAppInfoRequested(cb)
+                Actions.CLEAR_WEBVIEW_HISTORY -> actionHandler.onClearWebviewHistoryRequested()
+                Actions.HANDLE_BACK_PRESS -> actionHandler.onHandleBackPressRequested()
+                Actions.SET_SYSTEM_BARS -> {
+                    val statusBar = payload.optString("statusBarColor", "#0A2F1D")
+                    val navBar = payload.optString("navBarColor", "#0A2F1D")
+                    val lightIcons = payload.optBoolean("lightIcons", false)
+                    actionHandler.onSetSystemBarsRequested(statusBar, navBar, lightIcons)
                 }
-                else -> actionHandler.onCustomActionRequested(action, payload, callback)
+                Actions.TRIGGER_HAPTIC -> {
+                    val type = payload.optString("type", "light")
+                    actionHandler.onTriggerHapticRequested(type)
+                }
+                else -> actionHandler.onCustomActionRequested(actionName, payload, cb)
             }
         }
     }
 
-    /**
-     * শর্টকাট মেথড: সরাসরি কিউআর স্ক্যানার চালু করার জন্য।
-     * জাভাস্ক্রিপ্ট সিনট্যাক্স: AndroidBridge.startQrScanner('PaymentPage')
-     */
+    // ---------------------------------------------------------------------------------------------
+    // bdrsf-bridge.js এর সরাসরি ফলব্যাক মেথডসমূহ
+    // ---------------------------------------------------------------------------------------------
+
     @JavascriptInterface
-    fun startQrScanner(sourcePage: String?) {
-        val payload = JSONObject()
-        if (!sourcePage.isNullOrBlank()) {
-            payload.put("sourcePage", sourcePage)
-        }
-        mainHandler.post {
-            actionHandler.onScanQrRequested(payload, null)
-        }
+    fun startNativeMLKitScanner() {
+        executeFeature(Actions.SCAN_QR, "{}", "processScannedData")
     }
 
-    /**
-     * শর্টকাট মেথড: ফাইল ডাউনলোডের জন্য।
-     * জাভাস্ক্রিপ্ট সিনট্যাক্স: AndroidBridge.downloadFile(url, fileName)
-     */
     @JavascriptInterface
-    fun downloadFile(url: String?, fileName: String?) {
-        if (url.isNullOrBlank()) return
-        val payload = JSONObject().apply {
-            put("url", url)
-            if (!fileName.isNullOrBlank()) {
-                put("fileName", fileName)
-            }
-        }
-        mainHandler.post {
-            actionHandler.onDownloadFileRequested(payload, null)
-        }
+    fun startNativeGalleryPicker() {
+        executeFeature(Actions.PICK_GALLERY_QR, "{}", "processScannedData")
     }
 
-    /**
-     * শর্টকাট মেথড: টেক্সট শেয়ার করার জন্য।
-     * জাভাস্ক্রিপ্ট সিনট্যাক্স: AndroidBridge.shareContent(text)
-     */
-    @JavascriptInterface
-    fun shareContent(text: String?) {
-        if (text.isNullOrBlank()) return
-        val payload = JSONObject().apply {
-            put("text", text)
-        }
-        mainHandler.post {
-            actionHandler.onShareContentRequested(payload, null)
-        }
-    }
-
-    /**
-     * শর্টকাট মেথড: নেটিভ টোস্ট নোটিফিকেশন প্রদর্শন।
-     * জাভাস্ক্রিপ্ট সিনট্যাক্স: AndroidBridge.showToast(message)
-     */
     @JavascriptInterface
     fun showToast(message: String?) {
-        if (message.isNullOrBlank()) return
-        mainHandler.post {
-            actionHandler.onShowToastRequested(message)
-        }
+        val payload = JSONObject().apply { put("message", message ?: "") }
+        executeFeature(Actions.SHOW_TOAST, payload.toString(), "")
     }
 
-    /**
-     * অ্যাপ ইনফরমেশন JSON স্ট্রিং হিসেবে ওয়েবে প্রদান করে।
-     */
+    @JavascriptInterface
+    fun downloadFile(url: String?, fileName: String?) {
+        val payload = JSONObject().apply {
+            put("url", url ?: "")
+            put("fileName", fileName ?: "download")
+        }
+        executeFeature(Actions.DOWNLOAD_FILE, payload.toString(), "")
+    }
+
+    @JavascriptInterface
+    fun clearKycCache() {
+        executeFeature(Actions.CLEAR_KYC_CACHE, "{}", "")
+    }
+
     @JavascriptInterface
     fun getAppInfo(): String {
-        return getAppInfoJson().toString()
-    }
-
-    private fun getAppInfoJson(): JSONObject {
-        val json = JSONObject()
-        try {
-            val packageInfo = context.packageManager.getPackageInfo(context.packageName, 0)
-            json.put("appName", "BDRSF-Android")
-            json.put("packageName", context.packageName)
-            json.put("versionName", packageInfo.versionName ?: "1.0.0")
-            val versionCode = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
-                packageInfo.longVersionCode
-            } else {
-                @Suppress("DEPRECATION")
-                packageInfo.versionCode.toLong()
-            }
-            json.put("versionCode", versionCode)
-            json.put("osVersion", Build.VERSION.RELEASE)
-            json.put("sdkInt", Build.VERSION.SDK_INT)
+        return try {
+            val pInfo = activity.packageManager.getPackageInfo(activity.packageName, 0)
+            JSONObject().apply {
+                put("packageName", activity.packageName)
+                put("versionName", pInfo.versionName ?: "1.0.0")
+                put("versionCode", if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) pInfo.longVersionCode else pInfo.versionCode.toLong())
+                put("osVersion", Build.VERSION.RELEASE)
+                put("sdkVersion", Build.VERSION.SDK_INT)
+                put("deviceModel", "${Build.MANUFACTURER} ${Build.MODEL}")
+                put("isNative", true)
+            }.toString()
         } catch (_: Exception) {
-            json.put("error", "Unable to retrieve package info")
+            "{}"
         }
-        return json
     }
 
-    /**
-     * ওয়েবভিউতে নিরাপদে নেটিভ রেসপন্স বা ইভেন্ট পাঠানোর জন্য মেথড (UI Thread Safe)।
-     */
-    fun sendResponseToWeb(response: BridgeResponse, callbackFunction: String? = null) {
-        mainHandler.post {
-            val webView = webViewRef.get() ?: return@post
-            val script = WebBridgeContract.buildCallbackScript(callbackFunction, response)
-            webView.evaluateJavascript(script, null)
+    // ---------------------------------------------------------------------------------------------
+    // ওয়েবভিউতে নিরাপদ ডাটা ডেলিভারি
+    // ---------------------------------------------------------------------------------------------
+
+    fun sendResponseToWeb(response: BridgeResponse, callbackFunction: String?) {
+        if (callbackFunction.isNullOrBlank()) return
+        val script = WebBridgeContract.buildCallbackScript(callbackFunction, response)
+        evaluateJavascript(script)
+    }
+
+    fun sendQrSuccessToWeb(callbackFunction: String?, scannedContent: String) {
+        val script = WebBridgeContract.buildQrSuccessScripts(callbackFunction, scannedContent)
+        evaluateJavascript(script)
+    }
+
+    fun sendQrErrorToWeb(errorCallbackFunction: String?, errorMessage: String) {
+        val script = WebBridgeContract.buildQrErrorScripts(errorCallbackFunction, errorMessage)
+        evaluateJavascript(script)
+    }
+
+    fun evaluateJavascript(script: String) {
+        activity.runOnUiThread {
+            try {
+                webView.evaluateJavascript(script, null)
+            } catch (e: Exception) {
+                Log.e("AndroidBridge", "Failed to evaluate JS", e)
+            }
         }
     }
 }
