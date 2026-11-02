@@ -21,6 +21,7 @@ import android.widget.ProgressBar
 import android.widget.RelativeLayout
 import android.widget.Toast
 import androidx.activity.OnBackPressedCallback
+import androidx.appcompat.app.AlertDialog
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.view.ViewCompat
 import androidx.core.view.WindowCompat
@@ -41,10 +42,6 @@ import com.bdrsf.app.webview.NativeWebChromeClient
 import com.bdrsf.app.webview.NativeWebViewClient
 import org.json.JSONObject
 
-/**
- * BDRSF-Android কেন্দ্রীয় কোঅর্ডিনেটর ও লাইফসাইকেল ম্যানেজার।
- * bdrsf-bridge.js এর সমস্ত অ্যাকশন নির্ভুলভাবে রাউট করে।
- */
 class MainActivity : AppCompatActivity(), AndroidBridge.BridgeActionHandler {
 
     companion object {
@@ -195,11 +192,6 @@ class MainActivity : AppCompatActivity(), AndroidBridge.BridgeActionHandler {
         }
     }
 
-    /**
-     * ব্যাক-বাটন হ্যান্ডলিং:
-     * bdrsf-bridge.js এর window.onAndroidBackPressed() কে প্রথমে সুযোগ দেয়।
-     * যদি পেজে কোনো ব্যাক-হ্যান্ডলার না থাকে তবে স্বাভাবিক হিস্ট্রি অথবা ডাবল-ট্যাপ এক্সিট রান করে।
-     */
     private fun setupBackNavigation() {
         onBackPressedDispatcher.addCallback(this, object : OnBackPressedCallback(true) {
             override fun handleOnBackPressed() {
@@ -213,10 +205,13 @@ class MainActivity : AppCompatActivity(), AndroidBridge.BridgeActionHandler {
                             val handledByWeb = result == "true"
                             if (!handledByWeb) {
                                 runOnUiThread {
-                                    if (WebAppConfig.isHomeOrDashboard(webView.url) || !webView.canGoBack()) {
+                                    val currentUrl = webView.url ?: ""
+                                    if (WebAppConfig.isHomeOrDashboard(currentUrl)) {
                                         onHandleBackPressRequested()
-                                    } else {
+                                    } else if (webView.canGoBack()) {
                                         webView.goBack()
+                                    } else {
+                                        webView.loadUrl(WebAppConfig.BASE_URL)
                                     }
                                 }
                             }
@@ -236,10 +231,6 @@ class MainActivity : AppCompatActivity(), AndroidBridge.BridgeActionHandler {
         super.onStop()
         WebAppConfig.syncCookies()
     }
-
-    // ---------------------------------------------------------------------------------------------
-    // AndroidBridge.BridgeActionHandler ইমপ্লিমেন্টেশন
-    // ---------------------------------------------------------------------------------------------
 
     override fun onScanQrRequested(payload: JSONObject, callback: String?) {
         qrScannerFeature.startScanner(payload, callback)
@@ -334,11 +325,24 @@ class MainActivity : AppCompatActivity(), AndroidBridge.BridgeActionHandler {
     override fun onHandleBackPressRequested() {
         val currentTime = System.currentTimeMillis()
         if (currentTime - lastBackPressTime < 2000L) {
-            finish()
+            showExitConfirmationDialog()
         } else {
             lastBackPressTime = currentTime
-            Toast.makeText(this, "অ্যাপ থেকে বের হতে আবার ব্যাক প্রেস করুন", Toast.LENGTH_SHORT).show()
+            Toast.makeText(this, "রিফ্রেশ হচ্ছে...", Toast.LENGTH_SHORT).show()
+            WebAppConfig.forceRefreshWithCacheBypass(webView)
         }
+    }
+
+    private fun showExitConfirmationDialog() {
+        AlertDialog.Builder(this)
+            .setTitle("প্রস্থান নিশ্চিতকরণ")
+            .setMessage("আপনি কি নিশ্চিতভাবে অ্যাপ থেকে বের হতে চান?")
+            .setPositiveButton("হ্যাঁ") { _, _ ->
+                WebAppConfig.syncCookies()
+                finishAffinity()
+            }
+            .setNegativeButton("না", null)
+            .show()
     }
 
     override fun onSetSystemBarsRequested(statusBarColor: String, navBarColor: String, lightIcons: Boolean) {
