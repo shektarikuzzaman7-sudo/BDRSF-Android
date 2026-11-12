@@ -1,3 +1,4 @@
+// File: app/src/main/java/com/bdrsf/app/utils/QrPayloadParser.kt
 package com.bdrsf.app.utils
 
 import android.net.Uri
@@ -10,7 +11,7 @@ object QrPayloadParser {
 
     private val BD_MOBILE_11_REGEX = Regex("(?:\\+?88)?(01[3-9]\\d{8})(?:\\d)?")
     private val BDRSF_ACCOUNT_REGEX = Regex("^[A-Za-z]{2}\\d{6,15}$")
-    private val AGENT_MCC_SET = setOf("6010", "6011", "6012")
+    private val AGENT_MCC_SET = setOf("4829", "6010", "6011", "6012", "6051")
 
     data class ParsedQrResult(
         val isSupported: Boolean,
@@ -51,7 +52,13 @@ object QrPayloadParser {
     }
 
     fun parse(rawInput: String?): ParsedQrResult {
+        return parse(rawInput, "")
+    }
+
+    fun parse(rawInput: String?, expectedMode: String): ParsedQrResult {
         val raw = rawInput?.trim() ?: ""
+        val normalizedExpectedMode = expectedMode.trim().lowercase(Locale.ROOT)
+
         if (raw.isEmpty()) {
             return ParsedQrResult(
                 isSupported = false,
@@ -71,32 +78,76 @@ object QrPayloadParser {
             )
         }
 
-        parseBdrsfInternal(raw)?.let { return it }
+        val parsed = parseBdrsfInternal(raw)
+            ?: (if (raw.startsWith("000201")) parseEmvCoBanglaQr(raw) else null)
+            ?: parseJsonOrBase64Payload(raw)
+            ?: parseDirectPhoneNumber(raw)
+            ?: ParsedQrResult(
+                isSupported = false,
+                isEncrypted = true,
+                provider = "encrypted_p2p",
+                accountNumber = "",
+                rawAccountNumber = "",
+                accountRole = "personal",
+                suggestedAction = "send_money",
+                accountName = "",
+                storeName = "",
+                ownerName = "",
+                mcc = "",
+                amount = "",
+                rawContent = raw,
+                message = "এটি এনক্রিপ্টেড পার্সোনাল QR কোড। অনুগ্রহ করে এজেন্ট বা মার্চেন্ট QR স্ক্যান করুন।"
+            )
 
-        if (raw.startsWith("000201")) {
-            return parseEmvCoBanglaQr(raw)
+        return enforceModeBoundary(parsed, normalizedExpectedMode)
+    }
+
+    private fun enforceModeBoundary(result: ParsedQrResult, expectedMode: String): ParsedQrResult {
+        if (!result.isSupported || expectedMode.isBlank()) {
+            return result
         }
 
-        parseJsonOrBase64Payload(raw)?.let { return it }
+        if (expectedMode == "cash_out") {
+            if (result.provider == "bdrsf") {
+                return result.copy(
+                    isSupported = false,
+                    message = "এটি BDRSF ওয়ালেট QR কোড। ক্যাশ আউটের জন্য বিকাশ, নগদ, রকেট বা উপায় এজেন্ট QR স্ক্যান করুন।"
+                )
+            }
+            if (result.accountRole == "merchant") {
+                return result.copy(
+                    isSupported = false,
+                    message = "এটি একটি মার্চেন্ট (Merchant) QR কোড! ক্যাশ আউটের জন্য অনুগ্রহ করে এজেন্ট (Agent) QR কোড স্ক্যান করুন।"
+                )
+            }
+            if (result.accountRole != "agent") {
+                return result.copy(
+                    isSupported = false,
+                    message = "এটি এজেন্ট QR কোড নয়। অনুগ্রহ করে অনুমোদিত এজেন্ট (Agent) QR স্ক্যান করুন।"
+                )
+            }
+        } else if (expectedMode == "payment") {
+            if (result.provider == "bdrsf") {
+                return result.copy(
+                    isSupported = false,
+                    message = "এটি BDRSF ওয়ালেট QR কোড। পেমেন্টের জন্য মার্চেন্ট (Merchant) QR কোড স্ক্যান করুন।"
+                )
+            }
+            if (result.accountRole == "agent") {
+                return result.copy(
+                    isSupported = false,
+                    message = "এটি একটি এজেন্ট (Agent) QR কোড! পেমেন্টের জন্য অনুগ্রহ করে মার্চেন্ট (Merchant) QR কোড স্ক্যান করুন।"
+                )
+            }
+            if (result.accountRole != "merchant") {
+                return result.copy(
+                    isSupported = false,
+                    message = "এটি মার্চেন্ট QR কোড নয়। অনুগ্রহ করে অনুমোদিত মার্চেন্ট (Merchant) QR স্ক্যান করুন।"
+                )
+            }
+        }
 
-        parseDirectPhoneNumber(raw)?.let { return it }
-
-        return ParsedQrResult(
-            isSupported = false,
-            isEncrypted = true,
-            provider = "encrypted_p2p",
-            accountNumber = "",
-            rawAccountNumber = "",
-            accountRole = "personal",
-            suggestedAction = "send_money",
-            accountName = "",
-            storeName = "",
-            ownerName = "",
-            mcc = "",
-            amount = "",
-            rawContent = raw,
-            message = "এটি এনক্রিপ্টেড পার্সোনাল QR কোড। অনুগ্রহ করে প্রাপকের নম্বর টাইপ করুন অথবা এজেন্ট/মার্চেন্ট QR স্ক্যান করুন।"
-        )
+        return result
     }
 
     private fun parseBdrsfInternal(raw: String): ParsedQrResult? {
@@ -295,30 +346,34 @@ object QrPayloadParser {
             }
         }
 
-        val roleSearchSpace = (accountMetaValues + additionalDataMap.values)
+        val roleSearchSpace = (guiList + accountMetaValues + additionalDataMap.values)
             .joinToString(" ")
             .lowercase(Locale.ROOT)
+        val lowerBusinessName = tag59BusinessName.lowercase(Locale.ROOT)
 
         val hasExplicitAgentKeyword = Regex("\\b(agent|uddokta|cashout|cash_out|cico|distributor|dso)\\b")
             .containsMatchIn(roleSearchSpace) ||
             roleSearchSpace.contains("cash out") ||
-            tag59BusinessName.lowercase(Locale.ROOT).contains("uddokta") ||
-            tag59BusinessName.lowercase(Locale.ROOT).contains("agent")
+            roleSearchSpace.contains(".agent") ||
+            roleSearchSpace.contains(".uddokta") ||
+            lowerBusinessName.contains("uddokta") ||
+            lowerBusinessName.contains("agent")
 
         val hasExplicitMerchantKeyword = Regex("\\b(merchant|payment|retail|shop|store|pos|npsb|banglaqr)\\b")
             .containsMatchIn(roleSearchSpace) ||
             combinedGuiText.contains("banglaqr") ||
-            combinedGuiText.contains("npsb")
+            combinedGuiText.contains("npsb") ||
+            combinedGuiText.contains(".merchant")
 
         val hasPersonalKeyword = Regex("\\b(personal|p2p|sendmoney|send_money)\\b")
             .containsMatchIn(roleSearchSpace)
 
         val isAgentMcc = mcc in AGENT_MCC_SET
-        val isRetailMerchantMcc = mcc.matches(Regex("\\d{4}")) && mcc != "0000" && !isAgentMcc
+        val isCommercialMerchantMcc = mcc.matches(Regex("\\d{4}")) && mcc != "0000" && !isAgentMcc
 
         val accountRole = when {
             hasExplicitAgentKeyword || isAgentMcc -> "agent"
-            hasExplicitMerchantKeyword || isRetailMerchantMcc -> "merchant"
+            hasExplicitMerchantKeyword || isCommercialMerchantMcc -> "merchant"
             hasPersonalKeyword -> "personal"
             tag59BusinessName.isNotBlank() && rootTlvs.keys.any { it.toIntOrNull() in 26..51 } -> "merchant"
             else -> "unknown"
