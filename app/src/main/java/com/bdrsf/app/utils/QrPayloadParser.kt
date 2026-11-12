@@ -10,6 +10,7 @@ import java.util.Locale
 object QrPayloadParser {
 
     private val BD_PHONE_REGEX = Regex("(?:\\+?88)?(01[3-9]\\d{8,9})")
+    private val BDRSF_ACCOUNT_REGEX = Regex("^[A-Za-z]{2}\\d{6,15}$")
 
     data class ParsedQrResult(
         val isSupported: Boolean,
@@ -81,6 +82,22 @@ object QrPayloadParser {
     }
 
     private fun parseBdrsfInternal(raw: String): ParsedQrResult? {
+        val alphaNumericOnly = raw.replace(Regex("[^A-Za-z0-9]"), "")
+        if (BDRSF_ACCOUNT_REGEX.matches(alphaNumericOnly)) {
+            return ParsedQrResult(
+                isSupported = true,
+                isEncrypted = false,
+                provider = "bdrsf",
+                accountNumber = alphaNumericOnly.uppercase(Locale.ROOT),
+                accountRole = "personal",
+                suggestedAction = "send_money",
+                accountName = "",
+                amount = "",
+                rawContent = raw,
+                message = "BDRSF ওয়ালেট QR শনাক্ত হয়েছে"
+            )
+        }
+
         val lower = raw.lowercase(Locale.ROOT)
         if (!lower.contains("bdrsf") && !lower.contains("bdrsn")) return null
 
@@ -109,8 +126,11 @@ object QrPayloadParser {
             val parts = raw.split(":", "|", ",")
             for (part in parts) {
                 val trimmed = part.trim()
-                if (trimmed.matches(Regex("\\d{8,15}")) || BD_PHONE_REGEX.matches(trimmed)) {
-                    account = normalizeBdPhone(trimmed)
+                val cleanedPart = trimmed.replace(Regex("[^A-Za-z0-9]"), "")
+                if (BDRSF_ACCOUNT_REGEX.matches(cleanedPart)) {
+                    account = cleanedPart.uppercase(Locale.ROOT)
+                } else if (trimmed.matches(Regex("\\d{8,15}")) || BD_PHONE_REGEX.matches(trimmed)) {
+                    account = normalizeBdPhone(trimmed).ifBlank { trimmed }
                 } else if (trimmed.lowercase(Locale.ROOT) in setOf("personal", "agent", "merchant", "dso", "distributor")) {
                     role = trimmed.lowercase(Locale.ROOT)
                 }
@@ -118,9 +138,14 @@ object QrPayloadParser {
         }
 
         if (account.isBlank()) {
-            val match = BD_PHONE_REGEX.find(raw)
-            if (match != null) {
-                account = match.groupValues[1]
+            val bdrsfMatch = Regex("\\b([A-Za-z]{2}\\d{6,15})\\b").find(raw)
+            if (bdrsfMatch != null) {
+                account = bdrsfMatch.groupValues[1].uppercase(Locale.ROOT)
+            } else {
+                val phoneMatch = BD_PHONE_REGEX.find(raw)
+                if (phoneMatch != null) {
+                    account = phoneMatch.groupValues[1]
+                }
             }
         }
 
@@ -282,9 +307,26 @@ object QrPayloadParser {
             if (text.startsWith("{") && text.endsWith("}")) {
                 try {
                     val json = JSONObject(text)
+                    val rawAcc = json.optString("account_number", json.optString("account", ""))
+                    val cleanAcc = rawAcc.replace(Regex("[^A-Za-z0-9]"), "")
+                    if (BDRSF_ACCOUNT_REGEX.matches(cleanAcc)) {
+                        return ParsedQrResult(
+                            isSupported = true,
+                            isEncrypted = false,
+                            provider = "bdrsf",
+                            accountNumber = cleanAcc.uppercase(Locale.ROOT),
+                            accountRole = json.optString("account_type", "personal"),
+                            suggestedAction = "send_money",
+                            accountName = json.optString("full_name", json.optString("name", "")),
+                            amount = json.optString("amount", ""),
+                            rawContent = raw,
+                            message = "BDRSF QR শনাক্ত হয়েছে"
+                        )
+                    }
+
                     val phoneRaw = json.optString(
                         "mobile",
-                        json.optString("phone", json.optString("msisdn", json.optString("account", "")))
+                        json.optString("phone", json.optString("msisdn", rawAcc))
                     )
                     val phone = normalizeBdPhone(phoneRaw)
                     if (phone.isNotBlank()) {
