@@ -68,6 +68,7 @@ class QrScannerFeature(
 
     private var activeCallback: String? = null
     private var activeErrorCallback: String? = null
+    private var activeExpectedMode: String = ""
     private var isTorchOn: Boolean = false
     private val isProcessingResult = AtomicBoolean(false)
     private var lastZxingFallbackTime: Long = 0L
@@ -125,9 +126,15 @@ class QrScannerFeature(
             lastZxingFallbackTime = 0L
             activeCallback = if (!callback.isNullOrBlank()) callback else payload.optString("callback", "processScannedData")
             activeErrorCallback = payload.optString("errorCallback", "onScanFailed")
+            activeExpectedMode = payload.optString("mode", "").trim().lowercase()
             isTorchOn = false
 
-            val promptText = payload.optString("prompt", "ফ্রেমের ভেতরে QR বা বারকোডটি সোজা রাখুন")
+            val defaultPrompt = when (activeExpectedMode) {
+                "cash_out" -> "ফ্রেমের ভেতরে এজেন্ট (Agent) QR কোড রাখুন"
+                "payment" -> "ফ্রেমের ভেতরে মার্চেন্ট (Merchant) QR কোড রাখুন"
+                else -> "ফ্রেমের ভেতরে QR বা বারকোডটি সোজা রাখুন"
+            }
+            val promptText = payload.optString("prompt", defaultPrompt)
             buildScannerLayout(promptText)
             bindCameraProvider()
         }
@@ -297,14 +304,20 @@ class QrScannerFeature(
     private fun handleScanSuccess(rawContent: String) {
         val cb = activeCallback
         val errCb = activeErrorCallback
+        val expectedMode = activeExpectedMode
         activity.runOnUiThread {
             stopScanner(isCancelled = false)
-            dispatchParsedQrResult(rawContent, cb, errCb)
+            dispatchParsedQrResult(rawContent, cb, errCb, expectedMode)
         }
     }
 
-    private fun dispatchParsedQrResult(rawContent: String, successCallback: String?, errorCallback: String?) {
-        val parsed = QrPayloadParser.parse(rawContent)
+    private fun dispatchParsedQrResult(
+        rawContent: String,
+        successCallback: String?,
+        errorCallback: String?,
+        expectedMode: String
+    ) {
+        val parsed = QrPayloadParser.parse(rawContent, expectedMode)
         if (parsed.isSupported) {
             bridge.sendQrSuccessToWeb(successCallback, parsed.toJsonObject().toString())
         } else {
@@ -340,11 +353,11 @@ class QrScannerFeature(
             .addOnSuccessListener { barcodes ->
                 val matched = barcodes.firstOrNull { !it.rawValue.isNullOrBlank() }
                 if (matched != null) {
-                    dispatchParsedQrResult(matched.rawValue ?: "", callback, "onScanFailed")
+                    dispatchParsedQrResult(matched.rawValue ?: "", callback, "onScanFailed", activeExpectedMode)
                 } else {
                     val zxingResult = decodeWithZxingFallback(bitmap)
                     if (zxingResult != null) {
-                        dispatchParsedQrResult(zxingResult, callback, "onScanFailed")
+                        dispatchParsedQrResult(zxingResult, callback, "onScanFailed", activeExpectedMode)
                     } else {
                         bridge.sendQrErrorToWeb("onScanFailed", "ছবিতে কোনো সঠিক কিউআর বা বারকোড পাওয়া যায়নি")
                     }
@@ -353,7 +366,7 @@ class QrScannerFeature(
             .addOnFailureListener {
                 val zxingResult = decodeWithZxingFallback(bitmap)
                 if (zxingResult != null) {
-                    dispatchParsedQrResult(zxingResult, callback, "onScanFailed")
+                    dispatchParsedQrResult(zxingResult, callback, "onScanFailed", activeExpectedMode)
                 } else {
                     bridge.sendQrErrorToWeb("onScanFailed", "বারকোড প্রসেসিং ব্যর্থ হয়েছে")
                 }
