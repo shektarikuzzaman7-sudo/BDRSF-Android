@@ -16,6 +16,7 @@ import android.graphics.LinearGradient
 import android.graphics.Paint
 import android.graphics.RectF
 import android.graphics.Shader
+import android.os.SystemClock
 import android.util.Log
 import android.view.Gravity
 import android.view.View
@@ -26,6 +27,7 @@ import android.widget.TextView
 import androidx.camera.core.Camera
 import androidx.camera.core.CameraSelector
 import androidx.camera.core.ImageAnalysis
+import androidx.camera.core.ImageProxy
 import androidx.camera.core.Preview
 import androidx.camera.lifecycle.ProcessCameraProvider
 import androidx.camera.view.PreviewView
@@ -33,17 +35,17 @@ import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.LifecycleOwner
 import com.bdrsf.app.bridge.AndroidBridge
-import com.bdrsf.app.bridge.WebBridgeContract.Actions
-import com.bdrsf.app.bridge.WebBridgeContract.BridgeResponse
-import com.bdrsf.app.bridge.WebBridgeContract.Status
+import com.bdrsf.app.utils.QrPayloadParser
 import com.google.mlkit.vision.barcode.BarcodeScanner
 import com.google.mlkit.vision.barcode.BarcodeScannerOptions
 import com.google.mlkit.vision.barcode.BarcodeScanning
 import com.google.mlkit.vision.barcode.common.Barcode
 import com.google.mlkit.vision.common.InputImage
+import com.google.zxing.BarcodeFormat
 import com.google.zxing.BinaryBitmap
 import com.google.zxing.DecodeHintType
 import com.google.zxing.MultiFormatReader
+import com.google.zxing.PlanarYUVLuminanceSource
 import com.google.zxing.RGBLuminanceSource
 import com.google.zxing.common.HybridBinarizer
 import org.json.JSONObject
@@ -51,10 +53,6 @@ import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicBoolean
 
-/**
- * BDRSF সার্বজনীন QR ও মাল্টি-ফরম্যাট বারকোড স্ক্যানার ফিচার।
- * bdrsf-bridge.js এর window.processScannedData ও onScanFailed এর সাথে সরাসরি যুক্ত।
- */
 class QrScannerFeature(
     private val activity: Activity,
     private val rootContainer: ViewGroup,
@@ -72,6 +70,7 @@ class QrScannerFeature(
     private var activeErrorCallback: String? = null
     private var isTorchOn: Boolean = false
     private val isProcessingResult = AtomicBoolean(false)
+    private var lastZxingFallbackTime: Long = 0L
 
     @Volatile
     var isScanningActive: Boolean = false
@@ -95,6 +94,23 @@ class QrScannerFeature(
         BarcodeScanning.getClient(options)
     }
 
+    private val zxingHints: Map<DecodeHintType, Any> by lazy {
+        mapOf(
+            DecodeHintType.TRY_HARDER to true,
+            DecodeHintType.ALSO_INVERTED to true,
+            DecodeHintType.POSSIBLE_FORMATS to listOf(
+                BarcodeFormat.QR_CODE,
+                BarcodeFormat.PDF_417,
+                BarcodeFormat.CODE_128,
+                BarcodeFormat.CODE_39,
+                BarcodeFormat.DATA_MATRIX,
+                BarcodeFormat.AZTEC,
+                BarcodeFormat.EAN_13,
+                BarcodeFormat.EAN_8
+            )
+        )
+    }
+
     fun startScanner(payload: JSONObject, callback: String?) {
         if (!hasCameraPermission()) {
             ActivityCompat.requestPermissions(activity, arrayOf(Manifest.permission.CAMERA), 1001)
@@ -106,6 +122,7 @@ class QrScannerFeature(
         activity.runOnUiThread {
             isScanningActive = true
             isProcessingResult.set(false)
+            lastZxingFallbackTime = 0L
             activeCallback = if (!callback.isNullOrBlank()) callback else payload.optString("callback", "processScannedData")
             activeErrorCallback = payload.optString("errorCallback", "onScanFailed")
             isTorchOn = false
@@ -213,9 +230,19 @@ class QrScannerFeature(
             mlKitScanner.process(inputImage)
                 .addOnSuccessListener { barcodes ->
                     val matchedBarcode = barcodes.firstOrNull { !it.rawValue.isNullOrBlank() }
-                    if (matchedBarcode != null && isProcessingResult.compareAndSet(false, true)) {
-                        val rawContent = matchedBarcode.rawValue ?: ""
-                        handleScanSuccess(rawContent)
+                    if (matchedBarcode != null) {
+                        if (isProcessingResult.compareAndSet(false, true)) {
+                            handleScanSuccess(matchedBarcode.rawValue ?: "")
+                        }
+                    } else if (!isProcessingResult.get()) {
+                        val now = SystemClock.elapsedRealtime()
+                        if (now - lastZxingFallbackTime >= 400L) {
+                            lastZxingFallbackTime = now
+                            val fallbackText = decodeImageProxyWithZxing(imageProxy)
+                            if (!fallbackText.isNullOrBlank() && isProcessingResult.compareAndSet(false, true)) {
+                                handleScanSuccess(fallbackText)
+                            }
+                        }
                     }
                 }
                 .addOnCompleteListener { imageProxy.close() }
@@ -227,6 +254,32 @@ class QrScannerFeature(
         } catch (e: Exception) {
             Log.e("QrScannerFeature", "bindToLifecycle failed", e)
             stopScanner(isCancelled = true)
+        }
+    }
+
+    private fun decodeImageProxyWithZxing(imageProxy: ImageProxy): String? {
+        return try {
+            val plane = imageProxy.planes[0]
+            val buffer = plane.buffer
+            val remaining = buffer.remaining()
+            val requiredSize = plane.rowStride * imageProxy.height
+            val data = ByteArray(maxOf(remaining, requiredSize))
+            buffer.get(data, 0, remaining)
+
+            val source = PlanarYUVLuminanceSource(
+                data,
+                plane.rowStride,
+                imageProxy.height,
+                0,
+                0,
+                imageProxy.width,
+                imageProxy.height,
+                false
+            )
+            val binaryBitmap = BinaryBitmap(HybridBinarizer(source))
+            MultiFormatReader().decode(binaryBitmap, zxingHints).text
+        } catch (_: Exception) {
+            null
         }
     }
 
@@ -242,9 +295,20 @@ class QrScannerFeature(
     }
 
     private fun handleScanSuccess(rawContent: String) {
+        val cb = activeCallback
+        val errCb = activeErrorCallback
         activity.runOnUiThread {
             stopScanner(isCancelled = false)
-            bridge.sendQrSuccessToWeb(activeCallback, rawContent)
+            dispatchParsedQrResult(rawContent, cb, errCb)
+        }
+    }
+
+    private fun dispatchParsedQrResult(rawContent: String, successCallback: String?, errorCallback: String?) {
+        val parsed = QrPayloadParser.parse(rawContent)
+        if (parsed.isSupported) {
+            bridge.sendQrSuccessToWeb(successCallback, parsed.toJsonObject().toString())
+        } else {
+            bridge.sendQrErrorToWeb(errorCallback, parsed.message)
         }
     }
 
@@ -276,11 +340,11 @@ class QrScannerFeature(
             .addOnSuccessListener { barcodes ->
                 val matched = barcodes.firstOrNull { !it.rawValue.isNullOrBlank() }
                 if (matched != null) {
-                    bridge.sendQrSuccessToWeb(callback, matched.rawValue ?: "")
+                    dispatchParsedQrResult(matched.rawValue ?: "", callback, "onScanFailed")
                 } else {
                     val zxingResult = decodeWithZxingFallback(bitmap)
                     if (zxingResult != null) {
-                        bridge.sendQrSuccessToWeb(callback, zxingResult)
+                        dispatchParsedQrResult(zxingResult, callback, "onScanFailed")
                     } else {
                         bridge.sendQrErrorToWeb("onScanFailed", "ছবিতে কোনো সঠিক কিউআর বা বারকোড পাওয়া যায়নি")
                     }
@@ -289,7 +353,7 @@ class QrScannerFeature(
             .addOnFailureListener {
                 val zxingResult = decodeWithZxingFallback(bitmap)
                 if (zxingResult != null) {
-                    bridge.sendQrSuccessToWeb(callback, zxingResult)
+                    dispatchParsedQrResult(zxingResult, callback, "onScanFailed")
                 } else {
                     bridge.sendQrErrorToWeb("onScanFailed", "বারকোড প্রসেসিং ব্যর্থ হয়েছে")
                 }
@@ -304,17 +368,7 @@ class QrScannerFeature(
             bitmap.getPixels(pixels, 0, width, 0, 0, width, height)
             val source = RGBLuminanceSource(width, height, pixels)
             val binaryBitmap = BinaryBitmap(HybridBinarizer(source))
-
-            val hints = mapOf(
-                DecodeHintType.TRY_HARDER to true,
-                DecodeHintType.POSSIBLE_FORMATS to listOf(
-                    com.google.zxing.BarcodeFormat.QR_CODE,
-                    com.google.zxing.BarcodeFormat.PDF_417,
-                    com.google.zxing.BarcodeFormat.CODE_128,
-                    com.google.zxing.BarcodeFormat.CODE_39
-                )
-            )
-            MultiFormatReader().decode(binaryBitmap, hints).text
+            MultiFormatReader().decode(binaryBitmap, zxingHints).text
         } catch (_: Exception) {
             null
         }
