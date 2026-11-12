@@ -1,4 +1,3 @@
-// File: app/src/main/java/com/bdrsf/app/utils/QrPayloadParser.kt
 package com.bdrsf.app.utils
 
 import android.net.Uri
@@ -9,17 +8,22 @@ import java.util.Locale
 
 object QrPayloadParser {
 
-    private val BD_PHONE_REGEX = Regex("(?:\\+?88)?(01[3-9]\\d{8,9})")
+    private val BD_MOBILE_11_REGEX = Regex("(?:\\+?88)?(01[3-9]\\d{8})(?:\\d)?")
     private val BDRSF_ACCOUNT_REGEX = Regex("^[A-Za-z]{2}\\d{6,15}$")
+    private val AGENT_MCC_SET = setOf("6010", "6011", "6012")
 
     data class ParsedQrResult(
         val isSupported: Boolean,
         val isEncrypted: Boolean,
         val provider: String,
         val accountNumber: String,
+        val rawAccountNumber: String,
         val accountRole: String,
         val suggestedAction: String,
         val accountName: String,
+        val storeName: String,
+        val ownerName: String,
+        val mcc: String,
         val amount: String,
         val rawContent: String,
         val message: String
@@ -30,9 +34,15 @@ object QrPayloadParser {
                 put("isEncrypted", isEncrypted)
                 put("provider", provider)
                 put("accountNumber", accountNumber)
+                put("rawAccountNumber", rawAccountNumber)
                 put("accountRole", accountRole)
+                put("isAgent", accountRole == "agent")
+                put("isMerchant", accountRole == "merchant")
                 put("suggestedAction", suggestedAction)
                 put("accountName", accountName)
+                put("storeName", storeName)
+                put("ownerName", ownerName)
+                put("mcc", mcc)
                 put("amount", amount)
                 put("rawContent", rawContent)
                 put("message", message)
@@ -48,9 +58,13 @@ object QrPayloadParser {
                 isEncrypted = false,
                 provider = "unknown",
                 accountNumber = "",
+                rawAccountNumber = "",
                 accountRole = "unknown",
                 suggestedAction = "",
                 accountName = "",
+                storeName = "",
+                ownerName = "",
+                mcc = "",
                 amount = "",
                 rawContent = "",
                 message = "খালি QR কোড"
@@ -72,26 +86,35 @@ object QrPayloadParser {
             isEncrypted = true,
             provider = "encrypted_p2p",
             accountNumber = "",
+            rawAccountNumber = "",
             accountRole = "personal",
             suggestedAction = "send_money",
             accountName = "",
+            storeName = "",
+            ownerName = "",
+            mcc = "",
             amount = "",
             rawContent = raw,
-            message = "এটি এনক্রিপ্টেড পার্সোনাল QR কোড। অনুগ্রহ করে প্রাপকের নম্বর টাইপ করুন অথবা এজেন্ট/বাংলা QR স্ক্যান করুন।"
+            message = "এটি এনক্রিপ্টেড পার্সোনাল QR কোড। অনুগ্রহ করে প্রাপকের নম্বর টাইপ করুন অথবা এজেন্ট/মার্চেন্ট QR স্ক্যান করুন।"
         )
     }
 
     private fun parseBdrsfInternal(raw: String): ParsedQrResult? {
         val alphaNumericOnly = raw.replace(Regex("[^A-Za-z0-9]"), "")
         if (BDRSF_ACCOUNT_REGEX.matches(alphaNumericOnly)) {
+            val acc = alphaNumericOnly.uppercase(Locale.ROOT)
             return ParsedQrResult(
                 isSupported = true,
                 isEncrypted = false,
                 provider = "bdrsf",
-                accountNumber = alphaNumericOnly.uppercase(Locale.ROOT),
+                accountNumber = acc,
+                rawAccountNumber = acc,
                 accountRole = "personal",
                 suggestedAction = "send_money",
                 accountName = "",
+                storeName = "",
+                ownerName = "",
+                mcc = "",
                 amount = "",
                 rawContent = raw,
                 message = "BDRSF ওয়ালেট QR শনাক্ত হয়েছে"
@@ -129,8 +152,8 @@ object QrPayloadParser {
                 val cleanedPart = trimmed.replace(Regex("[^A-Za-z0-9]"), "")
                 if (BDRSF_ACCOUNT_REGEX.matches(cleanedPart)) {
                     account = cleanedPart.uppercase(Locale.ROOT)
-                } else if (trimmed.matches(Regex("\\d{8,15}")) || BD_PHONE_REGEX.matches(trimmed)) {
-                    account = normalizeBdPhone(trimmed).ifBlank { trimmed }
+                } else if (trimmed.matches(Regex("\\d{8,15}")) || BD_MOBILE_11_REGEX.matches(trimmed)) {
+                    account = normalizeBdPhone11(trimmed).ifBlank { trimmed }
                 } else if (trimmed.lowercase(Locale.ROOT) in setOf("personal", "agent", "merchant", "dso", "distributor")) {
                     role = trimmed.lowercase(Locale.ROOT)
                 }
@@ -142,7 +165,7 @@ object QrPayloadParser {
             if (bdrsfMatch != null) {
                 account = bdrsfMatch.groupValues[1].uppercase(Locale.ROOT)
             } else {
-                val phoneMatch = BD_PHONE_REGEX.find(raw)
+                val phoneMatch = BD_MOBILE_11_REGEX.find(raw)
                 if (phoneMatch != null) {
                     account = phoneMatch.groupValues[1]
                 }
@@ -162,9 +185,13 @@ object QrPayloadParser {
             isEncrypted = false,
             provider = "bdrsf",
             accountNumber = account,
+            rawAccountNumber = account,
             accountRole = role,
             suggestedAction = action,
             accountName = name,
+            storeName = if (role == "merchant" || role == "agent") name else "",
+            ownerName = name,
+            mcc = "",
             amount = "",
             rawContent = raw,
             message = "BDRSF QR শনাক্ত হয়েছে"
@@ -173,117 +200,181 @@ object QrPayloadParser {
 
     private fun parseEmvCoBanglaQr(raw: String): ParsedQrResult {
         val rootTlvs = decodeTlvMap(raw)
-        val merchantName = rootTlvs["59"] ?: ""
-        val amount = rootTlvs["54"] ?: ""
-        val mcc = rootTlvs["52"] ?: ""
+        val tag59BusinessName = (rootTlvs["59"] ?: "").trim()
+        val amount = (rootTlvs["54"] ?: "").trim()
+        val mcc = (rootTlvs["52"] ?: "").trim()
 
-        val nestedAccountTlvs = mutableMapOf<String, String>()
-        val combinedMerchantInfo = StringBuilder()
+        val nestedAccountTlvs = linkedMapOf<String, String>()
+        val guiList = mutableListOf<String>()
+        val accountMetaValues = mutableListOf<String>()
 
         for (tagInt in 26..51) {
             val tagKey = tagInt.toString().padStart(2, '0')
             val templateValue = rootTlvs[tagKey] ?: continue
-            combinedMerchantInfo.append(" ").append(templateValue)
+            accountMetaValues.add(templateValue)
             val subTlvs = decodeTlvMap(templateValue)
             for ((subTag, subVal) in subTlvs) {
                 nestedAccountTlvs["${tagKey}_$subTag"] = subVal
-                combinedMerchantInfo.append(" ").append(subVal)
+                if (subTag == "00") {
+                    guiList.add(subVal.lowercase(Locale.ROOT))
+                } else {
+                    accountMetaValues.add(subVal)
+                }
             }
         }
 
-        val additionalDataMap = mutableMapOf<String, String>()
+        val additionalDataMap = linkedMapOf<String, String>()
         rootTlvs["62"]?.let { tag62Value ->
-            val sub62 = decodeTlvMap(tag62Value)
-            additionalDataMap.putAll(sub62)
-            for ((_, v) in sub62) {
-                combinedMerchantInfo.append(" ").append(v)
-            }
+            additionalDataMap.putAll(decodeTlvMap(tag62Value))
         }
 
-        val fullSearchText = "${combinedMerchantInfo} $merchantName".lowercase(Locale.ROOT)
+        val localLanguageMap = linkedMapOf<String, String>()
+        rootTlvs["64"]?.let { tag64Value ->
+            localLanguageMap.putAll(decodeTlvMap(tag64Value))
+        }
+
+        val combinedGuiText = guiList.joinToString(" ")
+        val combinedMetaText = (accountMetaValues + additionalDataMap.values + listOf(tag59BusinessName))
+            .joinToString(" ")
+            .lowercase(Locale.ROOT)
+        val fullSearchText = "$combinedGuiText $combinedMetaText"
 
         val provider = when {
-            fullSearchText.contains("bkash") -> "bkash"
-            fullSearchText.contains("nagad") -> "nagad"
-            fullSearchText.contains("rocket") || fullSearchText.contains("dbbl") || fullSearchText.contains("dutchbangla") -> "rocket"
-            fullSearchText.contains("upay") || fullSearchText.contains("ucb") -> "upay"
-            fullSearchText.contains("tap") -> "tap"
-            fullSearchText.contains("okwallet") -> "okwallet"
+            combinedGuiText.contains("bkash") || fullSearchText.contains("bkash") -> "bkash"
+            combinedGuiText.contains("nagad") || fullSearchText.contains("nagad") -> "nagad"
+            combinedGuiText.contains("rocket") || combinedGuiText.contains("dbbl") || fullSearchText.contains("rocket") || fullSearchText.contains("dbbl") -> "rocket"
+            combinedGuiText.contains("upay") || combinedGuiText.contains("ucb") || fullSearchText.contains("upay") -> "upay"
+            combinedGuiText.contains("tap") || fullSearchText.contains("tap") -> "tap"
+            combinedGuiText.contains("okwallet") || fullSearchText.contains("okwallet") -> "okwallet"
             else -> "bangla_qr"
         }
 
-        var extractedNumber = ""
+        var extracted11Digit = ""
+        var rawExtractedAccount = ""
 
         additionalDataMap["02"]?.let { mobileField ->
-            BD_PHONE_REGEX.find(mobileField)?.let {
-                extractedNumber = it.groupValues[1]
+            val cleanDigits = mobileField.replace(Regex("\\D"), "")
+            BD_MOBILE_11_REGEX.find(cleanDigits)?.let {
+                extracted11Digit = it.groupValues[1]
+                rawExtractedAccount = cleanDigits
             }
         }
 
-        if (extractedNumber.isBlank()) {
-            for ((_, value) in nestedAccountTlvs) {
-                val match = BD_PHONE_REGEX.find(value)
+        if (extracted11Digit.isBlank()) {
+            for ((key, value) in nestedAccountTlvs) {
+                if (key.endsWith("_00")) continue
+                val cleanDigits = value.replace(Regex("\\D"), "")
+                val match = BD_MOBILE_11_REGEX.find(cleanDigits)
                 if (match != null) {
-                    extractedNumber = match.groupValues[1]
+                    extracted11Digit = match.groupValues[1]
+                    rawExtractedAccount = cleanDigits
                     break
                 }
             }
         }
 
-        if (extractedNumber.isBlank()) {
+        if (extracted11Digit.isBlank()) {
             for ((_, value) in additionalDataMap) {
-                val match = BD_PHONE_REGEX.find(value)
+                val cleanDigits = value.replace(Regex("\\D"), "")
+                val match = BD_MOBILE_11_REGEX.find(cleanDigits)
                 if (match != null) {
-                    extractedNumber = match.groupValues[1]
+                    extracted11Digit = match.groupValues[1]
+                    rawExtractedAccount = cleanDigits
                     break
                 }
             }
         }
 
-        if (extractedNumber.isBlank()) {
+        if (extracted11Digit.isBlank()) {
             for ((key, value) in nestedAccountTlvs) {
                 if (!key.endsWith("_00") && value.matches(Regex("\\d{8,16}"))) {
-                    extractedNumber = value
+                    extracted11Digit = value
+                    rawExtractedAccount = value
                     break
                 }
             }
         }
 
-        val isAgent = fullSearchText.contains("agent") ||
-            fullSearchText.contains("uddokta") ||
-            fullSearchText.contains("cashout") ||
-            fullSearchText.contains("cash out") ||
-            mcc in setOf("6010", "6011", "6012")
+        val roleSearchSpace = (accountMetaValues + additionalDataMap.values)
+            .joinToString(" ")
+            .lowercase(Locale.ROOT)
 
-        val isPersonal = fullSearchText.contains("personal") || fullSearchText.contains("p2p")
+        val hasExplicitAgentKeyword = Regex("\\b(agent|uddokta|cashout|cash_out|cico|distributor|dso)\\b")
+            .containsMatchIn(roleSearchSpace) ||
+            roleSearchSpace.contains("cash out") ||
+            tag59BusinessName.lowercase(Locale.ROOT).contains("uddokta") ||
+            tag59BusinessName.lowercase(Locale.ROOT).contains("agent")
+
+        val hasExplicitMerchantKeyword = Regex("\\b(merchant|payment|retail|shop|store|pos|npsb|banglaqr)\\b")
+            .containsMatchIn(roleSearchSpace) ||
+            combinedGuiText.contains("banglaqr") ||
+            combinedGuiText.contains("npsb")
+
+        val hasPersonalKeyword = Regex("\\b(personal|p2p|sendmoney|send_money)\\b")
+            .containsMatchIn(roleSearchSpace)
+
+        val isAgentMcc = mcc in AGENT_MCC_SET
+        val isRetailMerchantMcc = mcc.matches(Regex("\\d{4}")) && mcc != "0000" && !isAgentMcc
 
         val accountRole = when {
-            isAgent -> "agent"
-            isPersonal -> "personal"
-            else -> "merchant"
+            hasExplicitAgentKeyword || isAgentMcc -> "agent"
+            hasExplicitMerchantKeyword || isRetailMerchantMcc -> "merchant"
+            hasPersonalKeyword -> "personal"
+            tag59BusinessName.isNotBlank() && rootTlvs.keys.any { it.toIntOrNull() in 26..51 } -> "merchant"
+            else -> "unknown"
         }
 
         val suggestedAction = when (accountRole) {
             "agent" -> "cash_out"
+            "merchant" -> "payment"
             "personal" -> "send_money"
-            else -> "payment"
+            else -> ""
         }
 
-        val supported = extractedNumber.isNotBlank()
+        val tag62StoreLabel = (additionalDataMap["03"] ?: "").trim()
+        val tag62TerminalOrOwner = (additionalDataMap["07"] ?: additionalDataMap["08"] ?: "").trim()
+        val localBanglaName = (localLanguageMap["01"] ?: "").trim()
+
+        val resolvedStoreName = when {
+            tag59BusinessName.isNotBlank() && tag62StoreLabel.isNotBlank() && !tag59BusinessName.equals(tag62StoreLabel, ignoreCase = true) ->
+                "$tag59BusinessName ($tag62StoreLabel)"
+            tag59BusinessName.isNotBlank() -> tag59BusinessName
+            tag62StoreLabel.isNotBlank() -> tag62StoreLabel
+            localBanglaName.isNotBlank() -> localBanglaName
+            else -> ""
+        }
+
+        val resolvedOwnerName = when {
+            tag62TerminalOrOwner.isNotBlank() && !tag62TerminalOrOwner.matches(Regex("^[0-9*#]+$")) -> tag62TerminalOrOwner
+            localBanglaName.isNotBlank() && !localBanglaName.equals(tag59BusinessName, ignoreCase = true) -> localBanglaName
+            tag59BusinessName.isNotBlank() -> tag59BusinessName
+            else -> ""
+        }
+
+        val supported = extracted11Digit.isNotBlank() && (accountRole == "agent" || accountRole == "merchant" || accountRole == "personal")
         val statusMsg = if (supported) {
-            "${provider.uppercase(Locale.ROOT)} ($accountRole) QR শনাক্ত হয়েছে"
+            val roleLabel = when (accountRole) {
+                "agent" -> "এজেন্ট"
+                "merchant" -> "মার্চেন্ট"
+                else -> "পার্সোনাল"
+            }
+            "${provider.uppercase(Locale.ROOT)} $roleLabel QR শনাক্ত হয়েছে"
         } else {
-            "QR কোড থেকে অ্যাকাউন্ট নম্বর পাওয়া যায়নি"
+            "QR কোড থেকে সঠিক অ্যাকাউন্ট তথ্য পাওয়া যায়নি"
         }
 
         return ParsedQrResult(
             isSupported = supported,
             isEncrypted = false,
             provider = provider,
-            accountNumber = extractedNumber,
+            accountNumber = extracted11Digit,
+            rawAccountNumber = rawExtractedAccount.ifBlank { extracted11Digit },
             accountRole = accountRole,
             suggestedAction = suggestedAction,
-            accountName = merchantName,
+            accountName = resolvedStoreName,
+            storeName = resolvedStoreName,
+            ownerName = resolvedOwnerName,
+            mcc = mcc,
             amount = amount,
             rawContent = raw,
             message = statusMsg
@@ -310,14 +401,20 @@ object QrPayloadParser {
                     val rawAcc = json.optString("account_number", json.optString("account", ""))
                     val cleanAcc = rawAcc.replace(Regex("[^A-Za-z0-9]"), "")
                     if (BDRSF_ACCOUNT_REGEX.matches(cleanAcc)) {
+                        val bdrsfAcc = cleanAcc.uppercase(Locale.ROOT)
+                        val bdrsfName = json.optString("full_name", json.optString("name", ""))
                         return ParsedQrResult(
                             isSupported = true,
                             isEncrypted = false,
                             provider = "bdrsf",
-                            accountNumber = cleanAcc.uppercase(Locale.ROOT),
+                            accountNumber = bdrsfAcc,
+                            rawAccountNumber = bdrsfAcc,
                             accountRole = json.optString("account_type", "personal"),
                             suggestedAction = "send_money",
-                            accountName = json.optString("full_name", json.optString("name", "")),
+                            accountName = bdrsfName,
+                            storeName = bdrsfName,
+                            ownerName = bdrsfName,
+                            mcc = "",
                             amount = json.optString("amount", ""),
                             rawContent = raw,
                             message = "BDRSF QR শনাক্ত হয়েছে"
@@ -328,7 +425,7 @@ object QrPayloadParser {
                         "mobile",
                         json.optString("phone", json.optString("msisdn", rawAcc))
                     )
-                    val phone = normalizeBdPhone(phoneRaw)
+                    val phone = normalizeBdPhone11(phoneRaw)
                     if (phone.isNotBlank()) {
                         val lower = text.lowercase(Locale.ROOT)
                         val provider = when {
@@ -338,7 +435,8 @@ object QrPayloadParser {
                             lower.contains("upay") -> "upay"
                             else -> "mfs"
                         }
-                        val name = json.optString("name", json.optString("title", ""))
+                        val store = json.optString("store_name", json.optString("business_name", json.optString("name", json.optString("title", ""))))
+                        val owner = json.optString("owner_name", json.optString("agent_name", store))
                         val typeRaw = json.optString("type", json.optString("role", "personal")).lowercase(Locale.ROOT)
                         val role = when {
                             typeRaw.contains("agent") || typeRaw.contains("uddokta") -> "agent"
@@ -355,9 +453,13 @@ object QrPayloadParser {
                             isEncrypted = false,
                             provider = provider,
                             accountNumber = phone,
+                            rawAccountNumber = phone,
                             accountRole = role,
                             suggestedAction = action,
-                            accountName = name,
+                            accountName = store,
+                            storeName = store,
+                            ownerName = owner,
+                            mcc = "",
                             amount = json.optString("amount", ""),
                             rawContent = raw,
                             message = "${provider.uppercase(Locale.ROOT)} QR শনাক্ত হয়েছে"
@@ -372,7 +474,7 @@ object QrPayloadParser {
 
     private fun parseDirectPhoneNumber(raw: String): ParsedQrResult? {
         val cleaned = raw.removePrefix("tel:").removePrefix("TEL:").trim()
-        val match = BD_PHONE_REGEX.matchEntire(cleaned) ?: return null
+        val match = BD_MOBILE_11_REGEX.matchEntire(cleaned) ?: return null
         val normalizedNumber = match.groupValues[1]
 
         return ParsedQrResult(
@@ -380,18 +482,22 @@ object QrPayloadParser {
             isEncrypted = false,
             provider = "direct_number",
             accountNumber = normalizedNumber,
+            rawAccountNumber = normalizedNumber,
             accountRole = "personal",
             suggestedAction = "send_money",
             accountName = "",
+            storeName = "",
+            ownerName = "",
+            mcc = "",
             amount = "",
             rawContent = raw,
             message = "মোবাইল নম্বর শনাক্ত হয়েছে"
         )
     }
 
-    private fun normalizeBdPhone(input: String): String {
+    private fun normalizeBdPhone11(input: String): String {
         val digitsOnly = input.replace(Regex("[^0-9+]"), "")
-        val match = BD_PHONE_REGEX.find(digitsOnly)
+        val match = BD_MOBILE_11_REGEX.find(digitsOnly)
         return match?.groupValues?.get(1) ?: ""
     }
 
