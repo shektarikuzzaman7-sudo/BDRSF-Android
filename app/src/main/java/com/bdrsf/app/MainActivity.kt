@@ -32,6 +32,7 @@ import com.bdrsf.app.bridge.WebBridgeContract.Actions
 import com.bdrsf.app.bridge.WebBridgeContract.BridgeResponse
 import com.bdrsf.app.bridge.WebBridgeContract.Status
 import com.bdrsf.app.config.WebAppConfig
+import com.bdrsf.app.features.contact.ContactPickerFeature
 import com.bdrsf.app.features.document.DocumentScannerFeature
 import com.bdrsf.app.features.document.OcrProcessorFeature
 import com.bdrsf.app.features.download.DownloadFeature
@@ -57,6 +58,7 @@ class MainActivity : AppCompatActivity(), AndroidBridge.BridgeActionHandler {
     private lateinit var webChromeClient: NativeWebChromeClient
     private lateinit var downloadFeature: DownloadFeature
     private lateinit var shareFeature: ShareFeature
+    private lateinit var contactPickerFeature: ContactPickerFeature
     private lateinit var qrScannerFeature: QrScannerFeature
     private lateinit var documentScannerFeature: DocumentScannerFeature
     private lateinit var ocrProcessorFeature: OcrProcessorFeature
@@ -126,7 +128,7 @@ class MainActivity : AppCompatActivity(), AndroidBridge.BridgeActionHandler {
         mainLayout.addView(webView)
 
         splashLayout = FrameLayout(this).apply {
-            layoutParams = RelativeLayout.LayoutParams(RelativeLayout.LayoutParams.MATCH_PARENT, RelativeLayout.LayoutParams.MATCH_PARENT)
+            layoutParams = FrameLayout.LayoutParams(RelativeLayout.LayoutParams.MATCH_PARENT, RelativeLayout.LayoutParams.MATCH_PARENT)
             setBackgroundColor(Color.parseColor("#0A2F1D"))
         }
 
@@ -157,6 +159,7 @@ class MainActivity : AppCompatActivity(), AndroidBridge.BridgeActionHandler {
         androidBridge = AndroidBridge(this, webView, this)
         downloadFeature = DownloadFeature(this)
         shareFeature = ShareFeature(this)
+        contactPickerFeature = ContactPickerFeature(this, androidBridge)
         qrScannerFeature = QrScannerFeature(this, mainLayout, androidBridge)
         ocrProcessorFeature = OcrProcessorFeature(this, androidBridge, webView)
 
@@ -378,6 +381,7 @@ class MainActivity : AppCompatActivity(), AndroidBridge.BridgeActionHandler {
 
     override fun onCustomActionRequested(action: String, payload: JSONObject, callback: String?) {
         when (action) {
+            "PICK_CONTACT" -> contactPickerFeature.pickContact(callback)
             "FORCE_REFRESH" -> WebAppConfig.forceRefreshWithCacheBypass(webView)
             "PROCESS_SAVED_DOCUMENTS" -> {
                 val docType = payload.optString("docType", "NID")
@@ -399,6 +403,8 @@ class MainActivity : AppCompatActivity(), AndroidBridge.BridgeActionHandler {
         } else if (requestCode == RC_GALLERY_QR) {
             qrScannerFeature.handleGalleryResult(resultCode, data, pendingGalleryQrCallback)
             pendingGalleryQrCallback = null
+        } else if (contactPickerFeature.handleActivityResult(requestCode, resultCode, data)) {
+            return
         } else {
             super.onActivityResult(requestCode, resultCode, data)
         }
