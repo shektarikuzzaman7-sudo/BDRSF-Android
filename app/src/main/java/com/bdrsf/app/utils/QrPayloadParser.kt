@@ -11,7 +11,7 @@ object QrPayloadParser {
 
     private val BD_MOBILE_11_REGEX = Regex("(?:\\+?88)?(01[3-9]\\d{8})(?:\\d)?")
     private val BDRSF_ACCOUNT_REGEX = Regex("^[A-Za-z]{2}\\d{6,15}$")
-    private val AGENT_MCC_SET = setOf("4829", "6010", "6011", "6012", "6051")
+    private val STRICT_AGENT_MCC_SET = setOf("6010", "6011")
 
     data class ParsedQrResult(
         val isSupported: Boolean,
@@ -258,6 +258,7 @@ object QrPayloadParser {
         val nestedAccountTlvs = linkedMapOf<String, String>()
         val guiList = mutableListOf<String>()
         val accountMetaValues = mutableListOf<String>()
+        val mfsSubTypeCodes = mutableListOf<String>()
 
         for (tagInt in 26..51) {
             val tagKey = tagInt.toString().padStart(2, '0')
@@ -270,6 +271,9 @@ object QrPayloadParser {
                     guiList.add(subVal.lowercase(Locale.ROOT))
                 } else {
                     accountMetaValues.add(subVal)
+                    if (subTag in setOf("02", "03", "04")) {
+                        mfsSubTypeCodes.add(subVal.trim().lowercase(Locale.ROOT))
+                    }
                 }
             }
         }
@@ -351,31 +355,43 @@ object QrPayloadParser {
             .lowercase(Locale.ROOT)
         val lowerBusinessName = tag59BusinessName.lowercase(Locale.ROOT)
 
-        val hasExplicitAgentKeyword = Regex("\\b(agent|uddokta|cashout|cash_out|cico|distributor|dso)\\b")
+        val isInteroperableBanglaQr = combinedGuiText.contains("banglaqr") ||
+            combinedGuiText.contains("npsb") ||
+            combinedGuiText.contains("bd.gov.bb") ||
+            rootTlvs.containsKey("26") && combinedGuiText.contains("01")
+
+        val hasExplicitMerchantMarker = Regex("\\b(merchant|payment|retail|shop|store|pos|npsb|banglaqr)\\b")
+            .containsMatchIn(roleSearchSpace) ||
+            combinedGuiText.contains(".merchant") ||
+            mfsSubTypeCodes.any { it in setOf("01", "m", "mr", "mer", "merchant") }
+
+        val hasExplicitAgentMarker = Regex("\\b(agent|uddokta|cashout|cash_out|cico|distributor)\\b")
             .containsMatchIn(roleSearchSpace) ||
             roleSearchSpace.contains("cash out") ||
             roleSearchSpace.contains(".agent") ||
             roleSearchSpace.contains(".uddokta") ||
             lowerBusinessName.contains("uddokta") ||
-            lowerBusinessName.contains("agent")
+            lowerBusinessName.contains("agent") ||
+            mfsSubTypeCodes.any { it in setOf("02", "a", "ag", "agt", "agent", "uddokta") }
 
-        val hasExplicitMerchantKeyword = Regex("\\b(merchant|payment|retail|shop|store|pos|npsb|banglaqr)\\b")
+        val hasPersonalMarker = Regex("\\b(personal|p2p|sendmoney|send_money)\\b")
             .containsMatchIn(roleSearchSpace) ||
-            combinedGuiText.contains("banglaqr") ||
-            combinedGuiText.contains("npsb") ||
-            combinedGuiText.contains(".merchant")
+            mfsSubTypeCodes.any { it in setOf("03", "p", "per", "personal") }
 
-        val hasPersonalKeyword = Regex("\\b(personal|p2p|sendmoney|send_money)\\b")
-            .containsMatchIn(roleSearchSpace)
-
-        val isAgentMcc = mcc in AGENT_MCC_SET
-        val isCommercialMerchantMcc = mcc.matches(Regex("\\d{4}")) && mcc != "0000" && !isAgentMcc
+        val isStrictAgentMcc = mcc in STRICT_AGENT_MCC_SET
+        val isFinancialMcc = mcc == "6012" || mcc == "4829"
+        val isCommercialMerchantMcc = mcc.matches(Regex("\\d{4}")) && mcc != "0000" && !isStrictAgentMcc && !isFinancialMcc
 
         val accountRole = when {
-            hasExplicitAgentKeyword || isAgentMcc -> "agent"
-            hasExplicitMerchantKeyword || isCommercialMerchantMcc -> "merchant"
-            hasPersonalKeyword -> "personal"
-            tag59BusinessName.isNotBlank() && rootTlvs.keys.any { it.toIntOrNull() in 26..51 } -> "merchant"
+            isInteroperableBanglaQr -> "merchant"
+            hasExplicitMerchantMarker && !hasExplicitAgentMarker -> "merchant"
+            hasExplicitAgentMarker && !hasExplicitMerchantMarker -> "agent"
+            isStrictAgentMcc -> "agent"
+            isCommercialMerchantMcc -> "merchant"
+            isFinancialMcc -> "agent"
+            hasPersonalMarker -> "personal"
+            mcc == "0000" && tag59BusinessName.isNotBlank() -> "agent"
+            tag59BusinessName.isNotBlank() -> "merchant"
             else -> "unknown"
         }
 
@@ -390,19 +406,29 @@ object QrPayloadParser {
         val tag62TerminalOrOwner = (additionalDataMap["07"] ?: additionalDataMap["08"] ?: "").trim()
         val localBanglaName = (localLanguageMap["01"] ?: "").trim()
 
-        val resolvedStoreName = when {
-            tag59BusinessName.isNotBlank() && tag62StoreLabel.isNotBlank() && !tag59BusinessName.equals(tag62StoreLabel, ignoreCase = true) ->
-                "$tag59BusinessName ($tag62StoreLabel)"
-            tag59BusinessName.isNotBlank() -> tag59BusinessName
-            tag62StoreLabel.isNotBlank() -> tag62StoreLabel
-            localBanglaName.isNotBlank() -> localBanglaName
-            else -> ""
+        var resolvedOwnerName = ""
+        var resolvedStoreName = ""
+
+        if (tag59BusinessName.isNotBlank() && tag62StoreLabel.isNotBlank() && !tag59BusinessName.equals(tag62StoreLabel, ignoreCase = true)) {
+            resolvedOwnerName = tag59BusinessName
+            resolvedStoreName = tag62StoreLabel
+        } else if (tag59BusinessName.isNotBlank() && tag62TerminalOrOwner.isNotBlank() && !tag62TerminalOrOwner.matches(Regex("^[0-9*#]+$")) && !tag59BusinessName.equals(tag62TerminalOrOwner, ignoreCase = true)) {
+            resolvedOwnerName = tag62TerminalOrOwner
+            resolvedStoreName = tag59BusinessName
+        } else if (tag59BusinessName.isNotBlank()) {
+            resolvedStoreName = tag59BusinessName
+            resolvedOwnerName = if (localBanglaName.isNotBlank() && !localBanglaName.equals(tag59BusinessName, ignoreCase = true)) localBanglaName else ""
+        } else if (tag62StoreLabel.isNotBlank()) {
+            resolvedStoreName = tag62StoreLabel
+        } else if (localBanglaName.isNotBlank()) {
+            resolvedStoreName = localBanglaName
         }
 
-        val resolvedOwnerName = when {
-            tag62TerminalOrOwner.isNotBlank() && !tag62TerminalOrOwner.matches(Regex("^[0-9*#]+$")) -> tag62TerminalOrOwner
-            localBanglaName.isNotBlank() && !localBanglaName.equals(tag59BusinessName, ignoreCase = true) -> localBanglaName
-            tag59BusinessName.isNotBlank() -> tag59BusinessName
+        val unifiedDisplayName = when {
+            resolvedOwnerName.isNotBlank() && resolvedStoreName.isNotBlank() && !resolvedOwnerName.equals(resolvedStoreName, ignoreCase = true) ->
+                "$resolvedOwnerName ($resolvedStoreName)"
+            resolvedStoreName.isNotBlank() -> resolvedStoreName
+            resolvedOwnerName.isNotBlank() -> resolvedOwnerName
             else -> ""
         }
 
@@ -426,7 +452,7 @@ object QrPayloadParser {
             rawAccountNumber = rawExtractedAccount.ifBlank { extracted11Digit },
             accountRole = accountRole,
             suggestedAction = suggestedAction,
-            accountName = resolvedStoreName,
+            accountName = unifiedDisplayName,
             storeName = resolvedStoreName,
             ownerName = resolvedOwnerName,
             mcc = mcc,
@@ -490,8 +516,13 @@ object QrPayloadParser {
                             lower.contains("upay") -> "upay"
                             else -> "mfs"
                         }
-                        val store = json.optString("store_name", json.optString("business_name", json.optString("name", json.optString("title", ""))))
-                        val owner = json.optString("owner_name", json.optString("agent_name", store))
+                        val store = json.optString("store_name", json.optString("business_name", json.optString("name", json.optString("title", "")))).trim()
+                        val owner = json.optString("owner_name", json.optString("agent_name", "")).trim()
+                        val unified = when {
+                            owner.isNotBlank() && store.isNotBlank() && !owner.equals(store, ignoreCase = true) -> "$owner ($store)"
+                            store.isNotBlank() -> store
+                            else -> owner
+                        }
                         val typeRaw = json.optString("type", json.optString("role", "personal")).lowercase(Locale.ROOT)
                         val role = when {
                             typeRaw.contains("agent") || typeRaw.contains("uddokta") -> "agent"
@@ -511,7 +542,7 @@ object QrPayloadParser {
                             rawAccountNumber = phone,
                             accountRole = role,
                             suggestedAction = action,
-                            accountName = store,
+                            accountName = unified,
                             storeName = store,
                             ownerName = owner,
                             mcc = "",
