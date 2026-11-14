@@ -115,10 +115,11 @@ class MainActivity : AppCompatActivity(), AndroidBridge.BridgeActionHandler {
         ViewCompat.setOnApplyWindowInsetsListener(mainLayout) { view, insets ->
             val statusBars = insets.getInsets(WindowInsetsCompat.Type.statusBars())
             val navBars = insets.getInsets(WindowInsetsCompat.Type.navigationBars())
-            val ime = insets.getInsets(WindowInsetsCompat.Type.ime())
 
-            val bottomInset = if (ime.bottom > 0) ime.bottom else navBars.bottom
-            view.setPadding(0, statusBars.top, 0, bottomInset)
+            // SOFT_INPUT_ADJUST_RESIZE দ্বারা কিবোর্ড উঠলে সিস্টেম উইন্ডো স্বয়ংক্রিয়ভাবে রিসাইজ হয়।
+            // অতিরিক্ত ime.bottom প্যাডিং যুক্ত করার কারণে দ্বিগুণ রিসাইজ ও পেজ লাফালাফি হতো। 
+            // তাই এখানে শুধুমাত্র statusBars.top এবং navBars.bottom ব্যবহার করা হয়েছে।
+            view.setPadding(0, statusBars.top, 0, navBars.bottom)
             WindowInsetsCompat.CONSUMED
         }
 
@@ -128,7 +129,7 @@ class MainActivity : AppCompatActivity(), AndroidBridge.BridgeActionHandler {
         mainLayout.addView(webView)
 
         splashLayout = FrameLayout(this).apply {
-            layoutParams = FrameLayout.LayoutParams(RelativeLayout.LayoutParams.MATCH_PARENT, RelativeLayout.LayoutParams.MATCH_PARENT)
+            layoutParams = RelativeLayout.LayoutParams(RelativeLayout.LayoutParams.MATCH_PARENT, RelativeLayout.LayoutParams.MATCH_PARENT)
             setBackgroundColor(Color.parseColor("#0A2F1D"))
         }
 
