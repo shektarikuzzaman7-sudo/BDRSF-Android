@@ -115,7 +115,10 @@ class MainActivity : AppCompatActivity(), AndroidBridge.BridgeActionHandler {
         ViewCompat.setOnApplyWindowInsetsListener(mainLayout) { view, insets ->
             val statusBars = insets.getInsets(WindowInsetsCompat.Type.statusBars())
             val navBars = insets.getInsets(WindowInsetsCompat.Type.navigationBars())
-            view.setPadding(0, statusBars.top, 0, navBars.bottom)
+            val ime = insets.getInsets(WindowInsetsCompat.Type.ime())
+
+            val bottomInset = if (ime.bottom > 0) ime.bottom else navBars.bottom
+            view.setPadding(0, statusBars.top, 0, bottomInset)
             WindowInsetsCompat.CONSUMED
         }
 
@@ -125,7 +128,7 @@ class MainActivity : AppCompatActivity(), AndroidBridge.BridgeActionHandler {
         mainLayout.addView(webView)
 
         splashLayout = FrameLayout(this).apply {
-            layoutParams = RelativeLayout.LayoutParams(RelativeLayout.LayoutParams.MATCH_PARENT, RelativeLayout.LayoutParams.MATCH_PARENT)
+            layoutParams = FrameLayout.LayoutParams(RelativeLayout.LayoutParams.MATCH_PARENT, RelativeLayout.LayoutParams.MATCH_PARENT)
             setBackgroundColor(Color.parseColor("#0A2F1D"))
         }
 
