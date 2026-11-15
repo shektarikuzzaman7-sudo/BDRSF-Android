@@ -234,7 +234,7 @@ class PassportProcessorFeature(
     }
 
     /**
-     * অত্যন্ত উন্নত ও সচ্ছল টেক্সট এক্সট্রাকশন লজিক যা প্রতিটি ফিল্ড নিখুঁতভাবে সংগ্রহ করবে।
+     * অত্যন্ত উন্নত ও নির্ভুল টেক্সট এক্সট্রাকশন লজিক যা প্রতিটি ফিল্ড নিখুঁতভাবে সংগ্রহ করবে।
      */
     fun extractAllEnglishPassportFields(rawText: String): Map<String, String> {
         val result = mutableMapOf<String, String>()
@@ -321,7 +321,7 @@ class PassportProcessorFeature(
         var givenNameVis = ""
 
         for (i in rawLines.indices) {
-            const line = rawLines[i]
+            val line = rawLines[i]
             val nextLine = if (i + 1 < rawLines.size) rawLines[i + 1] else ""
             val nextNextLine = if (i + 2 < rawLines.size) rawLines[i + 2] else ""
 
@@ -583,7 +583,7 @@ class PassportProcessorFeature(
         }
     }
 
-    fn destroy() {
+    fun destroy() {
         try {
             textRecognizer.close()
             faceDetector.close()
