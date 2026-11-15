@@ -55,11 +55,15 @@ import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicBoolean
 
+/**
+ * PHP-পলিসি চালিত সার্বজনীন ক্যামেরা স্ক্যানার।
+ * PHP থেকে পাঠানো `frameRatio` এবং `guideText` অনুযায়ী ভিউফাইন্ডার তৈরি করে।
+ */
 class DocumentScannerFeature(
     private val activity: Activity,
     private val rootContainer: ViewGroup,
     private val bridge: AndroidBridge,
-    private val onDocumentCapturedListener: (capturedFile: File, scanMode: String, callback: String?) -> Unit
+    private val onDocumentCapturedListener: (capturedFile: File, scanMode: String, policy: JSONObject, callback: String?) -> Unit
 ) {
 
     private val cameraExecutor: ExecutorService = Executors.newSingleThreadExecutor()
@@ -71,6 +75,7 @@ class DocumentScannerFeature(
     private var hudOverlayView: View? = null
 
     private var activeScanMode: String = "card"
+    private var activePolicy: JSONObject = JSONObject()
     private var activeCallback: String? = null
     private var isTorchOn: Boolean = false
     private val isCapturing = AtomicBoolean(false)
@@ -96,10 +101,10 @@ class DocumentScannerFeature(
     }
 
     private fun resolveNormalizedScanMode(payload: JSONObject): String {
-        val rawMode = payload.optString("mode", "")
+        val rawMode = payload.optString("docCategory", "")
+            .ifBlank { payload.optString("mode", "") }
             .ifBlank { payload.optString("documentType", "") }
-            .ifBlank { payload.optString("docType", "") }
-            .ifBlank { payload.optString("slot", "card") }
+            .ifBlank { payload.optString("docType", "card") }
             .trim()
             .lowercase(Locale.ROOT)
 
@@ -108,17 +113,13 @@ class DocumentScannerFeature(
             rawMode.contains("face") || rawMode.contains("selfie") || rawMode.contains("live") -> "face_liveness"
             rawMode.contains("back") -> "nid_back"
             rawMode.contains("nid") || rawMode.contains("front") || rawMode.contains("card") -> "nid_front"
-            else -> rawMode
+            else -> "generic"
         }
     }
 
     fun startScanner(payload: JSONObject, callback: String?) {
         if (!hasCameraPermission()) {
-            ActivityCompat.requestPermissions(
-                activity,
-                arrayOf(Manifest.permission.CAMERA),
-                2001
-            )
+            ActivityCompat.requestPermissions(activity, arrayOf(Manifest.permission.CAMERA), 2001)
             return
         }
 
@@ -130,44 +131,39 @@ class DocumentScannerFeature(
             stableFrameCount = 0
             isTorchOn = false
             activeCallback = callback
+            activePolicy = payload
             activeScanMode = resolveNormalizedScanMode(payload)
 
-            buildScannerLayout()
+            val customRatio = payload.optDouble("frameRatio", 0.0).toFloat()
+            val customGuide = payload.optString("guideText", "")
+
+            buildScannerLayout(customRatio, customGuide)
             bindCameraProvider()
         }
     }
 
-    private fun buildScannerLayout() {
+    private fun buildScannerLayout(customRatio: Float, customGuide: String) {
         val density = activity.resources.displayMetrics.density
 
         scannerOverlayLayout = FrameLayout(activity).apply {
-            layoutParams = FrameLayout.LayoutParams(
-                FrameLayout.LayoutParams.MATCH_PARENT,
-                FrameLayout.LayoutParams.MATCH_PARENT
-            )
+            layoutParams = FrameLayout.LayoutParams(FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT)
             setBackgroundColor(Color.BLACK)
         }
 
         previewView = PreviewView(activity).apply {
-            layoutParams = FrameLayout.LayoutParams(
-                FrameLayout.LayoutParams.MATCH_PARENT,
-                FrameLayout.LayoutParams.MATCH_PARENT
-            )
+            layoutParams = FrameLayout.LayoutParams(FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT)
         }
         scannerOverlayLayout?.addView(previewView)
 
         hudOverlayView = if (isFaceMode()) {
             FaceLivenessHudView(activity)
         } else {
-            DocumentCardHudView(activity, activeScanMode)
+            DocumentCardHudView(activity, activeScanMode, customRatio, customGuide)
         }
         scannerOverlayLayout?.addView(hudOverlayView)
 
         val topControlsLayout = FrameLayout(activity).apply {
-            layoutParams = FrameLayout.LayoutParams(
-                FrameLayout.LayoutParams.MATCH_PARENT,
-                (60 * density).toInt()
-            ).apply {
+            layoutParams = FrameLayout.LayoutParams(FrameLayout.LayoutParams.MATCH_PARENT, (60 * density).toInt()).apply {
                 topMargin = (35 * density).toInt()
                 leftMargin = (20 * density).toInt()
                 rightMargin = (20 * density).toInt()
@@ -180,10 +176,7 @@ class DocumentScannerFeature(
             textSize = 15f
             setPadding((14 * density).toInt(), (8 * density).toInt(), (14 * density).toInt(), (8 * density).toInt())
             setBackgroundColor(Color.parseColor("#80000000"))
-            layoutParams = FrameLayout.LayoutParams(
-                FrameLayout.LayoutParams.WRAP_CONTENT,
-                FrameLayout.LayoutParams.WRAP_CONTENT
-            ).apply {
+            layoutParams = FrameLayout.LayoutParams(FrameLayout.LayoutParams.WRAP_CONTENT, FrameLayout.LayoutParams.WRAP_CONTENT).apply {
                 gravity = Gravity.START or Gravity.CENTER_VERTICAL
             }
             setOnClickListener { stopScanner(isCancelled = true) }
@@ -197,10 +190,7 @@ class DocumentScannerFeature(
                 textSize = 15f
                 setPadding((14 * density).toInt(), (8 * density).toInt(), (14 * density).toInt(), (8 * density).toInt())
                 setBackgroundColor(Color.parseColor("#80000000"))
-                layoutParams = FrameLayout.LayoutParams(
-                    FrameLayout.LayoutParams.WRAP_CONTENT,
-                    FrameLayout.LayoutParams.WRAP_CONTENT
-                ).apply {
+                layoutParams = FrameLayout.LayoutParams(FrameLayout.LayoutParams.WRAP_CONTENT, FrameLayout.LayoutParams.WRAP_CONTENT).apply {
                     gravity = Gravity.END or Gravity.CENTER_VERTICAL
                 }
                 setOnClickListener { toggleTorch(this) }
@@ -216,10 +206,7 @@ class DocumentScannerFeature(
             textSize = 16f
             setPadding((24 * density).toInt(), (10 * density).toInt(), (24 * density).toInt(), (10 * density).toInt())
             setBackgroundColor(Color.parseColor("#9900E676"))
-            layoutParams = FrameLayout.LayoutParams(
-                FrameLayout.LayoutParams.WRAP_CONTENT,
-                FrameLayout.LayoutParams.WRAP_CONTENT
-            ).apply {
+            layoutParams = FrameLayout.LayoutParams(FrameLayout.LayoutParams.WRAP_CONTENT, FrameLayout.LayoutParams.WRAP_CONTENT).apply {
                 gravity = Gravity.BOTTOM or Gravity.CENTER_HORIZONTAL
                 bottomMargin = (30 * density).toInt()
             }
@@ -264,11 +251,7 @@ class DocumentScannerFeature(
             .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
             .build()
 
-        val cameraSelector = if (isFaceMode()) {
-            CameraSelector.DEFAULT_FRONT_CAMERA
-        } else {
-            CameraSelector.DEFAULT_BACK_CAMERA
-        }
+        val cameraSelector = if (isFaceMode()) CameraSelector.DEFAULT_FRONT_CAMERA else CameraSelector.DEFAULT_BACK_CAMERA
 
         imageAnalysis.setAnalyzer(cameraExecutor) { imageProxy ->
             if (!isScanningActive || isCapturing.get()) {
@@ -282,9 +265,7 @@ class DocumentScannerFeature(
                 return@setAnalyzer
             }
 
-            val rotationDegrees = imageProxy.imageInfo.rotationDegrees
-            val inputImage = InputImage.fromMediaImage(mediaImage, rotationDegrees)
-
+            val inputImage = InputImage.fromMediaImage(mediaImage, imageProxy.imageInfo.rotationDegrees)
             if (isFaceMode()) {
                 analyzeFaceLiveness(inputImage, imageProxy)
             } else {
@@ -294,13 +275,7 @@ class DocumentScannerFeature(
 
         try {
             provider.unbindAll()
-            camera = provider.bindToLifecycle(
-                lifecycleOwner,
-                cameraSelector,
-                preview,
-                imageCapture,
-                imageAnalysis
-            )
+            camera = provider.bindToLifecycle(lifecycleOwner, cameraSelector, preview, imageCapture, imageAnalysis)
         } catch (e: Exception) {
             Log.e("DocScannerFeature", "Lifecycle binding failed", e)
             stopScanner(isCancelled = true)
@@ -311,7 +286,6 @@ class DocumentScannerFeature(
         faceDetector.process(inputImage)
             .addOnSuccessListener { faces ->
                 if (!isScanningActive || isCapturing.get()) return@addOnSuccessListener
-
                 val faceView = hudOverlayView as? FaceLivenessHudView
                 if (faces.isEmpty()) {
                     stableFrameCount = 0
@@ -322,27 +296,15 @@ class DocumentScannerFeature(
                 val face = faces[0]
                 val yaw = face.headEulerAngleY
                 val pitch = face.headEulerAngleX
-                val leftEyeOpen = face.leftEyeOpenProbability ?: -1f
-                val rightEyeOpen = face.rightEyeOpenProbability ?: -1f
+                val leftEye = face.leftEyeOpenProbability ?: -1f
+                val rightEye = face.rightEyeOpenProbability ?: -1f
 
                 when {
-                    yaw > 12f -> {
+                    yaw > 12f || yaw < -12f || pitch > 14f || pitch < -12f -> {
                         stableFrameCount = 0
-                        faceView?.updateGuidance("মাথা সামান্য বামে ঘোরান", Color.YELLOW, 0.2f)
+                        faceView?.updateGuidance("মুখমণ্ডল ফ্রেমের মাঝে সোজা রাখুন", Color.YELLOW, 0.25f)
                     }
-                    yaw < -12f -> {
-                        stableFrameCount = 0
-                        faceView?.updateGuidance("মাথা সামান্য ডানে ঘোরান", Color.YELLOW, 0.2f)
-                    }
-                    pitch > 14f -> {
-                        stableFrameCount = 0
-                        faceView?.updateGuidance("মাথা সামান্য নিচে নামান", Color.YELLOW, 0.3f)
-                    }
-                    pitch < -12f -> {
-                        stableFrameCount = 0
-                        faceView?.updateGuidance("মাথা সামান্য উপরে তুলুন", Color.YELLOW, 0.3f)
-                    }
-                    leftEyeOpen in 0f..0.55f || rightEyeOpen in 0f..0.55f -> {
+                    leftEye in 0f..0.55f || rightEye in 0f..0.55f -> {
                         stableFrameCount = 0
                         faceView?.updateGuidance("চোখ পুরোপুরি খোলা রাখুন", Color.parseColor("#FFA500"), 0.5f)
                     }
@@ -350,62 +312,48 @@ class DocumentScannerFeature(
                         stableFrameCount++
                         val progress = (stableFrameCount.toFloat() / requiredStableFrames).coerceIn(0f, 1f)
                         faceView?.updateGuidance("স্থির থাকুন... ছবি তোলা হচ্ছে", Color.parseColor("#00E676"), progress)
-
-                        if (stableFrameCount >= requiredStableFrames) {
-                            if (isCapturing.compareAndSet(false, true)) {
-                                triggerTakePicture()
-                            }
+                        if (stableFrameCount >= requiredStableFrames && isCapturing.compareAndSet(false, true)) {
+                            triggerTakePicture()
                         }
                     }
                 }
             }
-            .addOnFailureListener {
-                stableFrameCount = 0
-            }
-            .addOnCompleteListener {
-                imageProxy.close()
-            }
+            .addOnFailureListener { stableFrameCount = 0 }
+            .addOnCompleteListener { imageProxy.close() }
     }
 
     private fun analyzeDocumentFrame(inputImage: InputImage, imageProxy: androidx.camera.core.ImageProxy) {
+        val autoCapture = activePolicy.optBoolean("autoCapture", true)
         textRecognizer.process(inputImage)
             .addOnSuccessListener { visionText ->
                 if (!isScanningActive || isCapturing.get()) return@addOnSuccessListener
-
                 val cardView = hudOverlayView as? DocumentCardHudView
                 val totalLines = visionText.textBlocks.sumOf { it.lines.size }
 
-                if (totalLines >= 3) {
+                if (totalLines >= 4) {
                     stableFrameCount++
                     cardView?.setCardDetected(true)
-                    if (stableFrameCount >= 5) {
-                        if (isCapturing.compareAndSet(false, true)) {
-                            triggerTakePicture()
-                        }
+                    if (autoCapture && stableFrameCount >= 6 && isCapturing.compareAndSet(false, true)) {
+                        triggerTakePicture()
                     }
                 } else {
                     stableFrameCount = 0
                     cardView?.setCardDetected(false)
                 }
             }
-            .addOnFailureListener {
-                stableFrameCount = 0
-            }
-            .addOnCompleteListener {
-                imageProxy.close()
-            }
+            .addOnFailureListener { stableFrameCount = 0 }
+            .addOnCompleteListener { imageProxy.close() }
     }
 
     private fun triggerTakePicture() {
         val photoFile = try {
             createTempScanFile()
-        } catch (e: Exception) {
+        } catch (_: Exception) {
             isCapturing.set(false)
             return
         }
 
         val outputOptions = ImageCapture.OutputFileOptions.Builder(photoFile).build()
-
         imageCapture?.takePicture(
             outputOptions,
             ContextCompat.getMainExecutor(activity),
@@ -413,9 +361,10 @@ class DocumentScannerFeature(
                 override fun onImageSaved(outputFileResults: ImageCapture.OutputFileResults) {
                     val callback = activeCallback
                     val mode = activeScanMode
+                    val policy = activePolicy
 
                     stopScanner(isCancelled = false)
-                    onDocumentCapturedListener(photoFile, mode, callback)
+                    onDocumentCapturedListener(photoFile, mode, policy, callback)
                 }
 
                 override fun onError(exception: ImageCaptureException) {
@@ -456,11 +405,7 @@ class DocumentScannerFeature(
 
         if (isCancelled && activeCallback != null) {
             bridge.sendResponseToWeb(
-                response = BridgeResponse(
-                    action = Actions.START_KYC,
-                    status = Status.CANCELLED,
-                    message = "Scanning cancelled by user"
-                ),
+                response = BridgeResponse(action = Actions.START_KYC, status = Status.CANCELLED, message = "Scanning cancelled by user"),
                 callbackFunction = activeCallback
             )
             activeCallback = null
@@ -477,10 +422,7 @@ class DocumentScannerFeature(
     }
 
     private fun hasCameraPermission(): Boolean {
-        return ContextCompat.checkSelfPermission(
-            activity,
-            Manifest.permission.CAMERA
-        ) == PackageManager.PERMISSION_GRANTED
+        return ContextCompat.checkSelfPermission(activity, Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED
     }
 
     private fun isFaceMode(): Boolean {
@@ -490,44 +432,21 @@ class DocumentScannerFeature(
     @Throws(IOException::class)
     private fun createTempScanFile(): File {
         val timestamp = SimpleDateFormat("yyyyMMdd_HHmmss", Locale.getDefault()).format(Date())
-        val fileName = "SCAN_${activeScanMode.uppercase(Locale.ROOT)}_$timestamp"
-        return File.createTempFile(fileName, ".jpg", activity.cacheDir)
+        return File.createTempFile("SCAN_${activeScanMode.uppercase(Locale.ROOT)}_$timestamp", ".jpg", activity.cacheDir)
     }
 
-    private inner class DocumentCardHudView(context: Context, private val mode: String) : View(context) {
+    private inner class DocumentCardHudView(
+        context: Context,
+        private val mode: String,
+        private val customRatio: Float,
+        private val customGuide: String
+    ) : View(context) {
 
-        private val shadePaint = Paint().apply {
-            color = Color.parseColor("#B3000000")
-            style = Paint.Style.FILL
-        }
-
-        private val borderPaint = Paint().apply {
-            color = Color.parseColor("#00E676")
-            style = Paint.Style.STROKE
-            strokeWidth = 6f
-            isAntiAlias = true
-        }
-
-        private val cornerPaint = Paint().apply {
-            color = Color.parseColor("#00E676")
-            style = Paint.Style.STROKE
-            strokeWidth = 12f
-            strokeCap = Paint.Cap.ROUND
-            isAntiAlias = true
-        }
-
-        private val laserPaint = Paint().apply {
-            isAntiAlias = true
-            strokeWidth = 6f
-        }
-
-        private val textPaint = Paint().apply {
-            color = Color.WHITE
-            textSize = 36f
-            textAlign = Paint.Align.CENTER
-            isAntiAlias = true
-            setShadowLayer(8f, 0f, 0f, Color.BLACK)
-        }
+        private val shadePaint = Paint().apply { color = Color.parseColor("#B3000000"); style = Paint.Style.FILL }
+        private val borderPaint = Paint().apply { color = Color.parseColor("#00E676"); style = Paint.Style.STROKE; strokeWidth = 6f; isAntiAlias = true }
+        private val cornerPaint = Paint().apply { color = Color.parseColor("#00E676"); style = Paint.Style.STROKE; strokeWidth = 12f; strokeCap = Paint.Cap.ROUND; isAntiAlias = true }
+        private val laserPaint = Paint().apply { isAntiAlias = true; strokeWidth = 6f }
+        private val textPaint = Paint().apply { color = Color.WHITE; textSize = 35f; textAlign = Paint.Align.CENTER; isAntiAlias = true; setShadowLayer(8f, 0f, 0f, Color.BLACK) }
 
         private val cardBox = RectF()
         private var laserY = 0f
@@ -536,16 +455,15 @@ class DocumentScannerFeature(
         override fun onSizeChanged(w: Int, h: Int, oldw: Int, oldh: Int) {
             super.onSizeChanged(w, h, oldw, oldh)
             val boxWidth = w * 0.90f
-            val boxHeight = if (mode == "passport") {
-                (boxWidth * 1.15f).coerceAtMost(h * 0.62f)
-            } else {
-                boxWidth / 1.58f
+            val boxHeight = when {
+                customRatio > 0f -> (boxWidth / customRatio).coerceAtMost(h * 0.65f)
+                mode == "passport" -> (boxWidth * 1.15f).coerceAtMost(h * 0.62f)
+                else -> boxWidth / 1.58f
             }
 
             val left = (w - boxWidth) / 2f
             val top = (h - boxHeight) / 2f - 25f
             cardBox.set(left, top, left + boxWidth, top + boxHeight)
-
             startLaserAnimation()
         }
 
@@ -585,7 +503,6 @@ class DocumentScannerFeature(
             canvas.drawRect(0f, cardBox.bottom, w, h, shadePaint)
             canvas.drawRect(0f, cardBox.top, cardBox.left, cardBox.bottom, shadePaint)
             canvas.drawRect(cardBox.right, cardBox.top, w, cardBox.bottom, shadePaint)
-
             canvas.drawRoundRect(cardBox, 20f, 20f, borderPaint)
 
             val cl = 55f
@@ -608,50 +525,26 @@ class DocumentScannerFeature(
                 canvas.drawLine(cardBox.left + 15f, laserY, cardBox.right - 15f, laserY, laserPaint)
             }
 
-            val guide = when (mode) {
-                "nid_front" -> "এনআইডি কার্ডের সামনের অংশ ফ্রেমে সোজা রাখুন"
-                "nid_back" -> "এনআইডি কার্ডের পেছনের অংশ ফ্রেমে রাখুন"
-                "passport" -> "পাসপোর্টের পৃষ্ঠাটি ফ্রেমের ভেতরে সোজা রাখুন"
-                else -> "ডকুমেন্টটি ফ্রেমের ভেতরে সোজা রাখুন"
+            val guide = if (customGuide.isNotBlank()) {
+                customGuide
+            } else {
+                when (mode) {
+                    "nid_front" -> "এনআইডি কার্ডের সামনের অংশ ফ্রেমে সোজা রাখুন"
+                    "nid_back" -> "এনআইডি কার্ডের পেছনের অংশ ফ্রেমে রাখুন"
+                    "passport" -> "পাসপোর্টের পৃষ্ঠাটি ফ্রেমের ভেতরে সোজা রাখুন"
+                    else -> "ডকুমেন্টটি ফ্রেমের ভেতরে সোজা রাখুন"
+                }
             }
             canvas.drawText(guide, w / 2f, cardBox.bottom + 65f, textPaint)
         }
     }
 
     private inner class FaceLivenessHudView(context: Context) : View(context) {
-
-        private val clearPaint = Paint().apply {
-            xfermode = PorterDuffXfermode(PorterDuff.Mode.CLEAR)
-            isAntiAlias = true
-        }
-
-        private val backgroundPaint = Paint().apply {
-            color = Color.parseColor("#CC000000")
-            style = Paint.Style.FILL
-        }
-
-        private val ringBackgroundPaint = Paint().apply {
-            color = Color.parseColor("#44FFFFFF")
-            style = Paint.Style.STROKE
-            strokeWidth = 8f
-            isAntiAlias = true
-        }
-
-        private val ringProgressPaint = Paint().apply {
-            color = Color.parseColor("#00E676")
-            style = Paint.Style.STROKE
-            strokeWidth = 10f
-            strokeCap = Paint.Cap.ROUND
-            isAntiAlias = true
-        }
-
-        private val textPaint = Paint().apply {
-            color = Color.WHITE
-            textSize = 42f
-            textAlign = Paint.Align.CENTER
-            isAntiAlias = true
-            setShadowLayer(8f, 0f, 0f, Color.BLACK)
-        }
+        private val clearPaint = Paint().apply { xfermode = PorterDuffXfermode(PorterDuff.Mode.CLEAR); isAntiAlias = true }
+        private val backgroundPaint = Paint().apply { color = Color.parseColor("#CC000000"); style = Paint.Style.FILL }
+        private val ringBackgroundPaint = Paint().apply { color = Color.parseColor("#44FFFFFF"); style = Paint.Style.STROKE; strokeWidth = 8f; isAntiAlias = true }
+        private val ringProgressPaint = Paint().apply { color = Color.parseColor("#00E676"); style = Paint.Style.STROKE; strokeWidth = 10f; strokeCap = Paint.Cap.ROUND; isAntiAlias = true }
+        private val textPaint = Paint().apply { color = Color.WHITE; textSize = 42f; textAlign = Paint.Align.CENTER; isAntiAlias = true; setShadowLayer(8f, 0f, 0f, Color.BLACK) }
 
         private val ovalBounds = RectF()
         private var currentGuidance: String = "ফ্রেমের ভেতরে আপনার মুখমণ্ডল সোজা রাখুন"
@@ -660,7 +553,6 @@ class DocumentScannerFeature(
         override fun onSizeChanged(w: Int, h: Int, oldw: Int, oldh: Int) {
             super.onSizeChanged(w, h, oldw, oldh)
             setLayerType(LAYER_TYPE_SOFTWARE, null)
-
             val ovalWidth = w * 0.75f
             val ovalHeight = ovalWidth * 1.35f
             val left = (w - ovalWidth) / 2f
@@ -679,16 +571,12 @@ class DocumentScannerFeature(
             super.onDraw(canvas)
             val w = width.toFloat()
             val h = height.toFloat()
-
             canvas.drawRect(0f, 0f, w, h, backgroundPaint)
             canvas.drawOval(ovalBounds, clearPaint)
             canvas.drawOval(ovalBounds, ringBackgroundPaint)
-
             if (progressPercent > 0f) {
-                val sweep = progressPercent * 360f
-                canvas.drawArc(ovalBounds, -90f, sweep, false, ringProgressPaint)
+                canvas.drawArc(ovalBounds, -90f, progressPercent * 360f, false, ringProgressPaint)
             }
-
             canvas.drawText(currentGuidance, w / 2f, ovalBounds.bottom + 80f, textPaint)
         }
     }
