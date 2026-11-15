@@ -1,3 +1,4 @@
+
 package com.bdrsf.app.features.document
 
 import android.app.Activity
@@ -28,30 +29,30 @@ import org.json.JSONObject
 import java.io.ByteArrayOutputStream
 import java.io.File
 import java.io.FileOutputStream
-import java.util.Calendar
+import java.text.SimpleDateFormat
+import java.util.Date
 import java.util.Locale
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
-import kotlin.math.abs
 import kotlin.math.max
 
 /**
- * BDRSF Offline Passport Processor.
+ * BDRSF Passport OCR Processor
  *
  * - Offline Google ML Kit Latin OCR
- * - ICAO TD3 MRZ extraction
- * - MRZ check digit validation
- * - English passport field extraction
+ * - Passport visual text recognition
+ * - English information extraction
+ * - Personal data and emergency contact extraction
  * - Face detection and portrait cropping
  * - EXIF orientation correction
- * - PHP WebView bridge integration
+ * - WebView bridge integration
  *
- * IMPORTANT:
- * MRZ check digits verify document data consistency only.
- * They do NOT prove government authenticity or that a passport is genuine.
+ * QR, barcode and MRZ validation are intentionally not used.
+ * This performs OCR-based document recognition, not authenticity verification.
  */
+
 class PassportProcessorFeature(
     private val activity: Activity,
     private val bridge: AndroidBridge,
@@ -78,29 +79,27 @@ class PassportProcessorFeature(
     @Volatile
     private var pendingCallback: String? = null
 
-    private val textRecognizerDelegate =
-        lazy {
-            TextRecognition.getClient(
-                TextRecognizerOptions.DEFAULT_OPTIONS
+    private val textRecognizerDelegate = lazy {
+        TextRecognition.getClient(
+            TextRecognizerOptions.DEFAULT_OPTIONS
+        )
+    }
+
+    private val faceDetectorDelegate = lazy {
+        val options = FaceDetectorOptions.Builder()
+            .setPerformanceMode(
+                FaceDetectorOptions.PERFORMANCE_MODE_FAST
             )
-        }
+            .setLandmarkMode(
+                FaceDetectorOptions.LANDMARK_MODE_NONE
+            )
+            .setClassificationMode(
+                FaceDetectorOptions.CLASSIFICATION_MODE_NONE
+            )
+            .build()
 
-    private val faceDetectorDelegate =
-        lazy {
-            val options = FaceDetectorOptions.Builder()
-                .setPerformanceMode(
-                    FaceDetectorOptions.PERFORMANCE_MODE_FAST
-                )
-                .setLandmarkMode(
-                    FaceDetectorOptions.LANDMARK_MODE_NONE
-                )
-                .setClassificationMode(
-                    FaceDetectorOptions.CLASSIFICATION_MODE_NONE
-                )
-                .build()
-
-            FaceDetection.getClient(options)
-        }
+        FaceDetection.getClient(options)
+    }
 
     private val textRecognizer: TextRecognizer
         get() = textRecognizerDelegate.value
@@ -239,10 +238,7 @@ class PassportProcessorFeature(
         val policy = copyJson(policyPayload ?: activePolicy)
 
         if (!file.exists() || file.length() <= 0L) {
-            notifyError(
-                "পাসপোর্টের ছবি পাওয়া যায়নি",
-                callback
-            )
+            notifyError("পাসপোর্টের ছবি পাওয়া যায়নি", callback)
             return
         }
 
@@ -252,16 +248,12 @@ class PassportProcessorFeature(
             bgExecutor.execute {
 
                 var processedBitmap: Bitmap? = null
-                var bitmapHandedToOcr = false
-
                 val bitmapRecycled = AtomicBoolean(false)
 
                 fun recycleBitmap() {
                     if (bitmapRecycled.compareAndSet(false, true)) {
                         processedBitmap?.let {
-                            if (!it.isRecycled) {
-                                it.recycle()
-                            }
+                            if (!it.isRecycled) it.recycle()
                         }
                     }
                 }
@@ -306,8 +298,6 @@ class PassportProcessorFeature(
                         0
                     )
 
-                    bitmapHandedToOcr = true
-
                     textRecognizer.process(inputImage)
                         .addOnSuccessListener { visionText ->
 
@@ -330,29 +320,25 @@ class PassportProcessorFeature(
                                     return@addOnSuccessListener
                                 }
 
-                                val mrz = extractMrz(visionText)
-
-                                if (mrz == null || !mrz.isValid) {
-                                    notifyError(
-                                        "পাসপোর্টের MRZ যাচাই করা যায়নি। " +
-                                            "পাসপোর্টের নিচের দুইটি MRZ লাইনসহ " +
-                                            "পরিষ্কার ও সোজা ছবি দিন।",
-                                        callback
-                                    )
-                                    return@addOnSuccessListener
-                                }
-
                                 val fields =
                                     extractAllEnglishPassportFields(
                                         visionText
                                     )
+
+                                if (!isPassportDocument(rawText, fields)) {
+                                    notifyError(
+                                        "পাসপোর্টের প্রয়োজনীয় তথ্য পাওয়া যায়নি। " +
+                                            "পাসপোর্টের তথ্যের পাতার পরিষ্কার ছবি দিন।",
+                                        callback
+                                    )
+                                    return@addOnSuccessListener
+                                }
 
                                 dispatchPassportSuccess(
                                     fullPageBase64 = fullPageBase64,
                                     faceBase64 = faceBase64,
                                     fields = fields,
                                     rawText = rawText,
-                                    mrz = mrz,
                                     callback = callback
                                 )
 
@@ -371,17 +357,15 @@ class PassportProcessorFeature(
                             recycleBitmap()
 
                             notifyError(
-                                "পাসপোর্টের লেখা পড়া যায়নি। পরিষ্কার ছবি দিন। " +
+                                "পাসপোর্টের লেখা পড়া যায়নি। " +
+                                    "পরিষ্কার ছবি দিন। " +
                                     "${error.localizedMessage ?: ""}",
                                 callback
                             )
                         }
 
                 } catch (e: Exception) {
-
-                    if (!bitmapHandedToOcr) {
-                        recycleBitmap()
-                    }
+                    recycleBitmap()
 
                     notifyError(
                         "প্রসেসিং ত্রুটি: ${e.localizedMessage ?: ""}",
@@ -396,6 +380,35 @@ class PassportProcessorFeature(
                 callback
             )
         }
+    }
+
+    // ---------------------------------------------------------
+    // PASSPORT DOCUMENT RECOGNITION
+    // ---------------------------------------------------------
+
+    private fun isPassportDocument(
+        rawText: String,
+        fields: Map<String, String>
+    ): Boolean {
+
+        val upper = rawText.uppercase(Locale.ROOT)
+
+        val hasPassportWord =
+            upper.contains("PASSPORT") ||
+                upper.contains("PEOPLE'S REPUBLIC OF")
+
+        val indicators = listOf(
+            fields["passportNo"],
+            fields["nationality"],
+            fields["dob"],
+            fields["surname"],
+            fields["givenNames"],
+            fields["passportType"],
+            fields["countryCode"]
+        ).count { !it.isNullOrBlank() }
+
+        // Passport title plus at least two useful passport fields.
+        return hasPassportWord && indicators >= 2
     }
 
     // ---------------------------------------------------------
@@ -446,19 +459,6 @@ class PassportProcessorFeature(
                     "এটি গ্রহণযোগ্য পাসপোর্টের ছবি নয়।"
                 )
             }
-        } else {
-            val hasPassportIndicator =
-                upper.contains("PASSPORT") ||
-                    upper.contains("P<") ||
-                    upper.contains("SURNAME") ||
-                    upper.contains("GIVEN NAME")
-
-            if (!hasPassportIndicator) {
-                return policy.optString(
-                    "invalidMessage",
-                    "পাসপোর্টের পরিচিত তথ্য পাওয়া যায়নি।"
-                )
-            }
         }
 
         return null
@@ -484,353 +484,259 @@ class PassportProcessorFeature(
     }
 
     // ---------------------------------------------------------
-    // ICAO MRZ DATA
+    // TEXT NORMALIZATION
     // ---------------------------------------------------------
 
-    private data class MrzResult(
-        val line1: String,
-        val line2: String,
-        val passportNo: String,
-        val nationality: String,
-        val surname: String,
-        val givenNames: String,
-        val dob: String,
-        val gender: String,
-        val expiryDate: String,
-        val personalNo: String,
-        val passportCheck: Boolean,
-        val dobCheck: Boolean,
-        val expiryCheck: Boolean,
-        val personalCheck: Boolean,
-        val compositeCheck: Boolean,
-        val isValid: Boolean
-    )
-
-    private fun normalizeMrzLine(line: String): String {
-        return line.uppercase(Locale.ROOT)
-            .replace(Regex("[^A-Z0-9<]"), "")
-    }
-
-    /**
-     * OCR character correction for numeric-only MRZ fields.
-     *
-     * Do not apply this to the nationality field.
-     * Do not apply this to the passport number because it can contain letters.
-     */
-    private fun normalizeMrzDigits(value: String): String {
-        return value.map { char ->
-            when (char) {
-                'O', 'Q', 'D' -> '0'
-                'I', 'L' -> '1'
-                'Z' -> '2'
-                'S' -> '5'
-                'B' -> '8'
-                else -> char
-            }
-        }.joinToString("")
-    }
-
-    private fun mrzCharacterValue(char: Char): Int {
-        return when {
-            char == '<' -> 0
-            char in '0'..'9' -> char - '0'
-            char in 'A'..'Z' -> char - 'A' + 10
-            else -> -1
-        }
-    }
-
-    /**
-     * ICAO 9303 check digit algorithm.
-     * Weight sequence: 7, 3, 1.
-     */
-    private fun calculateMrzCheckDigit(
-        value: String
-    ): Char? {
-
-        val weights = intArrayOf(7, 3, 1)
-        var total = 0
-
-        for (i in value.indices) {
-            val charValue = mrzCharacterValue(value[i])
-
-            if (charValue < 0) return null
-
-            total += charValue * weights[i % 3]
-        }
-
-        return ('0'.code + total % 10).toChar()
-    }
-
-    private fun checkMrzField(
-        value: String,
-        checkDigit: Char
-    ): Boolean {
-
-        val calculated = calculateMrzCheckDigit(value)
-
-        return calculated != null &&
-            calculated == checkDigit
-    }
-
-    /**
-     * Resolve YYMMDD without java.time so this works on minSdk 23.
-     *
-     * DOB: choose a plausible past date within 120 years.
-     * Expiry: choose the candidate closest to the current year.
-     */
-    private fun resolveMrzDate(
-        value: String,
-        isExpiry: Boolean
-    ): String? {
-
-        if (
-            value.length != 6 ||
-            !value.all { it in '0'..'9' }
-        ) {
-            return null
-        }
-
-        val yy = value.substring(0, 2).toInt()
-        val month = value.substring(2, 4).toInt()
-        val day = value.substring(4, 6).toInt()
-
-        if (month !in 1..12 || day !in 1..31) {
-            return null
-        }
-
-        val currentYear = Calendar.getInstance().get(
-            Calendar.YEAR
-        )
-
-        fun makeValidDate(year: Int): Calendar? {
-            return try {
-                Calendar.getInstance(Locale.US).apply {
-                    isLenient = false
-                    clear()
-                    set(year, month - 1, day, 0, 0, 0)
-                    timeInMillis
-                }
-            } catch (_: Exception) {
-                null
-            }
-        }
-
-        val candidates = listOf(
-            1900 + yy,
-            2000 + yy
-        ).distinct().mapNotNull { year ->
-            makeValidDate(year)
-        }
-
-        if (candidates.isEmpty()) return null
-
-        val selected = if (isExpiry) {
-            candidates.minByOrNull { candidate ->
-                abs(
-                    candidate.get(Calendar.YEAR) - currentYear
-                )
-            }
-        } else {
-            candidates
-                .filter { candidate ->
-                    val year = candidate.get(Calendar.YEAR)
-
-                    year <= currentYear &&
-                        year >= currentYear - 120
-                }
-                .maxByOrNull { candidate ->
-                    candidate.get(Calendar.YEAR)
-                }
-        } ?: return null
-
-        val year = selected.get(Calendar.YEAR)
-        val resolvedMonth = selected.get(Calendar.MONTH) + 1
-        val resolvedDay = selected.get(Calendar.DAY_OF_MONTH)
-
-        return String.format(
-            Locale.US,
-            "%04d-%02d-%02d",
-            year,
-            resolvedMonth,
-            resolvedDay
-        )
-    }
-
-    /**
-     * Finds and validates ICAO TD3 passport MRZ.
-     * Each TD3 line contains exactly 44 characters.
-     */
-    private fun extractMrz(
-        visionText: Text
-    ): MrzResult? {
-
-        val lines = visionText.text.lines()
-            .map { normalizeMrzLine(it) }
-            .filter { it.isNotEmpty() }
-
-        val firstIndex = lines.indexOfFirst {
-            it.startsWith("P<") && it.length == 44
-        }
-
-        if (firstIndex < 0) return null
-
-        val first = lines[firstIndex]
-
-        // The second MRZ line is normally immediately below the first.
-        // Allow one intervening OCR line, but do not require nationality BGD.
-        val second = lines
-            .drop(firstIndex + 1)
-            .take(3)
-            .firstOrNull {
-                it.length == 44 && !it.startsWith("P<")
-            } ?: return null
-
-        if (first.length != 44 || second.length != 44) {
-            return null
-        }
-
-        /*
-         * TD3 line 2 positions:
-         *  0..8   Passport number
-         *  9      Passport number check digit
-         *  10..12 Nationality
-         *  13..18 Date of birth
-         *  19     DOB check digit
-         *  20     Sex
-         *  21..26 Expiry date
-         *  27     Expiry check digit
-         *  28..41 Optional data
-         *  42     Optional data check digit
-         *  43     Composite check digit
-         */
-
-        // Correct only numeric fields. Nationality remains unchanged.
-        val correctedSecond =
-            second.substring(0, 13) +
-                normalizeMrzDigits(second.substring(13, 20)) +
-                second.substring(20, 21) +
-                normalizeMrzDigits(second.substring(21, 28)) +
-                second.substring(28)
-
-        val passportNo = correctedSecond
-            .substring(0, 9)
-            .replace("<", "")
+    private fun normalizeLine(value: String): String {
+        return value
+            .replace('\u00A0', ' ')
+            .replace(Regex("\\s+"), " ")
             .trim()
+    }
 
-        val nationality = correctedSecond.substring(10, 13)
+    private fun cleanValue(value: String): String {
+        return normalizeLine(value)
+            .trim(':', '-', ' ', '.', ';')
+    }
 
-        val dobRaw = correctedSecond.substring(13, 19)
-        val genderChar = correctedSecond[20]
-        val expiryRaw = correctedSecond.substring(21, 27)
+    private fun getOcrLines(visionText: Text): List<String> {
+        val result = mutableListOf<String>()
 
-        val optionalData = correctedSecond.substring(28, 42)
+        for (block in visionText.textBlocks) {
+            for (line in block.lines) {
+                val value = normalizeLine(line.text)
+                if (value.isNotEmpty()) {
+                    result.add(value)
+                }
+            }
+        }
 
-        val personalNo = optionalData
-            .replace("<", "")
-            .trim()
-
-        val passportCheck = checkMrzField(
-            correctedSecond.substring(0, 9),
-            correctedSecond[9]
-        )
-
-        val dobCheck = checkMrzField(
-            dobRaw,
-            correctedSecond[19]
-        )
-
-        val expiryCheck = checkMrzField(
-            expiryRaw,
-            correctedSecond[27]
-        )
-
-        val personalCheck = if (
-            optionalData.any { it != '<' }
-        ) {
-            checkMrzField(
-                optionalData,
-                correctedSecond[42]
+        // Fallback to full OCR text if line blocks are unavailable.
+        if (result.isEmpty()) {
+            result.addAll(
+                visionText.text.lines()
+                    .map { normalizeLine(it) }
+                    .filter { it.isNotEmpty() }
             )
-        } else {
-            // ICAO filler is acceptable when optional data is empty.
-            correctedSecond[42] == '<' ||
-                correctedSecond[42].isDigit()
         }
 
-        // TD3 composite check digit:
-        // positions 0..9 + 13..19 + 21..42
-        val compositeData =
-            correctedSecond.substring(0, 10) +
-                correctedSecond.substring(13, 20) +
-                correctedSecond.substring(21, 43)
+        return result
+    }
 
-        val compositeCheck = checkMrzField(
-            compositeData,
-            correctedSecond[43]
+    // ---------------------------------------------------------
+    // LABEL BASED EXTRACTION
+    // ---------------------------------------------------------
+
+    private fun extractLabelValue(
+        lines: List<String>,
+        labels: List<String>,
+        nextLines: Int = 1
+    ): String {
+
+        val sortedLabels = labels.sortedByDescending {
+            it.length
+        }
+
+        for (i in lines.indices) {
+
+            val line = lines[i]
+            val upper = line.uppercase(Locale.ROOT)
+
+            for (label in sortedLabels) {
+
+                val labelUpper = label.uppercase(Locale.ROOT)
+                val index = upper.indexOf(labelUpper)
+
+                if (index < 0) continue
+
+                val after = cleanValue(
+                    line.substring(index + label.length)
+                )
+
+                if (after.isNotBlank()) {
+                    return after
+                }
+
+                for (offset in 1..nextLines) {
+                    val next = lines.getOrNull(i + offset).orEmpty()
+
+                    if (
+                        next.isNotBlank() &&
+                        !isKnownLabelLine(next)
+                    ) {
+                        return cleanValue(next)
+                    }
+                }
+            }
+        }
+
+        return ""
+    }
+
+    private fun extractMultilineValue(
+        lines: List<String>,
+        labels: List<String>,
+        maxNextLines: Int = 2
+    ): String {
+
+        val sortedLabels = labels.sortedByDescending {
+            it.length
+        }
+
+        for (i in lines.indices) {
+
+            val line = lines[i]
+            val upper = line.uppercase(Locale.ROOT)
+
+            for (label in sortedLabels) {
+
+                val index = upper.indexOf(label.uppercase(Locale.ROOT))
+
+                if (index < 0) continue
+
+                val parts = mutableListOf<String>()
+
+                val firstValue = cleanValue(
+                    line.substring(index + label.length)
+                )
+
+                if (firstValue.isNotBlank()) {
+                    parts.add(firstValue)
+                }
+
+                for (offset in 1..maxNextLines) {
+                    val next = lines.getOrNull(i + offset).orEmpty()
+
+                    if (
+                        next.isBlank() ||
+                        isKnownLabelLine(next)
+                    ) {
+                        break
+                    }
+
+                    parts.add(cleanValue(next))
+                }
+
+                return parts.joinToString(" ").trim()
+            }
+        }
+
+        return ""
+    }
+
+    private fun isKnownLabelLine(value: String): Boolean {
+
+        val upper = value.uppercase(Locale.ROOT)
+
+        val labels = listOf(
+            "PASSPORT NUMBER",
+            "PASSPORT NO",
+            "COUNTRY CODE",
+            "NATIONALITY",
+            "SURNAME",
+            "GIVEN NAME",
+            "DATE OF BIRTH",
+            "DATE OF ISSUE",
+            "DATE OF EXPIRY",
+            "PERSONAL NO",
+            "PERSONAL NUMBER",
+            "PLACE OF BIRTH",
+            "ISSUING AUTHORITY",
+            "FATHER'S NAME",
+            "FATHER NAME",
+            "MOTHER'S NAME",
+            "MOTHER NAME",
+            "SPOUSE'S NAME",
+            "SPOUSE NAME",
+            "PERMANENT ADDRESS",
+            "EMERGENCY CONTACT",
+            "RELATIONSHIP",
+            "TELEPHONE NO",
+            "TELEPHONE",
+            "MOBILE",
+            "PHONE",
+            "NAME:",
+            "ADDRESS:"
         )
 
-        val dateOfBirth = resolveMrzDate(
-            dobRaw,
-            false
+        return labels.any { upper.contains(it) }
+    }
+
+    // ---------------------------------------------------------
+    // DATE EXTRACTION
+    // ---------------------------------------------------------
+
+    private fun findDateNearLabel(
+        lines: List<String>,
+        labels: List<String>
+    ): String {
+
+        val dateRegex = Regex(
+            "\\b(\\d{1,2}\\s+(?:JAN|FEB|MAR|APR|MAY|JUN|JUL|AUG|SEP|OCT|NOV|DEC)[A-Z]*\\s+\\d{4}" +
+                "|\\d{1,2}/\\d{1,2}/\\d{4}" +
+                "|\\d{4}-\\d{2}-\\d{2}" +
+                "|\\d{1,2}-\\d{1,2}-\\d{4})\\b",
+            RegexOption.IGNORE_CASE
         )
 
-        val expiryDate = resolveMrzDate(
-            expiryRaw,
-            true
+        for (i in lines.indices) {
+
+            val upper = lines[i].uppercase(Locale.ROOT)
+
+            if (labels.any { upper.contains(it.uppercase(Locale.ROOT)) }) {
+
+                val searchText = buildString {
+                    append(lines[i])
+                    append(" ")
+                    append(lines.getOrNull(i + 1).orEmpty())
+                }
+
+                val match = dateRegex.find(searchText)
+
+                if (match != null) {
+                    return normalizeDate(match.groupValues[1])
+                }
+            }
+        }
+
+        return ""
+    }
+
+    private fun normalizeDate(value: String): String {
+
+        val formats = listOf(
+            "dd MMM yyyy",
+            "d MMM yyyy",
+            "dd MMMM yyyy",
+            "d MMMM yyyy",
+            "dd/MM/yyyy",
+            "d/M/yyyy",
+            "dd-MM-yyyy",
+            "d-M-yyyy",
+            "yyyy-MM-dd"
         )
 
-        val nameBody = first.substring(5)
-        val nameParts = nameBody.split("<<", limit = 2)
+        for (format in formats) {
+            try {
+                val parser = SimpleDateFormat(
+                    format,
+                    Locale.US
+                ).apply {
+                    isLenient = false
+                }
 
-        val surname = nameParts
-            .getOrNull(0)
-            .orEmpty()
-            .replace("<", " ")
-            .replace(Regex("\\s+"), " ")
-            .trim()
+                val date: Date = parser.parse(value.trim()) ?: continue
 
-        val givenNames = nameParts
-            .getOrNull(1)
-            .orEmpty()
-            .replace("<", " ")
-            .replace(Regex("\\s+"), " ")
-            .trim()
+                return SimpleDateFormat(
+                    "yyyy-MM-dd",
+                    Locale.US
+                ).format(date)
 
-        val valid =
-            passportNo.length >= 7 &&
-                passportCheck &&
-                dobCheck &&
-                expiryCheck &&
-                personalCheck &&
-                compositeCheck &&
-                dateOfBirth != null &&
-                expiryDate != null &&
-                (
-                    genderChar == 'M' ||
-                        genderChar == 'F' ||
-                        genderChar == '<'
-                    ) &&
-                nationality.matches(Regex("[A-Z]{3}")) &&
-                surname.isNotEmpty()
+            } catch (_: Exception) {
+            }
+        }
 
-        return MrzResult(
-            line1 = first,
-            line2 = correctedSecond,
-            passportNo = passportNo,
-            nationality = nationality,
-            surname = surname,
-            givenNames = givenNames,
-            dob = dateOfBirth ?: "",
-            gender = genderChar.toString(),
-            expiryDate = expiryDate ?: "",
-            personalNo = personalNo,
-            passportCheck = passportCheck,
-            dobCheck = dobCheck,
-            expiryCheck = expiryCheck,
-            personalCheck = personalCheck,
-            compositeCheck = compositeCheck,
-            isValid = valid
-        )
+        return value.trim()
     }
 
     // ---------------------------------------------------------
@@ -843,242 +749,183 @@ class PassportProcessorFeature(
 
         val result = mutableMapOf<String, String>()
 
+        val lines = getOcrLines(visionText)
+
         val rawText = visionText.text
-        val upperText = rawText.uppercase(Locale.ROOT)
 
-        val lines = upperText.lines()
-            .map { it.trim() }
-            .filter { it.isNotEmpty() }
+        // Main passport information page.
+        result["passportType"] = extractLabelValue(
+            lines,
+            listOf("TYPE OF PASSPORT", "TYPE")
+        )
 
-        val mrz = extractMrz(visionText)
+        result["countryCode"] = extractLabelValue(
+            lines,
+            listOf("COUNTRY CODE")
+        )
 
-        if (mrz != null) {
-            result["passportNo"] = mrz.passportNo
-            result["nationality"] = mrz.nationality
-            result["surname"] = mrz.surname
-            result["givenNames"] = mrz.givenNames
-
-            result["nameEn"] = listOf(
-                mrz.givenNames,
-                mrz.surname
+        result["passportNo"] = extractLabelValue(
+            lines,
+            listOf(
+                "PASSPORT NUMBER",
+                "PASSPORT NO.",
+                "PASSPORT NO"
             )
+        )
+
+        result["surname"] = extractLabelValue(
+            lines,
+            listOf("SURNAME")
+        )
+
+        result["givenNames"] = extractLabelValue(
+            lines,
+            listOf("GIVEN NAME", "GIVEN NAMES")
+        )
+
+        result["nationality"] = extractLabelValue(
+            lines,
+            listOf("NATIONALITY")
+        )
+
+        result["dob"] = findDateNearLabel(
+            lines,
+            listOf("DATE OF BIRTH", "BIRTH DATE", "DOB")
+        )
+
+        result["gender"] = extractLabelValue(
+            lines,
+            listOf("SEX", "GENDER")
+        )
+
+        result["birthPlace"] = extractLabelValue(
+            lines,
+            listOf("PLACE OF BIRTH", "BIRTH PLACE")
+        )
+
+        result["issueDate"] = findDateNearLabel(
+            lines,
+            listOf("DATE OF ISSUE", "ISSUE DATE")
+        )
+
+        result["expiryDate"] = findDateNearLabel(
+            lines,
+            listOf("DATE OF EXPIRY", "EXPIRY DATE")
+        )
+
+        result["personalNo"] = extractLabelValue(
+            lines,
+            listOf("PERSONAL NO.", "PERSONAL NO", "PERSONAL NUMBER")
+        )
+
+        result["issuingAuthority"] = extractLabelValue(
+            lines,
+            listOf("ISSUING AUTHORITY", "AUTHORITY")
+        )
+
+        result["placeOfIssue"] = extractLabelValue(
+            lines,
+            listOf("PLACE OF ISSUE")
+        )
+
+        // Personal data page.
+        result["nameEn"] = extractLabelValue(
+            lines,
+            listOf("NAME")
+        )
+
+        result["fatherName"] = extractLabelValue(
+            lines,
+            listOf("FATHER'S NAME", "FATHERS NAME", "FATHER NAME")
+        )
+
+        result["motherName"] = extractLabelValue(
+            lines,
+            listOf("MOTHER'S NAME", "MOTHERS NAME", "MOTHER NAME")
+        )
+
+        result["spouseName"] = extractLabelValue(
+            lines,
+            listOf("SPOUSE'S NAME", "SPOUSES NAME", "SPOUSE NAME")
+        )
+
+        result["permanentAddress"] = extractMultilineValue(
+            lines,
+            listOf("PERMANENT ADDRESS"),
+            2
+        )
+
+        result["emergencyContactName"] = extractLabelValue(
+            lines,
+            listOf("EMERGENCY CONTACT NAME")
+        )
+
+        result["emergencyContactRelation"] = extractLabelValue(
+            lines,
+            listOf("RELATIONSHIP", "RELATION")
+        )
+
+        result["emergencyContactAddress"] = extractMultilineValue(
+            lines,
+            listOf("EMERGENCY CONTACT ADDRESS", "ADDRESS"),
+            2
+        )
+
+        // Emergency contact phone.
+        val allText = lines.joinToString(" ")
+
+        val phoneRegex = Regex(
+            "(\\+?8801[3-9][0-9]{8}|01[3-9][0-9]{8})"
+        )
+
+        result["emergencyPhone"] =
+            phoneRegex.find(allText)?.groupValues?.get(1) ?: ""
+
+        // Fallback: passport number from OCR text.
+        if (result["passportNo"].isNullOrBlank()) {
+
+            val passportNumberRegex = Regex(
+                "\\b[A-Z][0-9]{7,9}\\b"
+            )
+
+            result["passportNo"] =
+                passportNumberRegex.find(
+                    rawText.uppercase(Locale.ROOT)
+                )?.value ?: ""
+        }
+
+        // Fallback: Bangladesh country code.
+        if (
+            result["countryCode"].isNullOrBlank() &&
+            result["nationality"].orEmpty()
+                .contains("BANGLADESH", true)
+        ) {
+            result["countryCode"] = "BGD"
+        }
+
+        // Fallback: full English name.
+        if (result["nameEn"].isNullOrBlank()) {
+            val given = result["givenNames"].orEmpty()
+            val surname = result["surname"].orEmpty()
+
+            result["nameEn"] = listOf(given, surname)
                 .filter { it.isNotBlank() }
                 .joinToString(" ")
-
-            result["dob"] = mrz.dob
-            result["gender"] = mrz.gender
-            result["expiryDate"] = mrz.expiryDate
-            result["personalNo"] = mrz.personalNo
-
-            result["mrzValid"] = mrz.isValid.toString()
-            result["mrzLine1"] = mrz.line1
-            result["mrzLine2"] = mrz.line2
         }
 
-        for (i in lines.indices) {
-
-            val line = lines[i]
-            val next = lines.getOrNull(i + 1).orEmpty()
-
-            fun extractValue(label: String): String {
-                return line.substringAfter(label, "")
-                    .trim()
-                    .trim(':', '-', ' ')
-            }
-
-            if (
-                result["passportType"].isNullOrEmpty() &&
-                line.contains("TYPE OF PASSPORT")
-            ) {
-                result["passportType"] =
-                    extractValue("TYPE OF PASSPORT").ifEmpty { next }
-            }
-
-            if (
-                result["nationality"].isNullOrEmpty() &&
-                line.contains("NATIONALITY")
-            ) {
-                result["nationality"] =
-                    extractValue("NATIONALITY").ifEmpty { next }
-            }
-
-            if (
-                result["surname"].isNullOrEmpty() &&
-                line.contains("SURNAME")
-            ) {
-                result["surname"] =
-                    extractValue("SURNAME").ifEmpty { next }
-            }
-
-            if (
-                result["givenNames"].isNullOrEmpty() &&
-                line.contains("GIVEN NAME")
-            ) {
-                result["givenNames"] =
-                    extractValue("GIVEN NAME").ifEmpty { next }
-            }
-
-            if (
-                result["nameEn"].isNullOrEmpty() &&
-                (line.startsWith("NAME:") || line == "NAME")
-            ) {
-                result["nameEn"] =
-                    extractValue("NAME").ifEmpty { next }
-            }
-
-            if (
-                result["fatherName"].isNullOrEmpty() &&
-                (
-                    line.contains("FATHER'S NAME") ||
-                        line.contains("FATHER NAME")
-                    )
-            ) {
-                result["fatherName"] =
-                    extractValue("FATHER'S NAME")
-                        .ifEmpty { extractValue("FATHER NAME") }
-                        .ifEmpty { next }
-            }
-
-            if (
-                result["motherName"].isNullOrEmpty() &&
-                (
-                    line.contains("MOTHER'S NAME") ||
-                        line.contains("MOTHER NAME")
-                    )
-            ) {
-                result["motherName"] =
-                    extractValue("MOTHER'S NAME")
-                        .ifEmpty { extractValue("MOTHER NAME") }
-                        .ifEmpty { next }
-            }
-
-            if (
-                result["spouseName"].isNullOrEmpty() &&
-                line.contains("SPOUSE")
-            ) {
-                result["spouseName"] =
-                    extractValue("SPOUSE").ifEmpty { next }
-            }
-
-            if (
-                result["birthPlace"].isNullOrEmpty() &&
-                line.contains("PLACE OF BIRTH")
-            ) {
-                result["birthPlace"] =
-                    extractValue("PLACE OF BIRTH").ifEmpty { next }
-            }
-
-            if (
-                result["issueDate"].isNullOrEmpty() &&
-                line.contains("DATE OF ISSUE")
-            ) {
-                result["issueDate"] =
-                    extractValue("DATE OF ISSUE").ifEmpty { next }
-            }
-
-            if (
-                result["expiryDate"].isNullOrEmpty() &&
-                line.contains("DATE OF EXPIRY")
-            ) {
-                result["expiryDate"] =
-                    extractValue("DATE OF EXPIRY").ifEmpty { next }
-            }
-
-            if (
-                result["permanentAddress"].isNullOrEmpty() &&
-                line.contains("PERMANENT ADDRESS")
-            ) {
-                result["permanentAddress"] =
-                    extractValue("PERMANENT ADDRESS").ifEmpty { next }
-            }
-
-            if (
-                result["issuingAuthority"].isNullOrEmpty() &&
-                line.contains("AUTHORITY")
-            ) {
-                result["issuingAuthority"] =
-                    extractValue("AUTHORITY").ifEmpty { next }
-            }
-
-            if (
-                result["placeOfIssue"].isNullOrEmpty() &&
-                line.contains("PLACE OF ISSUE")
-            ) {
-                result["placeOfIssue"] =
-                    extractValue("PLACE OF ISSUE").ifEmpty { next }
-            }
-
-            if (
-                result["emergencyPhone"].isNullOrEmpty() &&
-                (
-                    line.contains("TELEPHONE") ||
-                        line.contains("PHONE") ||
-                        line.contains("MOBILE")
-                    )
-            ) {
-                val phone = Regex(
-                    "(\\+?8801[3-9][0-9]{8}|01[3-9][0-9]{8})"
-                ).find("$line $next")
-
-                if (phone != null) {
-                    result["emergencyPhone"] =
-                        phone.groupValues[1]
-                }
-            }
+        // If separate surname/given names are unavailable,
+        // retain the full name without inventing parts.
+        if (
+            result["nameEn"].isNullOrBlank() &&
+            result["surname"].isNotBlank()
+        ) {
+            result["nameEn"] = result["surname"].orEmpty()
         }
 
-        if (result["issueDate"].isNullOrEmpty()) {
-            result["issueDate"] = findDateNearLabel(
-                lines,
-                "DATE OF ISSUE",
-                "ISSUE DATE"
-            )
-        }
-
-        if (result["dob"].isNullOrEmpty()) {
-            result["dob"] = findDateNearLabel(
-                lines,
-                "DATE OF BIRTH",
-                "DOB"
-            )
-        }
-
-        if (result["expiryDate"].isNullOrEmpty()) {
-            result["expiryDate"] = findDateNearLabel(
-                lines,
-                "DATE OF EXPIRY",
-                "EXPIRY DATE"
-            )
-        }
-
+        // Keep the original OCR result for frontend/debugging.
         result["rawText"] = rawText
 
         return result
-    }
-
-    private fun findDateNearLabel(
-        lines: List<String>,
-        vararg labels: String
-    ): String {
-
-        val dateRegex = Regex(
-            "\\b(\\d{2}\\s+(?:JAN|FEB|MAR|APR|MAY|JUN|JUL|AUG|SEP|OCT|NOV|DEC)\\s+\\d{4}|\\d{2}/\\d{2}/\\d{4}|\\d{4}-\\d{2}-\\d{2})\\b"
-        )
-
-        for (i in lines.indices) {
-            if (labels.any { lines[i].contains(it) }) {
-                val match = dateRegex.find(
-                    lines[i] + " " +
-                        lines.getOrNull(i + 1).orEmpty()
-                )
-
-                if (match != null) {
-                    return match.groupValues[1]
-                }
-            }
-        }
-
-        return ""
     }
 
     // ---------------------------------------------------------
@@ -1130,20 +977,15 @@ class PassportProcessorFeature(
                 file.absolutePath
             ) ?: return
 
-            val rotated = try {
-                Bitmap.createBitmap(
-                    original,
-                    0,
-                    0,
-                    original.width,
-                    original.height,
-                    matrix,
-                    true
-                )
-            } catch (e: Exception) {
-                if (!original.isRecycled) original.recycle()
-                return
-            }
+            val rotated = Bitmap.createBitmap(
+                original,
+                0,
+                0,
+                original.width,
+                original.height,
+                matrix,
+                true
+            )
 
             if (rotated !== original && !original.isRecycled) {
                 original.recycle()
@@ -1224,6 +1066,7 @@ class PassportProcessorFeature(
                     )
 
                     if (!compressed) {
+                        if (!bitmap.isRecycled) bitmap.recycle()
                         return Pair(null, "")
                     }
 
@@ -1351,7 +1194,6 @@ class PassportProcessorFeature(
         faceBase64: String,
         fields: Map<String, String>,
         rawText: String,
-        mrz: MrzResult,
         callback: String?
     ) {
 
@@ -1361,51 +1203,69 @@ class PassportProcessorFeature(
 
         val extraJson = JSONObject().apply {
 
-            // Compatibility flag: MRZ consistency only, not authenticity.
-            put("isPassportVerified", mrz.isValid)
+            // OCR-based document recognition only.
+            put("isPassportVerified", true)
             put("isPassportOcrSuccessful", true)
-            put("mrzValid", mrz.isValid)
+            put("documentTypeRecognized", "passport")
 
-            put("verificationLevel", "MRZ_CHECK_DIGITS_ONLY")
+            put("verificationLevel", "VISUAL_OCR_ONLY")
             put("isGovernmentAuthenticityVerified", false)
 
             put("passportType", fields["passportType"] ?: "")
+            put("countryCode", fields["countryCode"] ?: "")
             put("nationality", fields["nationality"] ?: "")
-            put("countryCode", mrz.nationality)
 
+            put("passportNo", passportNo)
+            put("nameEn", nameEn)
             put("surname", fields["surname"] ?: "")
             put("givenNames", fields["givenNames"] ?: "")
 
-            put("fatherName", fields["fatherName"] ?: "")
-            put("motherName", fields["motherName"] ?: "")
-            put("spouseName", fields["spouseName"] ?: "")
+            put("dob", dob)
+            put("gender", fields["gender"] ?: "")
 
             put("birthPlace", fields["birthPlace"] ?: "")
             put("issueDate", fields["issueDate"] ?: "")
             put("expiryDate", fields["expiryDate"] ?: "")
 
             put("personalNo", fields["personalNo"] ?: "")
-            put("gender", fields["gender"] ?: "")
+
+            put("fatherName", fields["fatherName"] ?: "")
+            put("motherName", fields["motherName"] ?: "")
+            put("spouseName", fields["spouseName"] ?: "")
 
             put("permanentAddress", fields["permanentAddress"] ?: "")
+
+            put(
+                "emergencyContactName",
+                fields["emergencyContactName"] ?: ""
+            )
+
+            put(
+                "emergencyContactRelation",
+                fields["emergencyContactRelation"] ?: ""
+            )
+
+            put(
+                "emergencyContactAddress",
+                fields["emergencyContactAddress"] ?: ""
+            )
+
             put("emergencyPhone", fields["emergencyPhone"] ?: "")
 
-            put("issuingAuthority", fields["issuingAuthority"] ?: "")
+            put(
+                "issuingAuthority",
+                fields["issuingAuthority"] ?: ""
+            )
+
             put("placeOfIssue", fields["placeOfIssue"] ?: "")
 
             put("passportBase64", fullPageBase64)
             put("faceBase64", faceBase64)
 
-            put("mrzLine1", mrz.line1)
-            put("mrzLine2", mrz.line2)
-
-            put("mrzChecks", JSONObject().apply {
-                put("passportNumber", mrz.passportCheck)
-                put("dateOfBirth", mrz.dobCheck)
-                put("expiryDate", mrz.expiryCheck)
-                put("personalNumber", mrz.personalCheck)
-                put("composite", mrz.compositeCheck)
-            })
+            // QR, barcode and MRZ are not processed.
+            put("mrzProcessed", false)
+            put("qrProcessed", false)
+            put("barcodeProcessed", false)
 
             put("rawText", rawText)
         }
@@ -1416,7 +1276,7 @@ class PassportProcessorFeature(
 
             Toast.makeText(
                 activity,
-                "✔ পাসপোর্ট OCR ও MRZ যাচাই সম্পন্ন",
+                "✔ পাসপোর্ট OCR সম্পন্ন",
                 Toast.LENGTH_SHORT
             ).show()
 
@@ -1443,11 +1303,7 @@ class PassportProcessorFeature(
 
             val resultPayload = JSONObject(
                 extraJson.toString()
-            ).apply {
-                put("nameEn", nameEn)
-                put("passportNo", passportNo)
-                put("dob", dob)
-            }
+            )
 
             bridge.sendResponseToWeb(
                 response = BridgeResponse(
@@ -1548,7 +1404,6 @@ class PassportProcessorFeature(
         } catch (_: Exception) {
         }
 
-        // Do not initialize lazy ML Kit clients just to close them.
         try {
             if (textRecognizerDelegate.isInitialized()) {
                 textRecognizerDelegate.value.close()
