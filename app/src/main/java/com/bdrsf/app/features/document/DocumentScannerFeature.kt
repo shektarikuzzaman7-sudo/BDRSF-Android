@@ -9,7 +9,6 @@ import android.content.Context
 import android.content.pm.PackageManager
 import android.graphics.Canvas
 import android.graphics.Color
-import android.graphics.DashPathEffect
 import android.graphics.LinearGradient
 import android.graphics.Paint
 import android.graphics.PorterDuff
@@ -56,10 +55,6 @@ import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicBoolean
 
-/**
- * BDRSF সার্বজনীন ডকুমেন্ট, পাসপোর্ট এবং লাইভ ফেস ভেরিফিকেশন ক্যামেরা ইঞ্জিন।
- * এটি CameraX এবং ML Kit দ্বারা নিয়ন্ত্রিত সম্পূর্ণ রিয়েল-টাইম লাইভনেস ও ডকুমেন্ট ফ্রেম ডিটেকশন নিশ্চিত করে।
- */
 class DocumentScannerFeature(
     private val activity: Activity,
     private val rootContainer: ViewGroup,
@@ -378,39 +373,19 @@ class DocumentScannerFeature(
                 if (!isScanningActive || isCapturing.get()) return@addOnSuccessListener
 
                 val cardView = hudOverlayView as? DocumentCardHudView
-                val rawText = visionText.text
                 val totalLines = visionText.textBlocks.sumOf { it.lines.size }
 
-                if (activeScanMode == "passport") {
-                    val hasMrzOrPassport = rawText.contains("P<", ignoreCase = true) ||
-                        rawText.contains("PASSPORT", ignoreCase = true) ||
-                        rawText.contains("BANGLADESH", ignoreCase = true)
-
-                    if (hasMrzOrPassport && totalLines >= 4) {
-                        stableFrameCount++
-                        cardView?.setCardDetected(true)
-                        if (stableFrameCount >= 4) {
-                            if (isCapturing.compareAndSet(false, true)) {
-                                triggerTakePicture()
-                            }
+                if (totalLines >= 3) {
+                    stableFrameCount++
+                    cardView?.setCardDetected(true)
+                    if (stableFrameCount >= 5) {
+                        if (isCapturing.compareAndSet(false, true)) {
+                            triggerTakePicture()
                         }
-                    } else {
-                        stableFrameCount = 0
-                        cardView?.setCardDetected(false)
                     }
                 } else {
-                    if (totalLines >= 3) {
-                        stableFrameCount++
-                        cardView?.setCardDetected(true)
-                        if (stableFrameCount >= 5) {
-                            if (isCapturing.compareAndSet(false, true)) {
-                                triggerTakePicture()
-                            }
-                        }
-                    } else {
-                        stableFrameCount = 0
-                        cardView?.setCardDetected(false)
-                    }
+                    stableFrameCount = 0
+                    cardView?.setCardDetected(false)
                 }
             }
             .addOnFailureListener {
@@ -541,22 +516,6 @@ class DocumentScannerFeature(
             isAntiAlias = true
         }
 
-        private val mrzLinePaint = Paint().apply {
-            color = Color.parseColor("#FFFF00")
-            style = Paint.Style.STROKE
-            strokeWidth = 3f
-            pathEffect = DashPathEffect(floatArrayOf(15f, 10f), 0f)
-            isAntiAlias = true
-        }
-
-        private val mrzTextPaint = Paint().apply {
-            color = Color.parseColor("#FFD700")
-            textSize = 30f
-            textAlign = Paint.Align.CENTER
-            isAntiAlias = true
-            setShadowLayer(6f, 0f, 0f, Color.BLACK)
-        }
-
         private val laserPaint = Paint().apply {
             isAntiAlias = true
             strokeWidth = 6f
@@ -576,15 +535,15 @@ class DocumentScannerFeature(
 
         override fun onSizeChanged(w: Int, h: Int, oldw: Int, oldh: Int) {
             super.onSizeChanged(w, h, oldw, oldh)
-            val boxWidth = w * 0.92f
+            val boxWidth = w * 0.90f
             val boxHeight = if (mode == "passport") {
-                (boxWidth / 1.38f).coerceAtMost(h * 0.56f)
+                (boxWidth * 1.15f).coerceAtMost(h * 0.62f)
             } else {
                 boxWidth / 1.58f
             }
 
             val left = (w - boxWidth) / 2f
-            val top = (h - boxHeight) / 2f - 30f
+            val top = (h - boxHeight) / 2f - 25f
             cardBox.set(left, top, left + boxWidth, top + boxHeight)
 
             startLaserAnimation()
@@ -639,12 +598,6 @@ class DocumentScannerFeature(
             canvas.drawLine(cardBox.right, cardBox.bottom, cardBox.right - cl, cardBox.bottom, cornerPaint)
             canvas.drawLine(cardBox.right, cardBox.bottom, cardBox.right, cardBox.bottom - cl, cornerPaint)
 
-            if (mode == "passport") {
-                val mrzY = cardBox.bottom - (cardBox.height() * 0.23f)
-                canvas.drawLine(cardBox.left + 20f, mrzY, cardBox.right - 20f, mrzY, mrzLinePaint)
-                canvas.drawText("নিচের অংশে পাসপোর্টের MRZ (P<BGD) কোড রাখুন", w / 2f, mrzY - 14f, mrzTextPaint)
-            }
-
             if (laserY in cardBox.top..cardBox.bottom) {
                 laserPaint.shader = LinearGradient(
                     cardBox.left, laserY, cardBox.right, laserY,
@@ -658,7 +611,7 @@ class DocumentScannerFeature(
             val guide = when (mode) {
                 "nid_front" -> "এনআইডি কার্ডের সামনের অংশ ফ্রেমে সোজা রাখুন"
                 "nid_back" -> "এনআইডি কার্ডের পেছনের অংশ ফ্রেমে রাখুন"
-                "passport" -> "পাসপোর্টের পুরো ডাটা পেজটি বড় ফ্রেমে রাখুন"
+                "passport" -> "পাসপোর্টের পৃষ্ঠাটি ফ্রেমের ভেতরে সোজা রাখুন"
                 else -> "ডকুমেন্টটি ফ্রেমের ভেতরে সোজা রাখুন"
             }
             canvas.drawText(guide, w / 2f, cardBox.bottom + 65f, textPaint)
