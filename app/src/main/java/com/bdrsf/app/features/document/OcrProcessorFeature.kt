@@ -48,10 +48,6 @@ import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 import kotlin.math.max
 
-/**
- * BDRSF সার্বজনীন OCR, ফেস ডিটেকশন, বারকোড ডিকোডিং ও সার্ভার ভেরিফিকেশন ইঞ্জিন।
- * এটি সম্পূর্ণ স্বাধীনভাবে কাজ করে এবং যেকোনো ডকুমেন্টের টেক্সট ও ইমেজ প্রসেস করতে সক্ষম।
- */
 class OcrProcessorFeature(
     private val activity: Activity,
     private val bridge: AndroidBridge,
@@ -300,13 +296,13 @@ class OcrProcessorFeature(
                         val passNo = passData["passportNo"] ?: ""
 
                         if (!isPassport(allText) && passNo.isEmpty()) {
-                            notifyValidationFailed(slot, "এটি সঠিক পাসপোর্ট নয়! পাসপোর্টের সামনের পৃষ্ঠাটি স্পষ্ট রাখুন।", callback)
+                            notifyValidationFailed(slot, "এটি পাসপোর্ট নয়! অনুগ্রহ করে পাসপোর্টের সামনের পৃষ্ঠার পরিষ্কার ছবি দিন।", callback)
                             cachedFrontBase64 = ""
                             return@addOnSuccessListener
                         }
 
                         if (!validatePassportCrossMatch(passData, allText)) {
-                            notifyValidationFailed(slot, "পাসপোর্টের নম্বর বা MRZ কোড পড়া যায়নি! পরিষ্কার ছবি দিন।", callback)
+                            notifyValidationFailed(slot, "পাসপোর্টের নম্বর পড়া যায়নি! অনুগ্রহ করে পরিষ্কার ছবি দিন।", callback)
                             cachedFrontBase64 = ""
                             return@addOnSuccessListener
                         }
@@ -629,7 +625,7 @@ class OcrProcessorFeature(
             }
 
             val cropW = (bitmap.width * 0.94f).toInt()
-            val ratio = if (isCard) 1.58f else 1.38f
+            val ratio = if (isCard) 1.58f else 0.87f
             val cropH = (cropW / ratio).toInt().coerceAtMost(bitmap.height)
 
             val x = ((bitmap.width - cropW) / 2).coerceAtLeast(0)
@@ -968,11 +964,7 @@ class OcrProcessorFeature(
 
     fun validatePassportCrossMatch(passData: Map<String, String>, rawText: String): Boolean {
         val passNo = (passData["passportNo"] ?: "").replace(Regex("[^A-Z0-9]"), "")
-        val hasValidFormat = passNo.matches(Regex("^[A-Z]{1,2}[0-9]{6,8}$"))
-        val hasMrzOrKeyword = rawText.contains("P<", ignoreCase = true) ||
-            rawText.contains("PASSPORT", ignoreCase = true) ||
-            passData["isMrzValid"] == "true"
-        return hasValidFormat && hasMrzOrKeyword
+        return passNo.matches(Regex("^[A-Z]{1,2}[0-9]{6,8}$"))
     }
 
     fun isNidFront(rawText: String): Boolean {
