@@ -295,7 +295,7 @@ class OcrProcessorFeature(
                         val looksLikePassport = isPassport(allText) || passNo.isNotEmpty()
 
                         if (!looksLikePassport) {
-                            notifyValidationFailed(slot, "এটি পাসপোর্ট নয়! অনুগ্রহ করে পাসপোর্টের সামনের পৃষ্ঠার পরিষ্কার ছবি দিন।", callback)
+                            notifyValidationFailed(slot, "এটি পাসপোর্ট নয়! অনুগ্রহ করে পাসপোর্টের পরিষ্কার ছবি দিন।", callback)
                             cachedFrontBase64 = ""
                             return@addOnSuccessListener
                         }
@@ -313,8 +313,13 @@ class OcrProcessorFeature(
                                 put("dob", passData["dob"] ?: "")
                                 put("fatherName", passData["fatherName"] ?: "")
                                 put("motherName", passData["motherName"] ?: "")
+                                put("spouseName", passData["spouseName"] ?: "")
+                                put("birthPlace", passData["birthPlace"] ?: "")
+                                put("issueDate", passData["issueDate"] ?: "")
                                 put("expiryDate", passData["expiryDate"] ?: "")
                                 put("personalNo", passData["personalNo"] ?: "")
+                                put("permanentAddress", passData["permanentAddress"] ?: "")
+                                put("emergencyPhone", passData["emergencyPhone"] ?: "")
                                 put("gender", passData["gender"] ?: "")
                                 put("isPassportVerified", true)
                                 put("rawText", allText)
@@ -561,8 +566,13 @@ class OcrProcessorFeature(
         val extraObj = JSONObject().apply {
             put("fatherName", ocrData.optString("fatherName", cachedFrontData["fatherName"] ?: ""))
             put("motherName", ocrData.optString("motherName", cachedFrontData["motherName"] ?: ""))
+            put("spouseName", ocrData.optString("spouseName", cachedFrontData["spouseName"] ?: ""))
+            put("birthPlace", ocrData.optString("birthPlace", cachedFrontData["birthPlace"] ?: ""))
+            put("issueDate", ocrData.optString("issueDate", cachedFrontData["issueDate"] ?: ""))
             put("expiryDate", ocrData.optString("expiryDate", cachedFrontData["expiryDate"] ?: ""))
             put("personalNo", ocrData.optString("personalNo", cachedFrontData["personalNo"] ?: ""))
+            put("permanentAddress", ocrData.optString("permanentAddress", cachedFrontData["permanentAddress"] ?: ""))
+            put("emergencyPhone", ocrData.optString("emergencyPhone", cachedFrontData["emergencyPhone"] ?: ""))
             put("gender", ocrData.optString("gender", cachedFrontData["gender"] ?: ""))
             put("isPassportVerified", true)
             put("faceBase64", faceBase64)
@@ -586,8 +596,13 @@ class OcrProcessorFeature(
             put("dob", dob)
             put("fatherName", extraObj.optString("fatherName"))
             put("motherName", extraObj.optString("motherName"))
+            put("spouseName", extraObj.optString("spouseName"))
+            put("birthPlace", extraObj.optString("birthPlace"))
+            put("issueDate", extraObj.optString("issueDate"))
             put("expiryDate", extraObj.optString("expiryDate"))
             put("personalNo", extraObj.optString("personalNo"))
+            put("permanentAddress", extraObj.optString("permanentAddress"))
+            put("emergencyPhone", extraObj.optString("emergencyPhone"))
             put("gender", extraObj.optString("gender"))
             put("passportBase64", fullPageBase64)
             put("faceBase64", faceBase64)
@@ -644,7 +659,7 @@ class OcrProcessorFeature(
             }
 
             val cropW = (bitmap.width * 0.94f).toInt()
-            val ratio = if (isCard) 1.58f else 1.25f
+            val ratio = if (isCard) 1.58f else 0.87f
             val cropH = (cropW / ratio).toInt().coerceAtMost(bitmap.height)
 
             val x = ((bitmap.width - cropW) / 2).coerceAtLeast(0)
@@ -821,12 +836,13 @@ class OcrProcessorFeature(
         val rawLines = upperText.lines().map { it.trim() }.filter { it.isNotEmpty() }
         val compactLines = rawLines.map { it.replace(Regex("\\s+"), "") }
 
+        // ১. MRZ লাইন ১ (P<BGDHOSAIN<<ROBIN<<<<) থেকে নাম সংগ্রহ
         val mrzLine1 = compactLines.firstOrNull { line ->
-            line.length >= 22 && (line.startsWith("P<") || line.startsWith("PO") || line.startsWith("P0") || line.contains("<<"))
+            line.length >= 20 && (line.startsWith("P<") || line.contains("P<BGD") || line.contains("<<"))
         }
 
         if (mrzLine1 != null) {
-            val startIdx = mrzLine1.indexOf("P<").let { if (it >= 0) it + 5 else 5 }
+            val startIdx = mrzLine1.indexOf("P<").let { if (it >= 0) it + 5 else 0 }
             val body = if (mrzLine1.length > startIdx) mrzLine1.substring(startIdx) else ""
             val nameParts = body.split("<<")
             val surname = nameParts.getOrNull(0)?.replace("<", " ")?.replace(Regex("[^A-Z\\s]"), "")?.trim() ?: ""
@@ -837,8 +853,9 @@ class OcrProcessorFeature(
             }
         }
 
+        // ২. MRZ লাইন ২ (A128505838BGD9501016M33102854601736467<<<<66) থেকে তথ্য সংগ্রহ
         val mrzLine2 = compactLines.firstOrNull { line ->
-            line.length >= 24 &&
+            line.length >= 22 &&
                 !line.startsWith("P<") &&
                 (line.contains("BGD") || line.contains(Regex("[0-9OIZSB]{6}[0-9OIZSB][MF<][0-9OIZSB]{6}")))
         }
@@ -889,42 +906,101 @@ class OcrProcessorFeature(
             result["isMrzValid"] = "true"
         }
 
+        // ৩. ভিজ্যুয়াল জোন থেকে পাসপোর্ট নম্বর (যেমন: A12850583)
         if (result["passportNo"].isNullOrEmpty()) {
-            val passMatch = Regex("\\b([A-Z]{1,2}[0-9]{7,8})\\b").find(upperText)
-            passMatch?.groupValues?.getOrNull(1)?.let { result["passportNo"] = it }
+            val passMatch = Regex("\\b([A-Z]{1,2}[0-9]{7,9})\\b").find(upperText)
+            passMatch?.groupValues?.getOrNull(1)?.let { result["passportNo"] = it.take(9) }
         }
 
-        if (result["name"].isNullOrEmpty()) {
-            var surname = ""
-            var givenName = ""
-            for (i in rawLines.indices) {
-                val line = rawLines[i]
-                if (line.contains("SURNAME") && i + 1 < rawLines.size) {
-                    surname = rawLines[i + 1].replace(Regex("[^A-Z\\s.]"), "").trim()
-                }
-                if (line.contains("GIVEN NAME") && i + 1 < rawLines.size) {
-                    givenName = rawLines[i + 1].replace(Regex("[^A-Z\\s.]"), "").trim()
-                }
-            }
-            val combined = listOf(givenName, surname).filter { it.isNotEmpty() }.joinToString(" ").trim()
-            if (combined.isNotEmpty()) {
-                result["name"] = combined
-            }
-        }
+        // ৪. ভিজ্যুয়াল জোন থেকে নাম, পিতার নাম, মাতার নাম, জন্মস্থান, প্রদানের তারিখ ও ঠিকানা
+        var surname = ""
+        var givenName = ""
 
         for (i in rawLines.indices) {
             val line = rawLines[i]
-            if (result["fatherName"].isNullOrEmpty() && line.contains("FATHER") && i + 1 < rawLines.size) {
-                val candidate = rawLines[i + 1].replace(Regex("[^A-Z\\s.]"), "").trim()
-                if (candidate.length >= 3 && !candidate.contains("MOTHER")) {
+            val nextLine = if (i + 1 < rawLines.size) rawLines[i + 1] else ""
+
+            if (line.startsWith("NAME:") || line == "NAME") {
+                val inlineName = line.substringAfter("NAME").replace(":", "").replace(Regex("[^A-Z\\s.]"), "").trim()
+                val foundName = if (inlineName.length >= 3) inlineName else nextLine.replace(Regex("[^A-Z\\s.]"), "").trim()
+                if (foundName.length >= 3 && result["name"].isNullOrEmpty()) {
+                    result["name"] = foundName
+                }
+            }
+
+            if (line.contains("SURNAME") && nextLine.isNotEmpty()) {
+                surname = nextLine.replace(Regex("[^A-Z\\s.]"), "").trim()
+            }
+            if (line.contains("GIVEN NAME") && nextLine.isNotEmpty()) {
+                givenName = nextLine.replace(Regex("[^A-Z\\s.]"), "").trim()
+            }
+
+            if (result["fatherName"].isNullOrEmpty() && line.contains("FATHER")) {
+                val inlineFather = line.substringAfter("FATHER'S NAME").substringAfter("FATHER").replace(":", "").replace(Regex("[^A-Z\\s.]"), "").trim()
+                val candidate = if (inlineFather.length >= 3) inlineFather else nextLine.replace(Regex("[^A-Z\\s.]"), "").trim()
+                if (candidate.length >= 3 && !candidate.contains("MOTHER") && !candidate.contains("RELATIONSHIP")) {
                     result["fatherName"] = candidate
                 }
             }
-            if (result["motherName"].isNullOrEmpty() && line.contains("MOTHER") && i + 1 < rawLines.size) {
-                val candidate = rawLines[i + 1].replace(Regex("[^A-Z\\s.]"), "").trim()
+
+            if (result["motherName"].isNullOrEmpty() && line.contains("MOTHER")) {
+                val inlineMother = line.substringAfter("MOTHER'S NAME").substringAfter("MOTHER").replace(":", "").replace(Regex("[^A-Z\\s.]"), "").trim()
+                val candidate = if (inlineMother.length >= 3) inlineMother else nextLine.replace(Regex("[^A-Z\\s.]"), "").trim()
                 if (candidate.length >= 3 && !candidate.contains("SPOUSE")) {
                     result["motherName"] = candidate
                 }
+            }
+
+            if (result["spouseName"].isNullOrEmpty() && line.contains("SPOUSE")) {
+                val inlineSpouse = line.substringAfter("SPOUSE'S NAME").substringAfter("SPOUSE").replace(":", "").replace(Regex("[^A-Z\\s.]"), "").trim()
+                val candidate = if (inlineSpouse.length >= 3) inlineSpouse else nextLine.replace(Regex("[^A-Z\\s.]"), "").trim()
+                if (candidate.length >= 3 && !candidate.contains("PERMANENT")) {
+                    result["spouseName"] = candidate
+                }
+            }
+
+            if (result["birthPlace"].isNullOrEmpty() && line.contains("PLACE OF BIRTH") && nextLine.isNotEmpty()) {
+                val candidate = nextLine.replace(Regex("[^A-Z\\s]"), "").trim()
+                if (candidate.length >= 3) {
+                    result["birthPlace"] = candidate
+                }
+            }
+
+            if (result["issueDate"].isNullOrEmpty() && line.contains("DATE OF ISSUE") && nextLine.isNotEmpty()) {
+                val dateMatch = Regex("([0-9]{2}\\s+[A-Z]{3}\\s+[0-9]{4})").find(nextLine)
+                if (dateMatch != null) {
+                    result["issueDate"] = dateMatch.groupValues[1]
+                }
+            }
+
+            if (result["expiryDate"].isNullOrEmpty() && line.contains("DATE OF EXPIRY") && nextLine.isNotEmpty()) {
+                val dateMatch = Regex("([0-9]{2}\\s+[A-Z]{3}\\s+[0-9]{4})").find(nextLine)
+                if (dateMatch != null) {
+                    result["expiryDate"] = dateMatch.groupValues[1]
+                }
+            }
+
+            if (result["permanentAddress"].isNullOrEmpty() && line.contains("PERMANENT ADDRESS")) {
+                val addrPart1 = line.substringAfter("PERMANENT ADDRESS").replace(":", "").trim()
+                val addrPart2 = if (nextLine.isNotEmpty() && !nextLine.contains("EMERGENCY")) nextLine else ""
+                val fullAddr = listOf(addrPart1, addrPart2).filter { it.isNotEmpty() }.joinToString(", ")
+                if (fullAddr.length >= 5) {
+                    result["permanentAddress"] = fullAddr
+                }
+            }
+
+            if (result["emergencyPhone"].isNullOrEmpty() && line.contains("TELEPHONE")) {
+                val phoneMatch = Regex("(\\+?8801[3-9][0-9]{8}|01[3-9][0-9]{8})").find("$line $nextLine")
+                if (phoneMatch != null) {
+                    result["emergencyPhone"] = phoneMatch.groupValues[1]
+                }
+            }
+        }
+
+        if (result["name"].isNullOrEmpty()) {
+            val combined = listOf(givenName, surname).filter { it.isNotEmpty() }.joinToString(" ").trim()
+            if (combined.isNotEmpty()) {
+                result["name"] = combined
             }
         }
 
@@ -986,11 +1062,11 @@ class OcrProcessorFeature(
 
     fun validatePassportCrossMatch(passData: Map<String, String>, rawText: String): Boolean {
         val passNo = (passData["passportNo"] ?: "").replace(Regex("[^A-Z0-9]"), "")
-        return isPassport(rawText) || passNo.matches(Regex("^[A-Z]{1,2}[0-9]{6,8}$"))
+        return isPassport(rawText) || passNo.matches(Regex("^[A-Z]{1,2}[0-9]{6,9}$"))
     }
 
     fun isNidFront(rawText: String): Boolean {
-        if (rawText.contains("PASSPORT", true) || rawText.contains("P<", true)) return false
+        if (rawText.contains("PASSPORT", true) || rawText.contains("P<", true) || rawText.contains("SURNAME", true)) return false
         return rawText.contains("National ID", true) ||
                 rawText.contains("NID No", true) ||
                 rawText.contains("জাতীয় পরিচয়", true)
@@ -1009,6 +1085,7 @@ class OcrProcessorFeature(
                 rawText.contains("SURNAME", true) ||
                 rawText.contains("GIVEN NAME", true) ||
                 rawText.contains("NATIONALITY", true) ||
+                rawText.contains("PERSONAL DATA AND EMERGENCY CONTACT", true) ||
                 rawText.contains("BGD", true)
     }
 
