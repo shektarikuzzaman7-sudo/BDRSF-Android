@@ -60,7 +60,6 @@ class OcrProcessorFeature(
 
     private val bgExecutor: ExecutorService = Executors.newFixedThreadPool(2)
 
-    // প্রসেসিং ক্যাশ মেমোরি
     @Volatile private var cachedFrontBase64: String = ""
     @Volatile private var cachedBackBase64: String = ""
     @Volatile private var cachedFaceBase64: String = ""
@@ -70,12 +69,10 @@ class OcrProcessorFeature(
     private val isFrontProcessing = AtomicBoolean(false)
     private val isBackProcessing = AtomicBoolean(false)
 
-    // ML Kit টেক্সট রিকগনিশন ইঞ্জিন
     private val textRecognizer: TextRecognizer by lazy {
         TextRecognition.getClient(TextRecognizerOptions.DEFAULT_OPTIONS)
     }
 
-    // ML Kit ফেস ডিটেক্টর (হাই-স্পিড পোর্ট্রেট এক্সট্রাকশন)
     private val faceDetector: FaceDetector by lazy {
         val options = FaceDetectorOptions.Builder()
             .setPerformanceMode(FaceDetectorOptions.PERFORMANCE_MODE_FAST)
@@ -85,7 +82,6 @@ class OcrProcessorFeature(
         FaceDetection.getClient(options)
     }
 
-    // ML Kit বারকোড ইঞ্জিন (PDF417, QR, Code128 সহ)
     private val barcodeScanner: BarcodeScanner by lazy {
         val options = BarcodeScannerOptions.Builder()
             .setBarcodeFormats(
@@ -100,9 +96,6 @@ class OcrProcessorFeature(
         BarcodeScanning.getClient(options)
     }
 
-    /**
-     * ক্যাপচার করা বা গ্যালারি থেকে প্রাপ্ত ফাইল প্রসেস করে
-     */
     fun processDocumentFile(file: File, targetSlot: String, callback: String? = null) {
         if (!file.exists() || file.length() == 0L) return
 
@@ -111,15 +104,32 @@ class OcrProcessorFeature(
         when (targetSlot.lowercase(Locale.ROOT)) {
             "nid_front", "card_front" -> processNidFront(file, targetSlot, callback)
             "nid_back", "card_back" -> processNidBack(file, targetSlot, callback)
-            "passport" -> processPassport(file, targetSlot, callback)
+            "passport" -> processPassport(file, targetSlot, callback, shouldCropBox = true)
             "face_liveness", "selfie" -> processFaceSelfie(file, targetSlot, callback)
             else -> processGenericDocument(file, targetSlot, callback)
         }
     }
 
-    // ---------------------------------------------------------------------------------------------
-    // ১. এনআইডি সামনের অংশ প্রসেসিং (NID Front)
-    // ---------------------------------------------------------------------------------------------
+    fun processPassportBase64Image(rawBase64: String, callback: String? = null) {
+        val cleanB64 = rawBase64.substringAfter("base64,").trim()
+        if (cleanB64.isEmpty()) {
+            notifyValidationFailed("passport", "গ্যালারি থেকে পাসপোর্টের ছবি লোড করা যায়নি", callback)
+            return
+        }
+
+        notifyScanningStarted("passport")
+        bgExecutor.execute {
+            try {
+                val bytes = Base64.decode(cleanB64, Base64.DEFAULT)
+                val tempFile = File.createTempFile("GAL_PASSPORT_", ".jpg", activity.cacheDir)
+                FileOutputStream(tempFile).use { it.write(bytes) }
+                processPassport(tempFile, "passport", callback, shouldCropBox = false)
+            } catch (e: Exception) {
+                notifyValidationFailed("passport", "গ্যালারি ছবি প্রসেসিং ত্রুটি: ${e.localizedMessage}", callback)
+            }
+        }
+    }
+
     private fun processNidFront(file: File, slot: String, callback: String?) {
         isFrontProcessing.set(true)
         bgExecutor.execute {
@@ -171,9 +181,6 @@ class OcrProcessorFeature(
         }
     }
 
-    // ---------------------------------------------------------------------------------------------
-    // ২. এনআইডি পেছনের অংশ প্রসেসিং (NID Back)
-    // ---------------------------------------------------------------------------------------------
     private fun processNidBack(file: File, slot: String, callback: String?) {
         isBackProcessing.set(true)
         bgExecutor.execute {
@@ -263,14 +270,13 @@ class OcrProcessorFeature(
         }
     }
 
-    // ---------------------------------------------------------------------------------------------
-    // ৩. পাসপোর্ট প্রসেসিং (Passport)
-    // ---------------------------------------------------------------------------------------------
-    private fun processPassport(file: File, slot: String, callback: String?) {
+    private fun processPassport(file: File, slot: String, callback: String?, shouldCropBox: Boolean = true) {
         isFrontProcessing.set(true)
         bgExecutor.execute {
             try {
-                cropCenterBoxFromImage(file, isCard = false)
+                if (shouldCropBox) {
+                    cropCenterBoxFromImage(file, isCard = false)
+                }
                 val (bitmap, base64) = optimizeAndCompressToBase64(file)
                 if (bitmap == null) {
                     notifyValidationFailed(slot, "পাসপোর্টের ছবি লোড করা যায়নি", callback)
@@ -290,17 +296,17 @@ class OcrProcessorFeature(
                             return@addOnSuccessListener
                         }
 
-                        if (!isPassport(allText)) {
-                            notifyValidationFailed(slot, "এটি সঠিক পাসপোর্ট নয়! পৃষ্ঠাটি স্পষ্ট রাখুন।", callback)
+                        val passData = extractPassportData(allText)
+                        val passNo = passData["passportNo"] ?: ""
+
+                        if (!isPassport(allText) && passNo.isEmpty()) {
+                            notifyValidationFailed(slot, "এটি সঠিক পাসপোর্ট নয়! পাসপোর্টের সামনের পৃষ্ঠাটি স্পষ্ট রাখুন।", callback)
                             cachedFrontBase64 = ""
                             return@addOnSuccessListener
                         }
 
-                        val passData = extractPassportData(allText)
-                        val isValid = validatePassportCrossMatch(passData, allText)
-
-                        if (!isValid) {
-                            notifyValidationFailed(slot, "পাসপোর্টের MRZ কোড পড়া যায়নি বা ফেক পাসপোর্ট!", callback)
+                        if (!validatePassportCrossMatch(passData, allText)) {
+                            notifyValidationFailed(slot, "পাসপোর্টের নম্বর বা MRZ কোড পড়া যায়নি! পরিষ্কার ছবি দিন।", callback)
                             cachedFrontBase64 = ""
                             return@addOnSuccessListener
                         }
@@ -310,6 +316,21 @@ class OcrProcessorFeature(
                         cachedFrontData = passData
 
                         notifyValidationSuccess(slot, base64, passData, callback)
+
+                        activity.runOnUiThread {
+                            val ocrJson = JSONObject().apply {
+                                put("passportNo", passData["passportNo"] ?: "")
+                                put("nameEn", passData["name"] ?: "")
+                                put("dob", passData["dob"] ?: "")
+                                put("fatherName", passData["fatherName"] ?: "")
+                                put("motherName", passData["motherName"] ?: "")
+                                put("expiryDate", passData["expiryDate"] ?: "")
+                                put("personalNo", passData["personalNo"] ?: "")
+                                put("gender", passData["gender"] ?: "")
+                                put("rawText", allText)
+                            }
+                            dispatchPassportSuccess(ocrJson, base64, faceBase64, callback)
+                        }
                     }
                     .addOnFailureListener {
                         notifyValidationFailed(slot, "পাসপোর্টের পৃষ্ঠা পড়া সম্ভব হয়নি।", callback)
@@ -323,9 +344,6 @@ class OcrProcessorFeature(
         }
     }
 
-    // ---------------------------------------------------------------------------------------------
-    // ৪. লাইভ ফেস বা সেলফি প্রসেসিং
-    // ---------------------------------------------------------------------------------------------
     private fun processFaceSelfie(file: File, slot: String, callback: String?) {
         bgExecutor.execute {
             try {
@@ -347,9 +365,6 @@ class OcrProcessorFeature(
         }
     }
 
-    // ---------------------------------------------------------------------------------------------
-    // ৫. সাধারণ যেকোনো ডকুমেন্ট প্রসেসিং
-    // ---------------------------------------------------------------------------------------------
     private fun processGenericDocument(file: File, slot: String, callback: String?) {
         bgExecutor.execute {
             try {
@@ -377,9 +392,6 @@ class OcrProcessorFeature(
         }
     }
 
-    // ---------------------------------------------------------------------------------------------
-    // হাইব্রিড সার্ভার এপিআই ও ক্রস-ভেরিফিকেশন
-    // ---------------------------------------------------------------------------------------------
     fun processSavedDocumentsHybrid(rawDocType: String, callback: String? = null) {
         val isPassport = rawDocType.contains("PASS", ignoreCase = true)
         val normalizedDocType = if (isPassport) "PASSPORT" else "NID"
@@ -415,17 +427,16 @@ class OcrProcessorFeature(
                         val data = json.optJSONObject("data") ?: JSONObject()
                         val rawBackText = json.optString("raw_text", "")
                         if (normalizedDocType == "PASSPORT") {
-                            dispatchPassportSuccess(data, cachedFaceBase64, callback)
+                            dispatchPassportSuccess(data, cachedFrontBase64, cachedFaceBase64, callback)
                         } else {
                             dispatchNidSuccess(data, rawBackText, cachedBarcodeMap, cachedFaceBase64, callback)
                         }
                     }
                 },
-                onFailure = { errorMsg ->
+                onFailure = { _ ->
                     activity.runOnUiThread {
-                        // সার্ভার অফলাইন থাকলে লোকাল ডাটা দিয়ে ফলব্যাক ডেলিভারি
                         if (normalizedDocType == "PASSPORT") {
-                            dispatchPassportSuccess(JSONObject(cachedFrontData), cachedFaceBase64, callback)
+                            dispatchPassportSuccess(JSONObject(cachedFrontData), cachedFrontBase64, cachedFaceBase64, callback)
                         } else {
                             dispatchNidSuccess(JSONObject(cachedFrontData), "", cachedBarcodeMap, cachedFaceBase64, callback)
                         }
@@ -515,7 +526,6 @@ class OcrProcessorFeature(
             "বাসা/হোল্ডিং: ${backObj.optString("holding")}, গ্রাম: ${backObj.optString("village")}, ডাকঘর: ${backObj.optString("postOffice")}, উপজেলা: ${backObj.optString("upazila")}, জেলা: ${backObj.optString("district")}"
         }
 
-        // ওয়েব ইন্টারফেসে লিগ্যাসি JS কলব্যাক ট্রিগার
         val script = "if(window.onFullNIDParsed) { window.onFullNIDParsed(" +
                 "${JSONObject.quote(displayName)}, " +
                 "${JSONObject.quote(barcodeMap["father"] ?: ocrData.optString("fatherName", ""))}, " +
@@ -528,7 +538,6 @@ class OcrProcessorFeature(
                 "); }"
         webView.evaluateJavascript(script, null)
 
-        // সার্বজনীন ব্রিজ রেসপন্স
         val resultData = JSONObject().apply {
             put("name", displayName)
             put("nid", finalNid)
@@ -546,7 +555,12 @@ class OcrProcessorFeature(
         )
     }
 
-    private fun dispatchPassportSuccess(ocrData: JSONObject, faceBase64: String, callback: String?) {
+    private fun dispatchPassportSuccess(
+        ocrData: JSONObject,
+        fullPageBase64: String,
+        faceBase64: String,
+        callback: String?
+    ) {
         val passportNo = ocrData.optString("passportNo", "").trim().takeIf { it.isNotEmpty() }
             ?: (cachedFrontData["passportNo"] ?: "")
         val nameEn = ocrData.optString("nameEn", "").trim().takeIf { it.isNotEmpty() }
@@ -554,11 +568,24 @@ class OcrProcessorFeature(
         val dob = ocrData.optString("dob", "").trim().takeIf { it.isNotEmpty() }
             ?: (cachedFrontData["dob"] ?: "")
 
+        val extraObj = JSONObject().apply {
+            put("fatherName", ocrData.optString("fatherName", cachedFrontData["fatherName"] ?: ""))
+            put("motherName", ocrData.optString("motherName", cachedFrontData["motherName"] ?: ""))
+            put("expiryDate", ocrData.optString("expiryDate", cachedFrontData["expiryDate"] ?: ""))
+            put("personalNo", ocrData.optString("personalNo", cachedFrontData["personalNo"] ?: ""))
+            put("gender", ocrData.optString("gender", cachedFrontData["gender"] ?: ""))
+            put("faceBase64", faceBase64)
+            put("rawText", ocrData.optString("rawText", ""))
+        }
+
+        val previewToPass = if (fullPageBase64.isNotBlank()) fullPageBase64 else faceBase64
+
         val script = "if(window.onFullPassportParsed) { window.onFullPassportParsed(" +
                 "${JSONObject.quote(nameEn)}, " +
                 "${JSONObject.quote(passportNo)}, " +
-                "${JSONObject.quote(faceBase64)}, " +
-                "${JSONObject.quote(dob)}" +
+                "${JSONObject.quote(previewToPass)}, " +
+                "${JSONObject.quote(dob)}, " +
+                "${JSONObject.quote(extraObj.toString())}" +
                 "); }"
         webView.evaluateJavascript(script, null)
 
@@ -566,6 +593,12 @@ class OcrProcessorFeature(
             put("nameEn", nameEn)
             put("passportNo", passportNo)
             put("dob", dob)
+            put("fatherName", extraObj.optString("fatherName"))
+            put("motherName", extraObj.optString("motherName"))
+            put("expiryDate", extraObj.optString("expiryDate"))
+            put("personalNo", extraObj.optString("personalNo"))
+            put("gender", extraObj.optString("gender"))
+            put("passportBase64", fullPageBase64)
             put("faceBase64", faceBase64)
         }
 
@@ -575,9 +608,6 @@ class OcrProcessorFeature(
         )
     }
 
-    // ---------------------------------------------------------------------------------------------
-    // হেল্পার ইউটিলিটিস (Crop, Compress, Face, Barcode, Parsing)
-    // ---------------------------------------------------------------------------------------------
     fun cropCenterBoxFromImage(file: File, isCard: Boolean) {
         try {
             val exif = ExifInterface(file.absolutePath)
@@ -598,8 +628,8 @@ class OcrProcessorFeature(
                 bitmap = rotated
             }
 
-            val cropW = (bitmap.width * 0.90f).toInt()
-            val ratio = if (isCard) 1.58f else 1.41f
+            val cropW = (bitmap.width * 0.94f).toInt()
+            val ratio = if (isCard) 1.58f else 1.38f
             val cropH = (cropW / ratio).toInt().coerceAtMost(bitmap.height)
 
             val x = ((bitmap.width - cropW) / 2).coerceAtLeast(0)
@@ -611,7 +641,7 @@ class OcrProcessorFeature(
             bitmap.recycle()
 
             FileOutputStream(file).use {
-                croppedBitmap.compress(Bitmap.CompressFormat.JPEG, 90, it)
+                croppedBitmap.compress(Bitmap.CompressFormat.JPEG, 92, it)
             }
             croppedBitmap.recycle()
         } catch (_: Exception) {}
@@ -625,7 +655,7 @@ class OcrProcessorFeature(
 
             val maxDim = max(options.outWidth, options.outHeight)
             var sampleSize = 1
-            while (maxDim / sampleSize > 1500) {
+            while (maxDim / sampleSize > 1600) {
                 sampleSize *= 2
             }
 
@@ -635,7 +665,7 @@ class OcrProcessorFeature(
             ) ?: return Pair(null, "")
 
             val stream = ByteArrayOutputStream()
-            bitmap.compress(Bitmap.CompressFormat.JPEG, 85, stream)
+            bitmap.compress(Bitmap.CompressFormat.JPEG, 88, stream)
             val bytes = stream.toByteArray()
             val base64 = "data:image/jpeg;base64," + Base64.encodeToString(bytes, Base64.NO_WRAP)
 
@@ -715,9 +745,6 @@ class OcrProcessorFeature(
         }
     }
 
-    // ---------------------------------------------------------------------------------------------
-    // পার্সিং ও ভ্যালিডেশন লজিক
-    // ---------------------------------------------------------------------------------------------
     fun convertBanglaToEnglishDigits(input: String): String {
         if (input.isEmpty()) return ""
         val banglaDigits = charArrayOf('০', '১', '২', '৩', '৪', '৫', '৬', '৭', '৮', '৯')
@@ -761,23 +788,128 @@ class OcrProcessorFeature(
         return result
     }
 
+    private fun normalizeMrzDigits(segment: String): String {
+        return segment
+            .replace('O', '0')
+            .replace('Q', '0')
+            .replace('D', '0')
+            .replace('I', '1')
+            .replace('L', '1')
+            .replace('Z', '2')
+            .replace('S', '5')
+            .replace('B', '8')
+    }
+
     fun extractPassportData(rawText: String): Map<String, String> {
         val result = mutableMapOf<String, String>()
-        val lines = rawText.lines().map { it.trim().replace(" ", "") }
+        val upperText = rawText.uppercase(Locale.ROOT)
+        val rawLines = upperText.lines().map { it.trim() }.filter { it.isNotEmpty() }
+        val compactLines = rawLines.map { it.replace(Regex("\\s+"), "") }
 
-        val mrzLine2 = lines.firstOrNull { it.length >= 35 && it.contains(Regex("[0-9]{6}[0-9MF<]")) }
+        val mrzLine1 = compactLines.firstOrNull { line ->
+            line.length >= 25 && (line.startsWith("P<") || line.startsWith("PO") || line.startsWith("P0"))
+        }
+
+        if (mrzLine1 != null) {
+            val body = if (mrzLine1.length > 5) mrzLine1.substring(5) else ""
+            val nameParts = body.split("<<")
+            val surname = nameParts.getOrNull(0)?.replace("<", " ")?.replace(Regex("[^A-Z\\s]"), "")?.trim() ?: ""
+            val givenNames = nameParts.getOrNull(1)?.replace("<", " ")?.replace(Regex("[^A-Z\\s]"), "")?.trim() ?: ""
+            val fullName = listOf(givenNames, surname).filter { it.isNotEmpty() }.joinToString(" ").replace(Regex("\\s+"), " ")
+            if (fullName.isNotEmpty()) {
+                result["name"] = fullName
+            }
+        }
+
+        val mrzLine2 = compactLines.firstOrNull { line ->
+            line.length >= 28 &&
+                !line.startsWith("P<") &&
+                (line.contains("BGD") || line.contains(Regex("[0-9OIZSB]{6}[0-9OIZSB][MF<][0-9OIZSB]{6}")))
+        }
+
         if (mrzLine2 != null) {
-            val passNo = mrzLine2.substring(0, 9).replace("<", "").trim()
-            val dobPart = if (mrzLine2.length >= 19) mrzLine2.substring(13, 19) else ""
-            result["passportNo"] = passNo
-            result["dob"] = dobPart
+            val rawPass = mrzLine2.substring(0, 9).replace("<", "").trim()
+            val fixedPass = if (rawPass.length >= 2) {
+                rawPass.substring(0, 1) + normalizeMrzDigits(rawPass.substring(1))
+            } else {
+                rawPass
+            }
+            if (fixedPass.isNotEmpty()) {
+                result["passportNo"] = fixedPass
+            }
+
+            if (mrzLine2.length >= 19) {
+                val dobDigits = normalizeMrzDigits(mrzLine2.substring(13, 19))
+                if (dobDigits.matches(Regex("[0-9]{6}"))) {
+                    val yy = dobDigits.substring(0, 2).toIntOrNull() ?: 0
+                    val century = if (yy > 30) "19" else "20"
+                    result["dob"] = "$century${dobDigits.substring(0, 2)}-${dobDigits.substring(2, 4)}-${dobDigits.substring(4, 6)}"
+                }
+            }
+
+            if (mrzLine2.length >= 21) {
+                val sexChar = mrzLine2[20]
+                if (sexChar == 'M' || sexChar == 'F') {
+                    result["gender"] = sexChar.toString()
+                }
+            }
+
+            if (mrzLine2.length >= 27) {
+                val expDigits = normalizeMrzDigits(mrzLine2.substring(21, 27))
+                if (expDigits.matches(Regex("[0-9]{6}"))) {
+                    result["expiryDate"] = "20${expDigits.substring(0, 2)}-${expDigits.substring(2, 4)}-${expDigits.substring(4, 6)}"
+                }
+            }
+
+            if (mrzLine2.length >= 42) {
+                val personalDigits = normalizeMrzDigits(mrzLine2.substring(28, 42)).replace("<", "").trim()
+                if (personalDigits.matches(Regex("[0-9]{10,17}"))) {
+                    result["personalNo"] = personalDigits
+                }
+            }
+
             result["isMrzValid"] = "true"
         }
 
-        val passMatch = Regex("([A-Z][0-9]{8})").find(rawText)
         if (result["passportNo"].isNullOrEmpty()) {
+            val passMatch = Regex("\\b([AE][0-9]{8}|[A-Z]{2}[0-9]{7})\\b").find(upperText)
             passMatch?.groupValues?.getOrNull(1)?.let { result["passportNo"] = it }
         }
+
+        if (result["name"].isNullOrEmpty()) {
+            var surname = ""
+            var givenName = ""
+            for (i in rawLines.indices) {
+                val line = rawLines[i]
+                if (line.contains("SURNAME") && i + 1 < rawLines.size) {
+                    surname = rawLines[i + 1].replace(Regex("[^A-Z\\s.]"), "").trim()
+                }
+                if (line.contains("GIVEN NAME") && i + 1 < rawLines.size) {
+                    givenName = rawLines[i + 1].replace(Regex("[^A-Z\\s.]"), "").trim()
+                }
+            }
+            val combined = listOf(givenName, surname).filter { it.isNotEmpty() }.joinToString(" ").trim()
+            if (combined.isNotEmpty()) {
+                result["name"] = combined
+            }
+        }
+
+        for (i in rawLines.indices) {
+            val line = rawLines[i]
+            if (result["fatherName"].isNullOrEmpty() && line.contains("FATHER") && i + 1 < rawLines.size) {
+                val candidate = rawLines[i + 1].replace(Regex("[^A-Z\\s.]"), "").trim()
+                if (candidate.length >= 3 && !candidate.contains("MOTHER")) {
+                    result["fatherName"] = candidate
+                }
+            }
+            if (result["motherName"].isNullOrEmpty() && line.contains("MOTHER") && i + 1 < rawLines.size) {
+                val candidate = rawLines[i + 1].replace(Regex("[^A-Z\\s.]"), "").trim()
+                if (candidate.length >= 3 && !candidate.contains("SPOUSE")) {
+                    result["motherName"] = candidate
+                }
+            }
+        }
+
         return result
     }
 
@@ -835,10 +967,12 @@ class OcrProcessorFeature(
     }
 
     fun validatePassportCrossMatch(passData: Map<String, String>, rawText: String): Boolean {
-        val passNo = passData["passportNo"] ?: ""
-        if (passNo.isEmpty()) return false
-        val count = Regex(Regex.escape(passNo)).findAll(rawText).count()
-        return count >= 1 && (rawText.contains("P<") || passData["isMrzValid"] == "true")
+        val passNo = (passData["passportNo"] ?: "").replace(Regex("[^A-Z0-9]"), "")
+        val hasValidFormat = passNo.matches(Regex("^[A-Z]{1,2}[0-9]{6,8}$"))
+        val hasMrzOrKeyword = rawText.contains("P<", ignoreCase = true) ||
+            rawText.contains("PASSPORT", ignoreCase = true) ||
+            passData["isMrzValid"] == "true"
+        return hasValidFormat && hasMrzOrKeyword
     }
 
     fun isNidFront(rawText: String): Boolean {
@@ -863,9 +997,6 @@ class OcrProcessorFeature(
                 (rawText.contains("P<", true) && rawText.contains("BANGLADESH", true))
     }
 
-    // ---------------------------------------------------------------------------------------------
-    // ওয়েব ও ব্রিজ রেসপন্স মেথডসমূহ
-    // ---------------------------------------------------------------------------------------------
     private fun notifyScanningStarted(slot: String) {
         activity.runOnUiThread {
             webView.evaluateJavascript("if(window.onImageScanningStarted) { window.onImageScanningStarted(${JSONObject.quote(slot)}); }", null)
