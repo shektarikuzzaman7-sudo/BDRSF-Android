@@ -254,12 +254,17 @@ class MainActivity : AppCompatActivity(), AndroidBridge.BridgeActionHandler {
 
     override fun onStartKycRequested(payload: JSONObject, callback: String?) {
         val actionType = payload.optString("actionType", "").lowercase()
-        val docType = payload.optString("documentType", payload.optString("docType", "NID"))
+        val docType = payload.optString("documentType", payload.optString("docType", payload.optString("mode", "NID")))
 
         if (actionType == "process_hybrid" || actionType == "submit") {
             ocrProcessorFeature.processSavedDocumentsHybrid(docType, callback)
         } else {
-            documentScannerFeature.startScanner(payload, callback)
+            val normalizedPayload = JSONObject(payload.toString()).apply {
+                if (!has("mode") || optString("mode").isBlank()) {
+                    put("mode", docType.lowercase())
+                }
+            }
+            documentScannerFeature.startScanner(normalizedPayload, callback)
         }
     }
 
@@ -383,6 +388,10 @@ class MainActivity : AppCompatActivity(), AndroidBridge.BridgeActionHandler {
         when (action) {
             "PICK_CONTACT" -> contactPickerFeature.pickContact(callback)
             "FORCE_REFRESH" -> WebAppConfig.forceRefreshWithCacheBypass(webView)
+            "SCAN_PASSPORT_IMAGE" -> {
+                val base64 = payload.optString("imageBase64", "")
+                ocrProcessorFeature.processPassportBase64Image(base64, callback)
+            }
             "PROCESS_SAVED_DOCUMENTS" -> {
                 val docType = payload.optString("docType", "NID")
                 ocrProcessorFeature.processSavedDocumentsHybrid(docType, callback)
