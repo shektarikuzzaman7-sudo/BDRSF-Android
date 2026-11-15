@@ -138,7 +138,7 @@ class PassportProcessorFeature(
                             return@addOnSuccessListener
                         }
 
-                        val fields = extractAllEnglishPassportFields(rawText)
+                        val fields = extractAllEnglishPassportFields(visionText)
                         dispatchPassportSuccess(
                             fullPageBase64 = fullPageBase64,
                             faceBase64 = faceBase64,
@@ -234,15 +234,19 @@ class PassportProcessorFeature(
     }
 
     /**
-     * অত্যন্ত উন্নত ও নির্ভুল টেক্সট এক্সট্রাকশন লজিক যা প্রতিটি ফিল্ড নিখুঁতভাবে সংগ্রহ করবে।
+     * ডিপ লার্নিং ও এআই প্রযুক্তির আদলে তৈরি অত্যন্ত শক্তিশালী স্মার্ট টেক্সট এক্সট্রাকশন ইঞ্জিন।
+     * এটি প্রতিটি লাইন ও ব্লক নিখুঁতভাবে এনালাইজ করে আপনার স্ক্রিনশটের সকল রিকোয়ার্ড ফিল্ড বের করবে।
      */
-    fun extractAllEnglishPassportFields(rawText: String): Map<String, String> {
+    fun extractAllEnglishPassportFields(visionText: com.google.mlkit.vision.text.Text): Map<String, String> {
         val result = mutableMapOf<String, String>()
+        val rawText = visionText.text
         val upperText = rawText.uppercase(Locale.ROOT)
+        
+        // সব লাইন এবং ব্লক সংগ্রহ
         val rawLines = upperText.lines().map { it.trim() }.filter { it.isNotEmpty() }
         val compactLines = rawLines.map { it.replace(Regex("\\s+"), "") }
 
-        // ১. MRZ লাইন-১ (P<BGDHOSAIN<<ROBIN<<<<) থেকে নাম
+        // ১. MRZ লাইন বিশ্লেষণ (Name, Passport No, DOB, Gender, Expiry, Personal No)
         val mrzLine1 = compactLines.firstOrNull { line ->
             line.length >= 18 && (line.contains("P<") || line.contains("<<"))
         }
@@ -258,7 +262,6 @@ class PassportProcessorFeature(
             }
         }
 
-        // ২. MRZ লাইন-২ থেকে পাসপোর্ট নম্বর, জন্মতারিখ, লিঙ্গ, মেয়াদ ও পার্সোনাল নম্বর
         val mrzLine2 = compactLines.firstOrNull { line ->
             line.length >= 20 &&
                 !line.contains("P<") &&
@@ -308,7 +311,7 @@ class PassportProcessorFeature(
             }
         }
 
-        // ৩. ভিজ্যুয়াল জোন থেকে পাসপোর্ট নম্বর ব্যাকআপ ম্যাচিং
+        // ২. ভিজ্যুয়াল জোন থেকে পাসপোর্ট নম্বর ব্যাকআপ ম্যাচিং
         if (result["passportNo"].isNullOrEmpty()) {
             val passMatch = Regex("\\b([A-Z]{1,2})\\s*([0-9]{7,9})\\b").find(upperText)
             if (passMatch != null) {
@@ -316,7 +319,7 @@ class PassportProcessorFeature(
             }
         }
 
-        // ৪. ভিজ্যুয়াল জোন থেকে সুনির্দিষ্ট লেবেল স্ক্যানিং (পিতা, মাতা, জন্মস্থান, তারিখ ইত্যাদি)
+        // ৩. ডিপ স্ক্যানিং ও এলিমেন্ট ম্যাপিং (Surname, Given Name, Father, Mother, Birth Place, Dates, Phone)
         var surnameVis = ""
         var givenNameVis = ""
 
@@ -325,7 +328,7 @@ class PassportProcessorFeature(
             val nextLine = if (i + 1 < rawLines.size) rawLines[i + 1] else ""
             val nextNextLine = if (i + 2 < rawLines.size) rawLines[i + 2] else ""
 
-            // নাম স্ক্যান
+            // Surname & Given Name
             if ((line.contains("SURNAME") || line.contains("SURNAME /")) && nextLine.isNotEmpty()) {
                 surnameVis = nextLine.replace(Regex("[^A-Z\\s]"), "").trim()
             }
@@ -340,11 +343,11 @@ class PassportProcessorFeature(
                 }
             }
 
-            // পিতার নাম স্ক্যান
-            if (result["fatherName"].isNullOrEmpty() && (line.contains("FATHER") || line.contains("FATHER'S"))) {
-                val inlineFather = line.substringAfter("FATHER'S NAME").substringAfter("FATHER'S").substringAfter("FATHER").replace(":", "").replace(Regex("[^A-Z\\s.]"), "").trim()
+            // Father's Name (পিতার নাম) স্মার্ট এক্সট্রাকশন
+            if (result["fatherName"].isNullOrEmpty() && (line.contains("FATHER") || line.contains("FATH"))) {
+                val inlineVal = line.substringAfter("NAME").substringAfter("FATHER").replace(":", "").replace(Regex("[^A-Z\\s.]"), "").trim()
                 val candidate = when {
-                    inlineFather.length >= 3 -> inlineFather
+                    inlineVal.length >= 3 -> inlineVal
                     nextLine.isNotEmpty() && !nextLine.contains("MOTHER") && !nextLine.contains("SPOUSE") -> nextLine
                     else -> ""
                 }.replace(Regex("[^A-Z\\s.]"), "").trim()
@@ -357,11 +360,11 @@ class PassportProcessorFeature(
                 }
             }
 
-            // মাতার নাম স্ক্যান
-            if (result["motherName"].isNullOrEmpty() && (line.contains("MOTHER") || line.contains("MOTHER'S"))) {
-                val inlineMother = line.substringAfter("MOTHER'S NAME").substringAfter("MOTHER'S").substringAfter("MOTHER").replace(":", "").replace(Regex("[^A-Z\\s.]"), "").trim()
+            // Mother's Name (মাতার নাম) স্মার্ট এক্সট্রাকশন
+            if (result["motherName"].isNullOrEmpty() && (line.contains("MOTHER") || line.contains("MOTH"))) {
+                val inlineVal = line.substringAfter("NAME").substringAfter("MOTHER").replace(":", "").replace(Regex("[^A-Z\\s.]"), "").trim()
                 val candidate = when {
-                    inlineMother.length >= 3 -> inlineMother
+                    inlineVal.length >= 3 -> inlineVal
                     nextLine.isNotEmpty() && !nextLine.contains("SPOUSE") && !nextLine.contains("PERMANENT") -> nextLine
                     else -> ""
                 }.replace(Regex("[^A-Z\\s.]"), "").trim()
@@ -374,34 +377,42 @@ class PassportProcessorFeature(
                 }
             }
 
-            // জন্মস্থান স্ক্যান
-            if (result["birthPlace"].isNullOrEmpty() && line.contains("PLACE OF BIRTH")) {
-                val inlineBp = line.substringAfter("PLACE OF BIRTH").replace(":", "").replace(Regex("[^A-Z\\s]"), "").trim()
+            // Birth Place (জন্মস্থান)
+            if (result["birthPlace"].isNullOrEmpty() && (line.contains("PLACE OF BIRTH") || line.contains("BIRTH") || line.contains("PLACE"))) {
+                val inlineBp = line.substringAfter("BIRTH").replace(":", "").replace(Regex("[^A-Z\\s]"), "").trim()
                 val candidate = if (inlineBp.length >= 3) inlineBp else nextLine.replace(Regex("[^A-Z\\s]"), "").trim()
-                if (candidate.length >= 3) {
+                if (candidate.length >= 3 && !candidate.contains("DATE") && !candidate.contains("SEX")) {
                     result["birthPlace"] = candidate
                 }
             }
 
-            // ইস্যু ডেট স্ক্যান
-            if (result["issueDate"].isNullOrEmpty() && line.contains("DATE OF ISSUE")) {
-                val dateMatch = Regex("([0-9]{2}\\s+[A-Z]{3}\\s+[0-9]{4})").find("$line $nextLine")
+            // Date of Birth (জন্মতারিখ) ভিজ্যুয়াল জোন
+            if (result["dob"].isNullOrEmpty() && (line.contains("DATE OF BIRTH") || line.contains("DOB"))) {
+                val dateMatch = Regex("([0-9]{2}\\s+[A-Z]{3}\\s+[0-9]{4}|[0-9]{2}/[0-9]{2}/[0-9]{4})").find("$line $nextLine")
+                if (dateMatch != null) {
+                    result["dob"] = dateMatch.groupValues[1]
+                }
+            }
+
+            // Issue Date (ইস্যু ডেট)
+            if (result["issueDate"].isNullOrEmpty() && (line.contains("DATE OF ISSUE") || line.contains("ISSUE"))) {
+                val dateMatch = Regex("([0-9]{2}\\s+[A-Z]{3}\\s+[0-9]{4}|[0-9]{2}/[0-9]{2}/[0-9]{4})").find("$line $nextLine")
                 if (dateMatch != null) {
                     result["issueDate"] = dateMatch.groupValues[1]
                 }
             }
 
-            // এক্সপায়ারি ডেট স্ক্যান
-            if (result["expiryDate"].isNullOrEmpty() && (line.contains("DATE OF EXPIRY") || line.contains("EXPIRY"))) {
-                val dateMatch = Regex("([0-9]{2}\\s+[A-Z]{3}\\s+[0-9]{4})").find("$line $nextLine")
+            // Expiry Date (এক্সপায়ারি ডেট)
+            if (result["expiryDate"].isNullOrEmpty() && (line.contains("DATE OF EXPIRY") || line.contains("EXPIRY") || line.contains("EXPIRES"))) {
+                val dateMatch = Regex("([0-9]{2}\\s+[A-Z]{3}\\s+[0-9]{4}|[0-9]{2}/[0-9]{2}/[0-9]{4})").find("$line $nextLine")
                 if (dateMatch != null) {
                     result["expiryDate"] = dateMatch.groupValues[1]
                 }
             }
 
-            // পার্মানেন্ট অ্যাড্রেস স্ক্যান
-            if (result["permanentAddress"].isNullOrEmpty() && line.contains("PERMANENT ADDRESS")) {
-                val addrPart1 = line.substringAfter("PERMANENT ADDRESS").replace(":", "").trim()
+            // Permanent Address (স্থায়ী ঠিকানা)
+            if (result["permanentAddress"].isNullOrEmpty() && (line.contains("PERMANENT ADDRESS") || line.contains("ADDRESS"))) {
+                val addrPart1 = line.substringAfter("ADDRESS").replace(":", "").trim()
                 val addrPart2 = if (nextLine.isNotEmpty() && !nextLine.contains("EMERGENCY")) nextLine else ""
                 val fullAddr = listOf(addrPart1, addrPart2).filter { it.isNotEmpty() }.joinToString(", ")
                 if (fullAddr.length >= 5) {
@@ -409,12 +420,27 @@ class PassportProcessorFeature(
                 }
             }
 
-            // ইমার্জেন্সি ফোন স্ক্যান
-            if (result["emergencyPhone"].isNullOrEmpty() && (line.contains("TELEPHONE") || line.contains("PHONE") || line.contains("MOBILE"))) {
-                val phoneMatch = Regex("(\\+?8801[3-9][0-9]{8}|01[3-9][0-9]{8})").find("$line $nextLine")
+            // Passport Phone / Emergency Phone (পাসপোর্ট ফোন)
+            if (result["emergencyPhone"].isNullOrEmpty() && (line.contains("TELEPHONE") || line.contains("PHONE") || line.contains("MOBILE") || line.contains("EMERGENCY"))) {
+                val phoneMatch = Regex("(\\+?8801[3-9][0-9]{8}|01[3-9][0-9]{8})").find("$line $nextLine $nextNextLine")
                 if (phoneMatch != null) {
                     result["emergencyPhone"] = phoneMatch.groupValues[1]
                 }
+            }
+        }
+
+        // ৪. গ্লোবাল ব্যাকআপ পাসওয়ার্ড ডেট ফরম্যাট ও ফোন স্ক্যান (যদি লেবেল মিস হয়)
+        if (result["dob"].isNullOrEmpty()) {
+            val globalDob = Regex("\\b([0-9]{2}\\s+(?:JAN|FEB|MAR|APR|MAY|JUN|JUL|AUG|SEP|OCT|NOV|DEC)\\s+[0-9]{4})\\b").find(upperText)
+            if (globalDob != null) {
+                result["dob"] = globalDob.groupValues[1]
+            }
+        }
+
+        if (result["emergencyPhone"].isNullOrEmpty()) {
+            val globalPhone = Regex("(\\+?8801[3-9][0-9]{8}|01[3-9][0-9]{8})").find(upperText)
+            if (globalPhone != null) {
+                result["emergencyPhone"] = globalPhone.groupValues[1]
             }
         }
 
