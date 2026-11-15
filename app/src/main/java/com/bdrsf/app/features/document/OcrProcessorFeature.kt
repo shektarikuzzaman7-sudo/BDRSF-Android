@@ -106,6 +106,15 @@ class OcrProcessorFeature(
         }
     }
 
+    fun processPassportFromGalleryFile(file: File, callback: String? = null) {
+        if (!file.exists() || file.length() == 0L) {
+            notifyValidationFailed("passport", "গ্যালারি থেকে ছবি পাওয়া যায়নি", callback)
+            return
+        }
+        notifyScanningStarted("passport")
+        processPassport(file, "passport", callback)
+    }
+
     fun processPassportBase64Image(rawBase64: String, callback: String? = null) {
         val cleanB64 = rawBase64.substringAfter("base64,").trim()
         if (cleanB64.isEmpty()) {
@@ -685,7 +694,7 @@ class OcrProcessorFeature(
 
             val maxDim = max(options.outWidth, options.outHeight)
             var sampleSize = 1
-            while (maxDim / sampleSize > 1800) {
+            while (maxDim / sampleSize > 1600) {
                 sampleSize *= 2
             }
 
@@ -695,7 +704,7 @@ class OcrProcessorFeature(
             ) ?: return Pair(null, "")
 
             val stream = ByteArrayOutputStream()
-            bitmap.compress(Bitmap.CompressFormat.JPEG, 90, stream)
+            bitmap.compress(Bitmap.CompressFormat.JPEG, 85, stream)
             val bytes = stream.toByteArray()
             val base64 = "data:image/jpeg;base64," + Base64.encodeToString(bytes, Base64.NO_WRAP)
 
@@ -836,7 +845,6 @@ class OcrProcessorFeature(
         val rawLines = upperText.lines().map { it.trim() }.filter { it.isNotEmpty() }
         val compactLines = rawLines.map { it.replace(Regex("\\s+"), "") }
 
-        // ১. MRZ লাইন ১ (P<BGDHOSAIN<<ROBIN<<<<) থেকে নাম সংগ্রহ
         val mrzLine1 = compactLines.firstOrNull { line ->
             line.length >= 20 && (line.startsWith("P<") || line.contains("P<BGD") || line.contains("<<"))
         }
@@ -853,7 +861,6 @@ class OcrProcessorFeature(
             }
         }
 
-        // ২. MRZ লাইন ২ (A128505838BGD9501016M33102854601736467<<<<66) থেকে তথ্য সংগ্রহ
         val mrzLine2 = compactLines.firstOrNull { line ->
             line.length >= 22 &&
                 !line.startsWith("P<") &&
@@ -906,13 +913,11 @@ class OcrProcessorFeature(
             result["isMrzValid"] = "true"
         }
 
-        // ৩. ভিজ্যুয়াল জোন থেকে পাসপোর্ট নম্বর (যেমন: A12850583)
         if (result["passportNo"].isNullOrEmpty()) {
             val passMatch = Regex("\\b([A-Z]{1,2}[0-9]{7,9})\\b").find(upperText)
             passMatch?.groupValues?.getOrNull(1)?.let { result["passportNo"] = it.take(9) }
         }
 
-        // ৪. ভিজ্যুয়াল জোন থেকে নাম, পিতার নাম, মাতার নাম, জন্মস্থান, প্রদানের তারিখ ও ঠিকানা
         var surname = ""
         var givenName = ""
 
