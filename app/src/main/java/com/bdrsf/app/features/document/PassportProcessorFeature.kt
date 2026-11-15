@@ -179,16 +179,18 @@ class PassportProcessorFeature(
                             try {
                                 if (destroyed) return@addOnSuccessListener
                                 val rawText = visionText.text
-                                val validationError = validateAgainstPhpPolicy(rawText, policy)
+
+                                // ১. শুধু ডকুমেন্টটি আসলেই পাসপোর্ট কি না নাকি অন্য ভুল ডকুমেন্ট তা চেক
+                                val validationError = checkIsPassportDocument(rawText, policy)
                                 if (validationError != null) {
                                     notifyError(validationError, callback)
                                     return@addOnSuccessListener
                                 }
-                                val fields = extractAllEnglishPassportFields(visionText)
-                                if (!isPassportDocument(rawText, fields)) {
-                                    notifyError("পাসপোর্টের প্রয়োজনীয় তথ্য পাওয়া যায়নি। পাসপোর্টের তথ্যের পাতার পরিষ্কার ছবি দিন।", callback)
-                                    return@addOnSuccessListener
-                                }
+
+                                // ২. পাসপোর্টের ভেতরে থাকা ইংরেজি সকল তথ্য একত্রিত করা (MRZ ছাড়া)
+                                val fields = extractVisualPassportFields(visionText)
+
+                                // ৩. PHP ফাইলে তথ্য পাঠানো
                                 dispatchPassportSuccess(
                                     fullPageBase64 = fullPageBase64,
                                     fields = fields,
@@ -215,58 +217,37 @@ class PassportProcessorFeature(
         }
     }
 
-    private fun isPassportDocument(
-        rawText: String,
-        fields: Map<String, String>
-    ): Boolean {
-        val upper = rawText.uppercase(Locale.ROOT)
-        val hasPassportWord = upper.contains("PASSPORT") ||
-            upper.contains("PEOPLE'S REPUBLIC OF") ||
-            upper.contains("P<") ||
-            upper.contains("SURNAME")
-        val indicators = listOf(
-            fields["passportNo"],
-            fields["nameEn"],
-            fields["nationality"],
-            fields["dob"],
-            fields["surname"],
-            fields["givenNames"],
-            fields["fatherName"],
-            fields["countryCode"]
-        ).count { !it.isNullOrBlank() }
-        return hasPassportWord && indicators >= 1
-    }
-
-    private fun validateAgainstPhpPolicy(
+    /**
+     * শুধুমাত্র ডকুমেন্টটি আসলেই পাসপোর্ট কি না নাকি NID/অন্য কোনো ডকুমেন্ট তা যাচাই করে।
+     */
+    private fun checkIsPassportDocument(
         rawText: String,
         policy: JSONObject
     ): String? {
         val upper = rawText.uppercase(Locale.ROOT)
-        val hasPassportIndicator = upper.contains("PASSPORT") ||
-            upper.contains("P<") ||
-            upper.contains("SURNAME") ||
-            upper.contains("GIVEN NAME")
+        if (upper.isBlank()) {
+            return policy.optString("invalidMessage", "ছবিতে কোনো লেখা পাওয়া যায়নি! পরিষ্কার পাসপোর্টের ছবি দিন।")
+        }
 
-        if (!hasPassportIndicator) {
+        val hasPassportWord = upper.contains("PASSPORT") ||
+            upper.contains("SURNAME") ||
+            upper.contains("GIVEN NAME") ||
+            upper.contains("NATIONALITY") ||
+            upper.contains("PERSONAL DATA AND EMERGENCY CONTACT") ||
+            upper.contains("PEOPLE'S REPUBLIC OF")
+
+        if (!hasPassportWord) {
             val rejectList = jsonArrayToList(policy.optJSONArray("rejectIfContains")).ifEmpty {
                 listOf("NATIONAL ID", "NID NO", "জাতীয় পরিচয়")
             }
             for (word in rejectList) {
                 if (word.isNotBlank() && upper.contains(word.uppercase(Locale.ROOT))) {
-                    return policy.optString("rejectMessage", "ভুল ডকুমেন্ট! পাসপোর্টের ছবি দিন।")
+                    return policy.optString("rejectMessage", "ভুল ডকুমেন্ট! পাসপোর্টের জায়গায় অন্য ডকুমেন্ট দিয়েছেন।")
                 }
             }
+            return policy.optString("invalidMessage", "এটি পাসপোর্ট নয়! অনুগ্রহ করে পাসপোর্টের পরিষ্কার ছবি দিন।")
         }
 
-        val required = jsonArrayToList(policy.optJSONArray("mustContainAny"))
-        if (required.isNotEmpty()) {
-            val matched = required.any { keyword ->
-                upper.contains(keyword.uppercase(Locale.ROOT))
-            } || Regex("\\b([A-Z]{1,2})\\s*([0-9]{7,9})\\b").containsMatchIn(upper)
-            if (!matched) {
-                return policy.optString("invalidMessage", "এটি গ্রহণযোগ্য পাসপোর্টের ছবি নয়।")
-            }
-        }
         return null
     }
 
@@ -306,94 +287,6 @@ class PassportProcessorFeature(
             )
         }
         return result
-    }
-
-    private fun normalizeMrzDigits(segment: String): String {
-        return segment
-            .replace('O', '0')
-            .replace('Q', '0')
-            .replace('D', '0')
-            .replace('I', '1')
-            .replace('L', '1')
-            .replace('Z', '2')
-            .replace('S', '5')
-            .replace('B', '8')
-    }
-
-    private fun parseMrzLines(lines: List<String>): Map<String, String> {
-        val mrzData = mutableMapOf<String, String>()
-        val compactLines = lines.map { it.uppercase(Locale.ROOT).replace(Regex("\\s+"), "") }
-
-        val mrzLine1 = compactLines.firstOrNull { line ->
-            line.length >= 18 && (line.contains("P<") || line.contains("<<"))
-        }
-        if (mrzLine1 != null) {
-            val pIndex = mrzLine1.indexOf("P<")
-            val startIdx = if (pIndex >= 0 && mrzLine1.length >= pIndex + 5) pIndex + 5 else 0
-            val body = mrzLine1.substring(startIdx)
-            val nameParts = body.split("<<")
-            val surname = nameParts.getOrNull(0)?.replace("<", " ")?.replace(Regex("[^A-Z\\s]"), "")?.trim().orEmpty()
-            val givenNames = nameParts.getOrNull(1)?.replace("<", " ")?.replace(Regex("[^A-Z\\s]"), "")?.trim().orEmpty()
-            if (surname.isNotBlank()) mrzData["surname"] = surname
-            if (givenNames.isNotBlank()) mrzData["givenNames"] = givenNames
-            val fullName = listOf(givenNames, surname).filter { it.isNotBlank() }.joinToString(" ").replace(Regex("\\s+"), " ")
-            if (fullName.isNotBlank()) mrzData["nameEn"] = fullName
-            if (pIndex >= 0 && mrzLine1.length >= pIndex + 5) {
-                val cc = mrzLine1.substring(pIndex + 2, pIndex + 5).replace("<", "")
-                if (cc.length == 3) mrzData["countryCode"] = cc
-            }
-        }
-
-        val mrzLine2 = compactLines.firstOrNull { line ->
-            line.length >= 20 &&
-                !line.contains("P<") &&
-                (line.contains("BGD") || line.contains(Regex("[0-9OIZSB]{6}[0-9OIZSB][MF<][0-9OIZSB]{6}")))
-        }
-        if (mrzLine2 != null) {
-            val rawPass = mrzLine2.substring(0, 9).replace("<", "").trim()
-            val fixedPass = when {
-                rawPass.length >= 3 && rawPass[1].isLetter() && rawPass[2].isDigit() ->
-                    rawPass.substring(0, 2) + normalizeMrzDigits(rawPass.substring(2))
-                rawPass.length >= 2 ->
-                    rawPass.substring(0, 1) + normalizeMrzDigits(rawPass.substring(1))
-                else -> rawPass
-            }
-            if (fixedPass.length >= 7) {
-                mrzData["passportNo"] = fixedPass
-            }
-
-            if (mrzLine2.length >= 19) {
-                val dobDigits = normalizeMrzDigits(mrzLine2.substring(13, 19))
-                if (dobDigits.matches(Regex("[0-9]{6}"))) {
-                    val yy = dobDigits.substring(0, 2).toIntOrNull() ?: 0
-                    val century = if (yy > 30) "19" else "20"
-                    mrzData["dob"] = "$century${dobDigits.substring(0, 2)}-${dobDigits.substring(2, 4)}-${dobDigits.substring(4, 6)}"
-                }
-            }
-
-            if (mrzLine2.length >= 21) {
-                val sexChar = mrzLine2[20]
-                if (sexChar == 'M' || sexChar == 'F') {
-                    mrzData["gender"] = sexChar.toString()
-                }
-            }
-
-            if (mrzLine2.length >= 27) {
-                val expDigits = normalizeMrzDigits(mrzLine2.substring(21, 27))
-                if (expDigits.matches(Regex("[0-9]{6}"))) {
-                    mrzData["expiryDate"] = "20${expDigits.substring(0, 2)}-${expDigits.substring(2, 4)}-${expDigits.substring(4, 6)}"
-                }
-            }
-
-            if (mrzLine2.length >= 42) {
-                val personalDigits = normalizeMrzDigits(mrzLine2.substring(28, 42)).replace("<", "").trim()
-                if (personalDigits.matches(Regex("[0-9]{10,17}"))) {
-                    mrzData["personalNo"] = personalDigits
-                }
-            }
-        }
-
-        return mrzData
     }
 
     private fun extractLabelValue(
@@ -522,7 +415,10 @@ class PassportProcessorFeature(
         return value.trim()
     }
 
-    fun extractAllEnglishPassportFields(
+    /**
+     * MRZ চেকিং ছাড়াই পাসপোর্টের ভিজ্যুয়াল অংশ থেকে সব ইংরেজি তথ্য একত্র করে।
+     */
+    fun extractVisualPassportFields(
         visionText: Text
     ): Map<String, String> {
         val result = mutableMapOf<String, String>()
@@ -530,67 +426,42 @@ class PassportProcessorFeature(
         val rawText = visionText.text
         val upperText = rawText.uppercase(Locale.ROOT)
 
-        // ১. MRZ লাইন থেকে নির্ভুল প্রাথমিক ডেটা সংগ্রহ
-        val mrz = parseMrzLines(lines)
-        result.putAll(mrz)
+        result["passportType"] = extractLabelValue(lines, listOf("TYPE OF PASSPORT", "TYPE"))
+        result["countryCode"] = extractLabelValue(lines, listOf("COUNTRY CODE"))
 
-        // ২. ভিজ্যুয়াল জোন থেকে সব ফিল্ড সংগ্রহ (MRZ ফাঁকা থাকলে বা অতিরিক্ত তথ্যের জন্য)
-        val passportType = extractLabelValue(lines, listOf("TYPE OF PASSPORT", "TYPE"))
-        if (passportType.isNotBlank()) result["passportType"] = passportType
-
-        val countryCode = extractLabelValue(lines, listOf("COUNTRY CODE"))
-        if (countryCode.isNotBlank()) result["countryCode"] = countryCode
-
-        val visualPassNo = extractLabelValue(lines, listOf("PASSPORT NUMBER", "PASSPORT NO.", "PASSPORT NO"))
+        val labelPassNo = extractLabelValue(lines, listOf("PASSPORT NUMBER", "PASSPORT NO.", "PASSPORT NO"))
             .replace(Regex("[^A-Z0-9]"), "")
-        if (result["passportNo"].isNullOrBlank() && visualPassNo.matches(Regex("^[A-Z]{1,2}[0-9]{6,9}$"))) {
-            result["passportNo"] = visualPassNo
-        }
-        if (result["passportNo"].isNullOrBlank()) {
+        if (labelPassNo.matches(Regex("^[A-Z]{1,2}[0-9]{6,9}$"))) {
+            result["passportNo"] = labelPassNo
+        } else {
             val regexMatch = Regex("\\b([A-Z]{1,2})\\s*([0-9]{7,9})\\b").find(upperText)
             if (regexMatch != null) {
                 result["passportNo"] = (regexMatch.groupValues[1] + regexMatch.groupValues[2]).take(9)
             }
         }
 
-        val visualSurname = extractLabelValue(lines, listOf("SURNAME"))
-        if (visualSurname.isNotBlank()) result["surname"] = visualSurname
+        val surname = extractLabelValue(lines, listOf("SURNAME"))
+        val givenNames = extractLabelValue(lines, listOf("GIVEN NAME", "GIVEN NAMES"))
+        result["surname"] = surname
+        result["givenNames"] = givenNames
 
-        val visualGiven = extractLabelValue(lines, listOf("GIVEN NAME", "GIVEN NAMES"))
-        if (visualGiven.isNotBlank()) result["givenNames"] = visualGiven
-
-        val nationality = extractLabelValue(lines, listOf("NATIONALITY"))
-        if (nationality.isNotBlank()) result["nationality"] = nationality
-
-        val visualDob = findDateNearLabel(lines, listOf("DATE OF BIRTH", "BIRTH DATE", "DOB"))
-        if (visualDob.isNotBlank()) result["dob"] = visualDob
-
-        val visualGender = extractLabelValue(lines, listOf("SEX", "GENDER"))
-        if (result["gender"].isNullOrBlank() && visualGender.isNotBlank()) {
-            result["gender"] = visualGender
-        }
-
+        result["nationality"] = extractLabelValue(lines, listOf("NATIONALITY"))
+        result["dob"] = findDateNearLabel(lines, listOf("DATE OF BIRTH", "BIRTH DATE", "DOB"))
+        result["gender"] = extractLabelValue(lines, listOf("SEX", "GENDER"))
         result["birthPlace"] = extractLabelValue(lines, listOf("PLACE OF BIRTH", "BIRTH PLACE"))
         result["issueDate"] = findDateNearLabel(lines, listOf("DATE OF ISSUE", "ISSUE DATE"))
-
-        val visualExpiry = findDateNearLabel(lines, listOf("DATE OF EXPIRY", "EXPIRY DATE"))
-        if (visualExpiry.isNotBlank()) result["expiryDate"] = visualExpiry
-
-        val visualPersonalNo = extractLabelValue(lines, listOf("PERSONAL NO.", "PERSONAL NO", "PERSONAL NUMBER"))
+        result["expiryDate"] = findDateNearLabel(lines, listOf("DATE OF EXPIRY", "EXPIRY DATE"))
+        result["personalNo"] = extractLabelValue(lines, listOf("PERSONAL NO.", "PERSONAL NO", "PERSONAL NUMBER"))
             .replace(Regex("[^0-9]"), "")
-        if (visualPersonalNo.isNotBlank()) result["personalNo"] = visualPersonalNo
-
         result["issuingAuthority"] = extractLabelValue(lines, listOf("ISSUING AUTHORITY", "AUTHORITY"))
         result["placeOfIssue"] = extractLabelValue(lines, listOf("PLACE OF ISSUE"))
 
-        // নাম (strictPrefix = true ব্যবহার করা হয়েছে যাতে FATHER'S NAME বা GIVEN NAME ম্যাচ না করে)
         val topPageName = extractLabelValue(lines, listOf("NAME:"), nextLines = 1, strictPrefix = true)
         if (topPageName.isNotBlank()) {
             result["nameEn"] = topPageName
-        } else if (result["nameEn"].isNullOrBlank()) {
-            val given = result["givenNames"].orEmpty()
-            val surname = result["surname"].orEmpty()
-            result["nameEn"] = listOf(given, surname).filter { it.isNotBlank() }.joinToString(" ")
+        } else {
+            val combined = listOf(givenNames, surname).filter { it.isNotBlank() }.joinToString(" ")
+            result["nameEn"] = combined
         }
 
         result["fatherName"] = extractLabelValue(lines, listOf("FATHER'S NAME", "FATHERS NAME", "FATHER NAME"))
@@ -747,7 +618,7 @@ class PassportProcessorFeature(
         }
         activity.runOnUiThread {
             if (destroyed) return@runOnUiThread
-            Toast.makeText(activity, "✔ পাসপোর্ট OCR সম্পন্ন", Toast.LENGTH_SHORT).show()
+            Toast.makeText(activity, "✔ পাসপোর্ট যাচাই সম্পন্ন", Toast.LENGTH_SHORT).show()
             webView.evaluateJavascript(
                 "if(window.onDocumentValidated) {window.onDocumentValidated('passport', true, ${JSONObject.quote(fullPageBase64)});}",
                 null
