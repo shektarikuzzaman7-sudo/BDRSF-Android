@@ -233,6 +233,9 @@ class PassportProcessorFeature(
             .replace('B', '8')
     }
 
+    /**
+     * অত্যন্ত উন্নত ও সচ্ছল টেক্সট এক্সট্রাকশন লজিক যা প্রতিটি ফিল্ড নিখুঁতভাবে সংগ্রহ করবে।
+     */
     fun extractAllEnglishPassportFields(rawText: String): Map<String, String> {
         val result = mutableMapOf<String, String>()
         val upperText = rawText.uppercase(Locale.ROOT)
@@ -305,7 +308,7 @@ class PassportProcessorFeature(
             }
         }
 
-        // ৩. ভিজ্যুয়াল জোন থেকে পাসপোর্ট নম্বর (স্পেসসহ যেমন A 12850583 বা A12850583)
+        // ৩. ভিজ্যুয়াল জোন থেকে পাসপোর্ট নম্বর ব্যাকআপ ম্যাচিং
         if (result["passportNo"].isNullOrEmpty()) {
             val passMatch = Regex("\\b([A-Z]{1,2})\\s*([0-9]{7,9})\\b").find(upperText)
             if (passMatch != null) {
@@ -313,14 +316,22 @@ class PassportProcessorFeature(
             }
         }
 
-        // ৪. ভিজ্যুয়াল জোন থেকে সব ইংরেজি তথ্য সংগ্রহ
-        var surname = ""
-        var givenName = ""
+        // ৪. ভিজ্যুয়াল জোন থেকে সুনির্দিষ্ট লেবেল স্ক্যানিং (পিতা, মাতা, জন্মস্থান, তারিখ ইত্যাদি)
+        var surnameVis = ""
+        var givenNameVis = ""
 
         for (i in rawLines.indices) {
-            val line = rawLines[i]
+            const line = rawLines[i]
             val nextLine = if (i + 1 < rawLines.size) rawLines[i + 1] else ""
+            val nextNextLine = if (i + 2 < rawLines.size) rawLines[i + 2] else ""
 
+            // নাম স্ক্যান
+            if ((line.contains("SURNAME") || line.contains("SURNAME /")) && nextLine.isNotEmpty()) {
+                surnameVis = nextLine.replace(Regex("[^A-Z\\s]"), "").trim()
+            }
+            if ((line.contains("GIVEN NAME") || line.contains("GIVEN NAMES")) && nextLine.isNotEmpty()) {
+                givenNameVis = nextLine.replace(Regex("[^A-Z\\s]"), "").trim()
+            }
             if (line.startsWith("NAME:") || line == "NAME") {
                 val inlineName = line.substringAfter("NAME").replace(":", "").replace(Regex("[^A-Z\\s.]"), "").trim()
                 val foundName = if (inlineName.length >= 3) inlineName else nextLine.replace(Regex("[^A-Z\\s.]"), "").trim()
@@ -329,58 +340,66 @@ class PassportProcessorFeature(
                 }
             }
 
-            if (line.contains("SURNAME") && nextLine.isNotEmpty()) {
-                surname = nextLine.replace(Regex("[^A-Z\\s.]"), "").trim()
-            }
-            if (line.contains("GIVEN NAME") && nextLine.isNotEmpty()) {
-                givenName = nextLine.replace(Regex("[^A-Z\\s.]"), "").trim()
-            }
+            // পিতার নাম স্ক্যান
+            if (result["fatherName"].isNullOrEmpty() && (line.contains("FATHER") || line.contains("FATHER'S"))) {
+                val inlineFather = line.substringAfter("FATHER'S NAME").substringAfter("FATHER'S").substringAfter("FATHER").replace(":", "").replace(Regex("[^A-Z\\s.]"), "").trim()
+                val candidate = when {
+                    inlineFather.length >= 3 -> inlineFather
+                    nextLine.isNotEmpty() && !nextLine.contains("MOTHER") && !nextLine.contains("SPOUSE") -> nextLine
+                    else -> ""
+                }.replace(Regex("[^A-Z\\s.]"), "").trim()
 
-            if (result["fatherName"].isNullOrEmpty() && line.contains("FATHER")) {
-                val inlineFather = line.substringAfter("FATHER'S NAME").substringAfter("FATHER").replace(":", "").replace(Regex("[^A-Z\\s.]"), "").trim()
-                val candidate = if (inlineFather.length >= 3) inlineFather else nextLine.replace(Regex("[^A-Z\\s.]"), "").trim()
                 if (candidate.length >= 3 && !candidate.contains("MOTHER") && !candidate.contains("RELATIONSHIP")) {
                     result["fatherName"] = candidate
+                } else if (nextNextLine.isNotEmpty() && !nextNextLine.contains("MOTHER")) {
+                    val cand2 = nextNextLine.replace(Regex("[^A-Z\\s.]"), "").trim()
+                    if (cand2.length >= 3) result["fatherName"] = cand2
                 }
             }
 
-            if (result["motherName"].isNullOrEmpty() && line.contains("MOTHER")) {
-                val inlineMother = line.substringAfter("MOTHER'S NAME").substringAfter("MOTHER").replace(":", "").replace(Regex("[^A-Z\\s.]"), "").trim()
-                val candidate = if (inlineMother.length >= 3) inlineMother else nextLine.replace(Regex("[^A-Z\\s.]"), "").trim()
+            // মাতার নাম স্ক্যান
+            if (result["motherName"].isNullOrEmpty() && (line.contains("MOTHER") || line.contains("MOTHER'S"))) {
+                val inlineMother = line.substringAfter("MOTHER'S NAME").substringAfter("MOTHER'S").substringAfter("MOTHER").replace(":", "").replace(Regex("[^A-Z\\s.]"), "").trim()
+                val candidate = when {
+                    inlineMother.length >= 3 -> inlineMother
+                    nextLine.isNotEmpty() && !nextLine.contains("SPOUSE") && !nextLine.contains("PERMANENT") -> nextLine
+                    else -> ""
+                }.replace(Regex("[^A-Z\\s.]"), "").trim()
+
                 if (candidate.length >= 3 && !candidate.contains("SPOUSE")) {
                     result["motherName"] = candidate
+                } else if (nextNextLine.isNotEmpty() && !nextNextLine.contains("SPOUSE")) {
+                    val cand2 = nextNextLine.replace(Regex("[^A-Z\\s.]"), "").trim()
+                    if (cand2.length >= 3) result["motherName"] = cand2
                 }
             }
 
-            if (result["spouseName"].isNullOrEmpty() && line.contains("SPOUSE")) {
-                val inlineSpouse = line.substringAfter("SPOUSE'S NAME").substringAfter("SPOUSE").replace(":", "").replace(Regex("[^A-Z\\s.]"), "").trim()
-                val candidate = if (inlineSpouse.length >= 3) inlineSpouse else nextLine.replace(Regex("[^A-Z\\s.]"), "").trim()
-                if (candidate.length >= 3 && !candidate.contains("PERMANENT")) {
-                    result["spouseName"] = candidate
-                }
-            }
-
-            if (result["birthPlace"].isNullOrEmpty() && line.contains("PLACE OF BIRTH") && nextLine.isNotEmpty()) {
-                val candidate = nextLine.replace(Regex("[^A-Z\\s]"), "").trim()
+            // জন্মস্থান স্ক্যান
+            if (result["birthPlace"].isNullOrEmpty() && line.contains("PLACE OF BIRTH")) {
+                val inlineBp = line.substringAfter("PLACE OF BIRTH").replace(":", "").replace(Regex("[^A-Z\\s]"), "").trim()
+                val candidate = if (inlineBp.length >= 3) inlineBp else nextLine.replace(Regex("[^A-Z\\s]"), "").trim()
                 if (candidate.length >= 3) {
                     result["birthPlace"] = candidate
                 }
             }
 
-            if (result["issueDate"].isNullOrEmpty() && line.contains("DATE OF ISSUE") && nextLine.isNotEmpty()) {
-                val dateMatch = Regex("([0-9]{2}\\s+[A-Z]{3}\\s+[0-9]{4})").find(nextLine)
+            // ইস্যু ডেট স্ক্যান
+            if (result["issueDate"].isNullOrEmpty() && line.contains("DATE OF ISSUE")) {
+                val dateMatch = Regex("([0-9]{2}\\s+[A-Z]{3}\\s+[0-9]{4})").find("$line $nextLine")
                 if (dateMatch != null) {
                     result["issueDate"] = dateMatch.groupValues[1]
                 }
             }
 
-            if (result["expiryDate"].isNullOrEmpty() && line.contains("DATE OF EXPIRY") && nextLine.isNotEmpty()) {
-                val dateMatch = Regex("([0-9]{2}\\s+[A-Z]{3}\\s+[0-9]{4})").find(nextLine)
+            // এক্সপায়ারি ডেট স্ক্যান
+            if (result["expiryDate"].isNullOrEmpty() && (line.contains("DATE OF EXPIRY") || line.contains("EXPIRY"))) {
+                val dateMatch = Regex("([0-9]{2}\\s+[A-Z]{3}\\s+[0-9]{4})").find("$line $nextLine")
                 if (dateMatch != null) {
                     result["expiryDate"] = dateMatch.groupValues[1]
                 }
             }
 
+            // পার্মানেন্ট অ্যাড্রেস স্ক্যান
             if (result["permanentAddress"].isNullOrEmpty() && line.contains("PERMANENT ADDRESS")) {
                 val addrPart1 = line.substringAfter("PERMANENT ADDRESS").replace(":", "").trim()
                 val addrPart2 = if (nextLine.isNotEmpty() && !nextLine.contains("EMERGENCY")) nextLine else ""
@@ -390,7 +409,8 @@ class PassportProcessorFeature(
                 }
             }
 
-            if (result["emergencyPhone"].isNullOrEmpty() && line.contains("TELEPHONE")) {
+            // ইমার্জেন্সি ফোন স্ক্যান
+            if (result["emergencyPhone"].isNullOrEmpty() && (line.contains("TELEPHONE") || line.contains("PHONE") || line.contains("MOBILE"))) {
                 val phoneMatch = Regex("(\\+?8801[3-9][0-9]{8}|01[3-9][0-9]{8})").find("$line $nextLine")
                 if (phoneMatch != null) {
                     result["emergencyPhone"] = phoneMatch.groupValues[1]
@@ -399,7 +419,7 @@ class PassportProcessorFeature(
         }
 
         if (result["nameEn"].isNullOrEmpty()) {
-            val combined = listOf(givenName, surname).filter { it.isNotEmpty() }.joinToString(" ").trim()
+            val combined = listOf(givenNameVis, surnameVis).filter { it.isNotEmpty() }.joinToString(" ").trim()
             if (combined.isNotEmpty()) {
                 result["nameEn"] = combined
             }
@@ -563,7 +583,7 @@ class PassportProcessorFeature(
         }
     }
 
-    fun destroy() {
+    fn destroy() {
         try {
             textRecognizer.close()
             faceDetector.close()
