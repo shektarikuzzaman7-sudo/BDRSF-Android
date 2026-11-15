@@ -1,3 +1,4 @@
+// File: app/src/main/java/com/bdrsf/app/features/document/PassportProcessorFeature.kt
 package com.bdrsf.app.features.document
 
 import android.app.Activity
@@ -219,17 +220,21 @@ class PassportProcessorFeature(
         fields: Map<String, String>
     ): Boolean {
         val upper = rawText.uppercase(Locale.ROOT)
-        val hasPassportWord = upper.contains("PASSPORT") || upper.contains("PEOPLE'S REPUBLIC OF")
+        val hasPassportWord = upper.contains("PASSPORT") ||
+            upper.contains("PEOPLE'S REPUBLIC OF") ||
+            upper.contains("P<") ||
+            upper.contains("SURNAME")
         val indicators = listOf(
             fields["passportNo"],
+            fields["nameEn"],
             fields["nationality"],
             fields["dob"],
             fields["surname"],
             fields["givenNames"],
-            fields["passportType"],
+            fields["fatherName"],
             fields["countryCode"]
         ).count { !it.isNullOrBlank() }
-        return hasPassportWord && indicators >= 2
+        return hasPassportWord && indicators >= 1
     }
 
     private fun validateAgainstPhpPolicy(
@@ -237,19 +242,27 @@ class PassportProcessorFeature(
         policy: JSONObject
     ): String? {
         val upper = rawText.uppercase(Locale.ROOT)
-        val rejectList = jsonArrayToList(policy.optJSONArray("rejectIfContains")).ifEmpty {
-            listOf("NATIONAL ID", "NID NO", "জাতীয় পরিচয়")
-        }
-        for (word in rejectList) {
-            if (word.isNotBlank() && upper.contains(word.uppercase(Locale.ROOT))) {
-                return policy.optString("rejectMessage", "ভুল ডকুমেন্ট! পাসপোর্টের ছবি দিন।")
+        val hasPassportIndicator = upper.contains("PASSPORT") ||
+            upper.contains("P<") ||
+            upper.contains("SURNAME") ||
+            upper.contains("GIVEN NAME")
+
+        if (!hasPassportIndicator) {
+            val rejectList = jsonArrayToList(policy.optJSONArray("rejectIfContains")).ifEmpty {
+                listOf("NATIONAL ID", "NID NO", "জাতীয় পরিচয়")
+            }
+            for (word in rejectList) {
+                if (word.isNotBlank() && upper.contains(word.uppercase(Locale.ROOT))) {
+                    return policy.optString("rejectMessage", "ভুল ডকুমেন্ট! পাসপোর্টের ছবি দিন।")
+                }
             }
         }
+
         val required = jsonArrayToList(policy.optJSONArray("mustContainAny"))
         if (required.isNotEmpty()) {
             val matched = required.any { keyword ->
                 upper.contains(keyword.uppercase(Locale.ROOT))
-            }
+            } || Regex("\\b([A-Z]{1,2})\\s*([0-9]{7,9})\\b").containsMatchIn(upper)
             if (!matched) {
                 return policy.optString("invalidMessage", "এটি গ্রহণযোগ্য পাসপোর্টের ছবি নয়।")
             }
@@ -295,10 +308,99 @@ class PassportProcessorFeature(
         return result
     }
 
+    private fun normalizeMrzDigits(segment: String): String {
+        return segment
+            .replace('O', '0')
+            .replace('Q', '0')
+            .replace('D', '0')
+            .replace('I', '1')
+            .replace('L', '1')
+            .replace('Z', '2')
+            .replace('S', '5')
+            .replace('B', '8')
+    }
+
+    private fun parseMrzLines(lines: List<String>): Map<String, String> {
+        val mrzData = mutableMapOf<String, String>()
+        val compactLines = lines.map { it.uppercase(Locale.ROOT).replace(Regex("\\s+"), "") }
+
+        val mrzLine1 = compactLines.firstOrNull { line ->
+            line.length >= 18 && (line.contains("P<") || line.contains("<<"))
+        }
+        if (mrzLine1 != null) {
+            val pIndex = mrzLine1.indexOf("P<")
+            val startIdx = if (pIndex >= 0 && mrzLine1.length >= pIndex + 5) pIndex + 5 else 0
+            val body = mrzLine1.substring(startIdx)
+            val nameParts = body.split("<<")
+            val surname = nameParts.getOrNull(0)?.replace("<", " ")?.replace(Regex("[^A-Z\\s]"), "")?.trim().orEmpty()
+            val givenNames = nameParts.getOrNull(1)?.replace("<", " ")?.replace(Regex("[^A-Z\\s]"), "")?.trim().orEmpty()
+            if (surname.isNotBlank()) mrzData["surname"] = surname
+            if (givenNames.isNotBlank()) mrzData["givenNames"] = givenNames
+            val fullName = listOf(givenNames, surname).filter { it.isNotBlank() }.joinToString(" ").replace(Regex("\\s+"), " ")
+            if (fullName.isNotBlank()) mrzData["nameEn"] = fullName
+            if (pIndex >= 0 && mrzLine1.length >= pIndex + 5) {
+                val cc = mrzLine1.substring(pIndex + 2, pIndex + 5).replace("<", "")
+                if (cc.length == 3) mrzData["countryCode"] = cc
+            }
+        }
+
+        val mrzLine2 = compactLines.firstOrNull { line ->
+            line.length >= 20 &&
+                !line.contains("P<") &&
+                (line.contains("BGD") || line.contains(Regex("[0-9OIZSB]{6}[0-9OIZSB][MF<][0-9OIZSB]{6}")))
+        }
+        if (mrzLine2 != null) {
+            val rawPass = mrzLine2.substring(0, 9).replace("<", "").trim()
+            val fixedPass = when {
+                rawPass.length >= 3 && rawPass[1].isLetter() && rawPass[2].isDigit() ->
+                    rawPass.substring(0, 2) + normalizeMrzDigits(rawPass.substring(2))
+                rawPass.length >= 2 ->
+                    rawPass.substring(0, 1) + normalizeMrzDigits(rawPass.substring(1))
+                else -> rawPass
+            }
+            if (fixedPass.length >= 7) {
+                mrzData["passportNo"] = fixedPass
+            }
+
+            if (mrzLine2.length >= 19) {
+                val dobDigits = normalizeMrzDigits(mrzLine2.substring(13, 19))
+                if (dobDigits.matches(Regex("[0-9]{6}"))) {
+                    val yy = dobDigits.substring(0, 2).toIntOrNull() ?: 0
+                    val century = if (yy > 30) "19" else "20"
+                    mrzData["dob"] = "$century${dobDigits.substring(0, 2)}-${dobDigits.substring(2, 4)}-${dobDigits.substring(4, 6)}"
+                }
+            }
+
+            if (mrzLine2.length >= 21) {
+                val sexChar = mrzLine2[20]
+                if (sexChar == 'M' || sexChar == 'F') {
+                    mrzData["gender"] = sexChar.toString()
+                }
+            }
+
+            if (mrzLine2.length >= 27) {
+                val expDigits = normalizeMrzDigits(mrzLine2.substring(21, 27))
+                if (expDigits.matches(Regex("[0-9]{6}"))) {
+                    mrzData["expiryDate"] = "20${expDigits.substring(0, 2)}-${expDigits.substring(2, 4)}-${expDigits.substring(4, 6)}"
+                }
+            }
+
+            if (mrzLine2.length >= 42) {
+                val personalDigits = normalizeMrzDigits(mrzLine2.substring(28, 42)).replace("<", "").trim()
+                if (personalDigits.matches(Regex("[0-9]{10,17}"))) {
+                    mrzData["personalNo"] = personalDigits
+                }
+            }
+        }
+
+        return mrzData
+    }
+
     private fun extractLabelValue(
         lines: List<String>,
         labels: List<String>,
-        nextLines: Int = 1
+        nextLines: Int = 2,
+        strictPrefix: Boolean = false
     ): String {
         val sortedLabels = labels.sortedByDescending { it.length }
         for (i in lines.indices) {
@@ -306,7 +408,11 @@ class PassportProcessorFeature(
             val upper = line.uppercase(Locale.ROOT)
             for (label in sortedLabels) {
                 val labelUpper = label.uppercase(Locale.ROOT)
-                val index = upper.indexOf(labelUpper)
+                val index = if (strictPrefix) {
+                    if (upper.startsWith(labelUpper) || upper.contains("/$labelUpper")) upper.indexOf(labelUpper) else -1
+                } else {
+                    upper.indexOf(labelUpper)
+                }
                 if (index < 0) continue
                 val after = cleanValue(line.substring(index + label.length))
                 if (after.isNotBlank() && !isKnownLabelLine(after)) {
@@ -359,10 +465,11 @@ class PassportProcessorFeature(
             "PASSPORT NUMBER", "PASSPORT NO", "COUNTRY CODE", "NATIONALITY",
             "SURNAME", "GIVEN NAME", "DATE OF BIRTH", "DATE OF ISSUE",
             "DATE OF EXPIRY", "PERSONAL NO", "PERSONAL NUMBER", "PLACE OF BIRTH",
-            "ISSUING AUTHORITY", "FATHER'S NAME", "FATHER NAME", "MOTHER'S NAME",
-            "MOTHER NAME", "SPOUSE'S NAME", "SPOUSE NAME", "PERMANENT ADDRESS",
+            "ISSUING AUTHORITY", "PREVIOUS PASSPORT", "HOLDER'S SIGNATURE",
+            "FATHER'S NAME", "FATHER NAME", "MOTHER'S NAME", "MOTHER NAME",
+            "SPOUSE'S NAME", "SPOUSE NAME", "PERMANENT ADDRESS",
             "EMERGENCY CONTACT", "RELATIONSHIP", "TELEPHONE NO", "TELEPHONE",
-            "MOBILE", "PHONE", "NAME:", "ADDRESS:", "TYPE OF PASSPORT"
+            "MOBILE", "PHONE", "NAME:", "ADDRESS:", "TYPE", "SEX"
         )
         return labels.any { upper.contains(it) }
     }
@@ -385,6 +492,8 @@ class PassportProcessorFeature(
                     append(lines[i])
                     append(" ")
                     append(lines.getOrNull(i + 1).orEmpty())
+                    append(" ")
+                    append(lines.getOrNull(i + 2).orEmpty())
                 }
                 val match = dateRegex.find(searchText)
                 if (match != null) {
@@ -419,52 +528,85 @@ class PassportProcessorFeature(
         val result = mutableMapOf<String, String>()
         val lines = getOcrLines(visionText)
         val rawText = visionText.text
+        val upperText = rawText.uppercase(Locale.ROOT)
 
-        result["passportType"] = extractLabelValue(lines, listOf("TYPE OF PASSPORT", "TYPE"))
-        result["countryCode"] = extractLabelValue(lines, listOf("COUNTRY CODE"))
-        result["passportNo"] = extractLabelValue(lines, listOf("PASSPORT NUMBER", "PASSPORT NO.", "PASSPORT NO"))
-        result["surname"] = extractLabelValue(lines, listOf("SURNAME"))
-        result["givenNames"] = extractLabelValue(lines, listOf("GIVEN NAME", "GIVEN NAMES"))
-        result["nationality"] = extractLabelValue(lines, listOf("NATIONALITY"))
-        result["dob"] = findDateNearLabel(lines, listOf("DATE OF BIRTH", "BIRTH DATE", "DOB"))
-        result["gender"] = extractLabelValue(lines, listOf("SEX", "GENDER"))
+        // ১. MRZ লাইন থেকে নির্ভুল প্রাথমিক ডেটা সংগ্রহ
+        val mrz = parseMrzLines(lines)
+        result.putAll(mrz)
+
+        // ২. ভিজ্যুয়াল জোন থেকে সব ফিল্ড সংগ্রহ (MRZ ফাঁকা থাকলে বা অতিরিক্ত তথ্যের জন্য)
+        val passportType = extractLabelValue(lines, listOf("TYPE OF PASSPORT", "TYPE"))
+        if (passportType.isNotBlank()) result["passportType"] = passportType
+
+        val countryCode = extractLabelValue(lines, listOf("COUNTRY CODE"))
+        if (countryCode.isNotBlank()) result["countryCode"] = countryCode
+
+        val visualPassNo = extractLabelValue(lines, listOf("PASSPORT NUMBER", "PASSPORT NO.", "PASSPORT NO"))
+            .replace(Regex("[^A-Z0-9]"), "")
+        if (result["passportNo"].isNullOrBlank() && visualPassNo.matches(Regex("^[A-Z]{1,2}[0-9]{6,9}$"))) {
+            result["passportNo"] = visualPassNo
+        }
+        if (result["passportNo"].isNullOrBlank()) {
+            val regexMatch = Regex("\\b([A-Z]{1,2})\\s*([0-9]{7,9})\\b").find(upperText)
+            if (regexMatch != null) {
+                result["passportNo"] = (regexMatch.groupValues[1] + regexMatch.groupValues[2]).take(9)
+            }
+        }
+
+        val visualSurname = extractLabelValue(lines, listOf("SURNAME"))
+        if (visualSurname.isNotBlank()) result["surname"] = visualSurname
+
+        val visualGiven = extractLabelValue(lines, listOf("GIVEN NAME", "GIVEN NAMES"))
+        if (visualGiven.isNotBlank()) result["givenNames"] = visualGiven
+
+        val nationality = extractLabelValue(lines, listOf("NATIONALITY"))
+        if (nationality.isNotBlank()) result["nationality"] = nationality
+
+        val visualDob = findDateNearLabel(lines, listOf("DATE OF BIRTH", "BIRTH DATE", "DOB"))
+        if (visualDob.isNotBlank()) result["dob"] = visualDob
+
+        val visualGender = extractLabelValue(lines, listOf("SEX", "GENDER"))
+        if (result["gender"].isNullOrBlank() && visualGender.isNotBlank()) {
+            result["gender"] = visualGender
+        }
+
         result["birthPlace"] = extractLabelValue(lines, listOf("PLACE OF BIRTH", "BIRTH PLACE"))
         result["issueDate"] = findDateNearLabel(lines, listOf("DATE OF ISSUE", "ISSUE DATE"))
-        result["expiryDate"] = findDateNearLabel(lines, listOf("DATE OF EXPIRY", "EXPIRY DATE"))
-        result["personalNo"] = extractLabelValue(lines, listOf("PERSONAL NO.", "PERSONAL NO", "PERSONAL NUMBER"))
+
+        val visualExpiry = findDateNearLabel(lines, listOf("DATE OF EXPIRY", "EXPIRY DATE"))
+        if (visualExpiry.isNotBlank()) result["expiryDate"] = visualExpiry
+
+        val visualPersonalNo = extractLabelValue(lines, listOf("PERSONAL NO.", "PERSONAL NO", "PERSONAL NUMBER"))
+            .replace(Regex("[^0-9]"), "")
+        if (visualPersonalNo.isNotBlank()) result["personalNo"] = visualPersonalNo
+
         result["issuingAuthority"] = extractLabelValue(lines, listOf("ISSUING AUTHORITY", "AUTHORITY"))
         result["placeOfIssue"] = extractLabelValue(lines, listOf("PLACE OF ISSUE"))
 
-        result["nameEn"] = extractLabelValue(lines, listOf("NAME:"))
+        // নাম (strictPrefix = true ব্যবহার করা হয়েছে যাতে FATHER'S NAME বা GIVEN NAME ম্যাচ না করে)
+        val topPageName = extractLabelValue(lines, listOf("NAME:"), nextLines = 1, strictPrefix = true)
+        if (topPageName.isNotBlank()) {
+            result["nameEn"] = topPageName
+        } else if (result["nameEn"].isNullOrBlank()) {
+            val given = result["givenNames"].orEmpty()
+            val surname = result["surname"].orEmpty()
+            result["nameEn"] = listOf(given, surname).filter { it.isNotBlank() }.joinToString(" ")
+        }
+
         result["fatherName"] = extractLabelValue(lines, listOf("FATHER'S NAME", "FATHERS NAME", "FATHER NAME"))
         result["motherName"] = extractLabelValue(lines, listOf("MOTHER'S NAME", "MOTHERS NAME", "MOTHER NAME"))
         result["spouseName"] = extractLabelValue(lines, listOf("SPOUSE'S NAME", "SPOUSES NAME", "SPOUSE NAME"))
         result["permanentAddress"] = extractMultilineValue(lines, listOf("PERMANENT ADDRESS"), 2)
         result["emergencyContactName"] = extractLabelValue(lines, listOf("EMERGENCY CONTACT NAME"))
         result["emergencyContactRelation"] = extractLabelValue(lines, listOf("RELATIONSHIP", "RELATION"))
-        result["emergencyContactAddress"] = extractMultilineValue(lines, listOf("EMERGENCY CONTACT ADDRESS", "ADDRESS"), 2)
+        result["emergencyContactAddress"] = extractMultilineValue(lines, listOf("EMERGENCY CONTACT ADDRESS"), 2)
 
         val allText = lines.joinToString(" ")
         val phoneRegex = Regex("(\\+?8801[3-9][0-9]{8}|01[3-9][0-9]{8})")
         result["emergencyPhone"] = phoneRegex.find(allText)?.groupValues?.get(1) ?: ""
 
-        if (result["passportNo"].isNullOrBlank()) {
-            val passportNumberRegex = Regex("\\b[A-Z]{1,2}[0-9]{6,9}\\b")
-            result["passportNo"] = passportNumberRegex.find(rawText.uppercase(Locale.ROOT))?.value ?: ""
-        }
-
         if (result["countryCode"].isNullOrBlank() && result["nationality"].orEmpty().contains("BANGLADESH", true)) {
             result["countryCode"] = "BGD"
-        }
-
-        if (result["nameEn"].isNullOrBlank()) {
-            val given = result["givenNames"].orEmpty()
-            val surname = result["surname"].orEmpty()
-            result["nameEn"] = listOf(given, surname).filter { it.isNotBlank() }.joinToString(" ")
-        }
-
-        if (result["nameEn"].isNullOrBlank() && result["surname"].orEmpty().isNotBlank()) {
-            result["nameEn"] = result["surname"].orEmpty()
         }
 
         result["rawText"] = rawText
@@ -577,8 +719,6 @@ class PassportProcessorFeature(
             put("isPassportVerified", true)
             put("isPassportOcrSuccessful", true)
             put("documentTypeRecognized", "passport")
-            put("verificationLevel", "VISUAL_OCR_ONLY")
-            put("isGovernmentAuthenticityVerified", false)
             put("passportType", fields["passportType"] ?: "")
             put("countryCode", fields["countryCode"] ?: "")
             put("nationality", fields["nationality"] ?: "")
@@ -603,10 +743,6 @@ class PassportProcessorFeature(
             put("issuingAuthority", fields["issuingAuthority"] ?: "")
             put("placeOfIssue", fields["placeOfIssue"] ?: "")
             put("passportBase64", fullPageBase64)
-            put("faceBase64", "")
-            put("mrzProcessed", false)
-            put("qrProcessed", false)
-            put("barcodeProcessed", false)
             put("rawText", rawText)
         }
         activity.runOnUiThread {
