@@ -845,8 +845,9 @@ class OcrProcessorFeature(
         val rawLines = upperText.lines().map { it.trim() }.filter { it.isNotEmpty() }
         val compactLines = rawLines.map { it.replace(Regex("\\s+"), "") }
 
+        // ১. MRZ লাইন ১ (P<BGDHOSAIN<<ROBIN<<<<) থেকে নাম সংগ্রহ
         val mrzLine1 = compactLines.firstOrNull { line ->
-            line.length >= 20 && (line.startsWith("P<") || line.contains("P<BGD") || line.contains("<<"))
+            line.length >= 18 && (line.contains("P<") || line.contains("<<"))
         }
 
         if (mrzLine1 != null) {
@@ -861,9 +862,10 @@ class OcrProcessorFeature(
             }
         }
 
+        // ২. MRZ লাইন ২ (A128505838BGD9501016M33102854601736467<<<<66) থেকে তথ্য সংগ্রহ
         val mrzLine2 = compactLines.firstOrNull { line ->
-            line.length >= 22 &&
-                !line.startsWith("P<") &&
+            line.length >= 20 &&
+                !line.contains("P<") &&
                 (line.contains("BGD") || line.contains(Regex("[0-9OIZSB]{6}[0-9OIZSB][MF<][0-9OIZSB]{6}")))
         }
 
@@ -913,11 +915,16 @@ class OcrProcessorFeature(
             result["isMrzValid"] = "true"
         }
 
+        // ৩. ভিজ্যুয়াল জোন থেকে পাসপোর্ট নম্বর (স্পেসসহ যেমন A 12850583 অথবা সরাসরি A12850583)
         if (result["passportNo"].isNullOrEmpty()) {
-            val passMatch = Regex("\\b([A-Z]{1,2}[0-9]{7,9})\\b").find(upperText)
-            passMatch?.groupValues?.getOrNull(1)?.let { result["passportNo"] = it.take(9) }
+            val passMatch = Regex("\\b([A-Z]{1,2})\\s*([0-9]{7,9})\\b").find(upperText)
+            if (passMatch != null) {
+                val combinedPass = (passMatch.groupValues[1] + passMatch.groupValues[2]).take(9)
+                result["passportNo"] = combinedPass
+            }
         }
 
+        // ৪. ভিজ্যুয়াল জোন থেকে নাম, পিতার নাম, মাতার নাম, জন্মস্থান, প্রদানের তারিখ ও ঠিকানা
         var surname = ""
         var givenName = ""
 
