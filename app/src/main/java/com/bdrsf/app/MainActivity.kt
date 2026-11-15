@@ -42,11 +42,14 @@ import com.bdrsf.app.utils.PermissionHelper
 import com.bdrsf.app.webview.NativeWebChromeClient
 import com.bdrsf.app.webview.NativeWebViewClient
 import org.json.JSONObject
+import java.io.File
+import java.io.FileOutputStream
 
 class MainActivity : AppCompatActivity(), AndroidBridge.BridgeActionHandler {
 
     companion object {
         private const val RC_GALLERY_QR = 6001
+        private const val RC_GALLERY_PASSPORT = 6002
     }
 
     private lateinit var mainLayout: RelativeLayout
@@ -64,6 +67,7 @@ class MainActivity : AppCompatActivity(), AndroidBridge.BridgeActionHandler {
     private lateinit var ocrProcessorFeature: OcrProcessorFeature
 
     private var pendingGalleryQrCallback: String? = null
+    private var pendingGalleryPassportCallback: String? = null
     private var lastBackPressTime: Long = 0L
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -388,6 +392,18 @@ class MainActivity : AppCompatActivity(), AndroidBridge.BridgeActionHandler {
         when (action) {
             "PICK_CONTACT" -> contactPickerFeature.pickContact(callback)
             "FORCE_REFRESH" -> WebAppConfig.forceRefreshWithCacheBypass(webView)
+            "PICK_PASSPORT_GALLERY" -> {
+                pendingGalleryPassportCallback = callback
+                val intent = Intent(Intent.ACTION_PICK, MediaStore.Images.Media.EXTERNAL_CONTENT_URI).apply {
+                    type = "image/*"
+                }
+                try {
+                    @Suppress("DEPRECATION")
+                    startActivityForResult(intent, RC_GALLERY_PASSPORT)
+                } catch (_: Exception) {
+                    Toast.makeText(this, "গ্যালারি ওপেন করা যায়নি", Toast.LENGTH_SHORT).show()
+                }
+            }
             "SCAN_PASSPORT_IMAGE" -> {
                 val base64 = payload.optString("imageBase64", "")
                 ocrProcessorFeature.processPassportBase64Image(base64, callback)
@@ -412,6 +428,22 @@ class MainActivity : AppCompatActivity(), AndroidBridge.BridgeActionHandler {
         } else if (requestCode == RC_GALLERY_QR) {
             qrScannerFeature.handleGalleryResult(resultCode, data, pendingGalleryQrCallback)
             pendingGalleryQrCallback = null
+        } else if (requestCode == RC_GALLERY_PASSPORT) {
+            val cb = pendingGalleryPassportCallback
+            pendingGalleryPassportCallback = null
+            if (resultCode == Activity.RESULT_OK && data?.data != null) {
+                try {
+                    val tempFile = File.createTempFile("GAL_PASS_", ".jpg", cacheDir)
+                    contentResolver.openInputStream(data.data!!)?.use { input ->
+                        FileOutputStream(tempFile).use { output ->
+                            input.copyTo(output)
+                        }
+                    }
+                    ocrProcessorFeature.processPassportFromGalleryFile(tempFile, cb)
+                } catch (_: Exception) {
+                    Toast.makeText(this, "গ্যালারি থেকে ছবি লোড করা যায়নি", Toast.LENGTH_SHORT).show()
+                }
+            }
         } else if (contactPickerFeature.handleActivityResult(requestCode, resultCode, data)) {
             return
         } else {
