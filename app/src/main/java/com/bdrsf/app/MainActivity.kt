@@ -1,7 +1,6 @@
 // File: app/src/main/java/com/bdrsf/app/MainActivity.kt
 package com.bdrsf.app
 
-import android.app.Activity
 import android.content.Intent
 import android.content.pm.ActivityInfo
 import android.graphics.Color
@@ -34,7 +33,9 @@ import com.bdrsf.app.bridge.WebBridgeContract.Status
 import com.bdrsf.app.config.WebAppConfig
 import com.bdrsf.app.features.contact.ContactPickerFeature
 import com.bdrsf.app.features.document.DocumentScannerFeature
-import com.bdrsf.app.features.document.OcrProcessorFeature
+import com.bdrsf.app.features.document.GenericOcrFeature
+import com.bdrsf.app.features.document.NidProcessorFeature
+import com.bdrsf.app.features.document.PassportProcessorFeature
 import com.bdrsf.app.features.download.DownloadFeature
 import com.bdrsf.app.features.qr.QrScannerFeature
 import com.bdrsf.app.features.share.ShareFeature
@@ -42,14 +43,11 @@ import com.bdrsf.app.utils.PermissionHelper
 import com.bdrsf.app.webview.NativeWebChromeClient
 import com.bdrsf.app.webview.NativeWebViewClient
 import org.json.JSONObject
-import java.io.File
-import java.io.FileOutputStream
 
 class MainActivity : AppCompatActivity(), AndroidBridge.BridgeActionHandler {
 
     companion object {
         private const val RC_GALLERY_QR = 6001
-        private const val RC_GALLERY_PASSPORT = 6002
     }
 
     private lateinit var mainLayout: RelativeLayout
@@ -64,10 +62,11 @@ class MainActivity : AppCompatActivity(), AndroidBridge.BridgeActionHandler {
     private lateinit var contactPickerFeature: ContactPickerFeature
     private lateinit var qrScannerFeature: QrScannerFeature
     private lateinit var documentScannerFeature: DocumentScannerFeature
-    private lateinit var ocrProcessorFeature: OcrProcessorFeature
+    private lateinit var passportProcessorFeature: PassportProcessorFeature
+    private lateinit var nidProcessorFeature: NidProcessorFeature
+    private lateinit var genericOcrFeature: GenericOcrFeature
 
     private var pendingGalleryQrCallback: String? = null
-    private var pendingGalleryPassportCallback: String? = null
     private var lastBackPressTime: Long = 0L
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -165,10 +164,17 @@ class MainActivity : AppCompatActivity(), AndroidBridge.BridgeActionHandler {
         shareFeature = ShareFeature(this)
         contactPickerFeature = ContactPickerFeature(this, androidBridge)
         qrScannerFeature = QrScannerFeature(this, mainLayout, androidBridge)
-        ocrProcessorFeature = OcrProcessorFeature(this, androidBridge, webView)
 
-        documentScannerFeature = DocumentScannerFeature(this, mainLayout, androidBridge) { capturedFile, scanMode, callback ->
-            ocrProcessorFeature.processDocumentFile(capturedFile, scanMode, callback)
+        passportProcessorFeature = PassportProcessorFeature(this, androidBridge, webView)
+        nidProcessorFeature = NidProcessorFeature(this, androidBridge, webView)
+        genericOcrFeature = GenericOcrFeature(this, androidBridge, webView)
+
+        documentScannerFeature = DocumentScannerFeature(this, mainLayout, androidBridge) { capturedFile, scanMode, policy, callback ->
+            when (scanMode) {
+                "passport" -> passportProcessorFeature.processPassportFile(capturedFile, policy, callback)
+                "nid_front", "nid_back", "face_liveness" -> nidProcessorFeature.processNidSlot(capturedFile, scanMode, callback)
+                else -> genericOcrFeature.processWithPolicy(capturedFile, policy, callback)
+            }
         }
 
         webViewClient = NativeWebViewClient(
@@ -258,10 +264,10 @@ class MainActivity : AppCompatActivity(), AndroidBridge.BridgeActionHandler {
 
     override fun onStartKycRequested(payload: JSONObject, callback: String?) {
         val actionType = payload.optString("actionType", "").lowercase()
-        val docType = payload.optString("documentType", payload.optString("docType", payload.optString("mode", "NID")))
+        val docType = payload.optString("docCategory", payload.optString("documentType", payload.optString("docType", "NID")))
 
         if (actionType == "process_hybrid" || actionType == "submit") {
-            ocrProcessorFeature.processSavedDocumentsHybrid(docType, callback)
+            nidProcessorFeature.submitNidHybrid(callback)
         } else {
             val normalizedPayload = JSONObject(payload.toString()).apply {
                 if (!has("mode") || optString("mode").isBlank()) {
@@ -273,7 +279,7 @@ class MainActivity : AppCompatActivity(), AndroidBridge.BridgeActionHandler {
     }
 
     override fun onClearKycCacheRequested(callback: String?) {
-        ocrProcessorFeature.clearCache()
+        nidProcessorFeature.clearCache()
         androidBridge.sendResponseToWeb(
             BridgeResponse(action = Actions.CLEAR_KYC_CACHE, status = Status.SUCCESS, message = "Cache cleared"),
             callback
@@ -392,25 +398,14 @@ class MainActivity : AppCompatActivity(), AndroidBridge.BridgeActionHandler {
         when (action) {
             "PICK_CONTACT" -> contactPickerFeature.pickContact(callback)
             "FORCE_REFRESH" -> WebAppConfig.forceRefreshWithCacheBypass(webView)
-            "PICK_PASSPORT_GALLERY" -> {
-                pendingGalleryPassportCallback = callback
-                val intent = Intent(Intent.ACTION_PICK, MediaStore.Images.Media.EXTERNAL_CONTENT_URI).apply {
-                    type = "image/*"
-                }
-                try {
-                    @Suppress("DEPRECATION")
-                    startActivityForResult(intent, RC_GALLERY_PASSPORT)
-                } catch (_: Exception) {
-                    Toast.makeText(this, "গ্যালারি ওপেন করা যায়নি", Toast.LENGTH_SHORT).show()
-                }
+            "SCAN_DOCUMENT_WITH_POLICY" -> {
+                documentScannerFeature.startScanner(payload, callback)
             }
-            "SCAN_PASSPORT_IMAGE" -> {
-                val base64 = payload.optString("imageBase64", "")
-                ocrProcessorFeature.processPassportBase64Image(base64, callback)
+            "PICK_PASSPORT_GALLERY" -> {
+                passportProcessorFeature.openGalleryPicker(payload, callback)
             }
             "PROCESS_SAVED_DOCUMENTS" -> {
-                val docType = payload.optString("docType", "NID")
-                ocrProcessorFeature.processSavedDocumentsHybrid(docType, callback)
+                nidProcessorFeature.submitNidHybrid(callback)
             }
             else -> {
                 androidBridge.sendResponseToWeb(
@@ -428,22 +423,8 @@ class MainActivity : AppCompatActivity(), AndroidBridge.BridgeActionHandler {
         } else if (requestCode == RC_GALLERY_QR) {
             qrScannerFeature.handleGalleryResult(resultCode, data, pendingGalleryQrCallback)
             pendingGalleryQrCallback = null
-        } else if (requestCode == RC_GALLERY_PASSPORT) {
-            val cb = pendingGalleryPassportCallback
-            pendingGalleryPassportCallback = null
-            if (resultCode == Activity.RESULT_OK && data?.data != null) {
-                try {
-                    val tempFile = File.createTempFile("GAL_PASS_", ".jpg", cacheDir)
-                    contentResolver.openInputStream(data.data!!)?.use { input ->
-                        FileOutputStream(tempFile).use { output ->
-                            input.copyTo(output)
-                        }
-                    }
-                    ocrProcessorFeature.processPassportFromGalleryFile(tempFile, cb)
-                } catch (_: Exception) {
-                    Toast.makeText(this, "গ্যালারি থেকে ছবি লোড করা যায়নি", Toast.LENGTH_SHORT).show()
-                }
-            }
+        } else if (passportProcessorFeature.handleActivityResult(requestCode, resultCode, data)) {
+            return
         } else if (contactPickerFeature.handleActivityResult(requestCode, resultCode, data)) {
             return
         } else {
@@ -456,7 +437,9 @@ class MainActivity : AppCompatActivity(), AndroidBridge.BridgeActionHandler {
         WebAppConfig.syncCookies()
         qrScannerFeature.destroy()
         documentScannerFeature.destroy()
-        ocrProcessorFeature.destroy()
+        passportProcessorFeature.destroy()
+        nidProcessorFeature.destroy()
+        genericOcrFeature.destroy()
 
         try {
             webView.stopLoading()
