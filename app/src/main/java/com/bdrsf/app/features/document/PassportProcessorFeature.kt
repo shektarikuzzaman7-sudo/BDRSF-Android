@@ -14,11 +14,7 @@ import com.bdrsf.app.bridge.AndroidBridge
 import com.bdrsf.app.bridge.WebBridgeContract.Actions
 import com.bdrsf.app.bridge.WebBridgeContract.BridgeResponse
 import com.bdrsf.app.bridge.WebBridgeContract.Status
-import com.google.android.gms.tasks.Tasks
 import com.google.mlkit.vision.common.InputImage
-import com.google.mlkit.vision.face.FaceDetection
-import com.google.mlkit.vision.face.FaceDetector
-import com.google.mlkit.vision.face.FaceDetectorOptions
 import com.google.mlkit.vision.text.Text
 import com.google.mlkit.vision.text.TextRecognition
 import com.google.mlkit.vision.text.TextRecognizer
@@ -33,7 +29,6 @@ import java.util.Date
 import java.util.Locale
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
-import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 import kotlin.math.max
 
@@ -47,7 +42,6 @@ class PassportProcessorFeature(
         const val RC_PICK_PASSPORT_GALLERY = 6012
         private const val MAX_IMAGE_DIMENSION = 1800
         private const val OCR_IMAGE_QUALITY = 88
-        private const val FACE_TIMEOUT_SECONDS = 5L
     }
 
     private val bgExecutor: ExecutorService = Executors.newSingleThreadExecutor()
@@ -65,20 +59,8 @@ class PassportProcessorFeature(
         TextRecognition.getClient(TextRecognizerOptions.DEFAULT_OPTIONS)
     }
 
-    private val faceDetectorDelegate = lazy {
-        val options = FaceDetectorOptions.Builder()
-            .setPerformanceMode(FaceDetectorOptions.PERFORMANCE_MODE_FAST)
-            .setLandmarkMode(FaceDetectorOptions.LANDMARK_MODE_NONE)
-            .setClassificationMode(FaceDetectorOptions.CLASSIFICATION_MODE_NONE)
-            .build()
-        FaceDetection.getClient(options)
-    }
-
     private val textRecognizer: TextRecognizer
         get() = textRecognizerDelegate.value
-
-    private val faceDetector: FaceDetector
-        get() = faceDetectorDelegate.value
 
     fun updatePolicy(policyPayload: JSONObject?) {
         activePolicy = copyJson(policyPayload ?: JSONObject())
@@ -186,11 +168,6 @@ class PassportProcessorFeature(
                         notifyError("পাসপোর্টের ছবি প্রসেস করা যায়নি", callback)
                         return@execute
                     }
-                    val faceBase64 = if (policy.optBoolean("extractFace", true)) {
-                        extractPortraitFace(bitmap)
-                    } else {
-                        ""
-                    }
                     if (destroyed) {
                         recycleBitmap()
                         return@execute
@@ -213,7 +190,6 @@ class PassportProcessorFeature(
                                 }
                                 dispatchPassportSuccess(
                                     fullPageBase64 = fullPageBase64,
-                                    faceBase64 = faceBase64,
                                     fields = fields,
                                     rawText = rawText,
                                     callback = callback
@@ -333,7 +309,7 @@ class PassportProcessorFeature(
                 val index = upper.indexOf(labelUpper)
                 if (index < 0) continue
                 val after = cleanValue(line.substring(index + label.length))
-                if (after.isNotBlank()) {
+                if (after.isNotBlank() && !isKnownLabelLine(after)) {
                     return after
                 }
                 for (offset in 1..nextLines) {
@@ -361,7 +337,7 @@ class PassportProcessorFeature(
                 if (index < 0) continue
                 val parts = mutableListOf<String>()
                 val firstValue = cleanValue(line.substring(index + label.length))
-                if (firstValue.isNotBlank()) {
+                if (firstValue.isNotBlank() && !isKnownLabelLine(firstValue)) {
                     parts.add(firstValue)
                 }
                 for (offset in 1..maxNextLines) {
@@ -386,7 +362,7 @@ class PassportProcessorFeature(
             "ISSUING AUTHORITY", "FATHER'S NAME", "FATHER NAME", "MOTHER'S NAME",
             "MOTHER NAME", "SPOUSE'S NAME", "SPOUSE NAME", "PERMANENT ADDRESS",
             "EMERGENCY CONTACT", "RELATIONSHIP", "TELEPHONE NO", "TELEPHONE",
-            "MOBILE", "PHONE", "NAME:", "ADDRESS:"
+            "MOBILE", "PHONE", "NAME:", "ADDRESS:", "TYPE OF PASSPORT"
         )
         return labels.any { upper.contains(it) }
     }
@@ -459,7 +435,7 @@ class PassportProcessorFeature(
         result["issuingAuthority"] = extractLabelValue(lines, listOf("ISSUING AUTHORITY", "AUTHORITY"))
         result["placeOfIssue"] = extractLabelValue(lines, listOf("PLACE OF ISSUE"))
 
-        result["nameEn"] = extractLabelValue(lines, listOf("NAME"))
+        result["nameEn"] = extractLabelValue(lines, listOf("NAME:"))
         result["fatherName"] = extractLabelValue(lines, listOf("FATHER'S NAME", "FATHERS NAME", "FATHER NAME"))
         result["motherName"] = extractLabelValue(lines, listOf("MOTHER'S NAME", "MOTHERS NAME", "MOTHER NAME"))
         result["spouseName"] = extractLabelValue(lines, listOf("SPOUSE'S NAME", "SPOUSES NAME", "SPOUSE NAME"))
@@ -473,7 +449,7 @@ class PassportProcessorFeature(
         result["emergencyPhone"] = phoneRegex.find(allText)?.groupValues?.get(1) ?: ""
 
         if (result["passportNo"].isNullOrBlank()) {
-            val passportNumberRegex = Regex("\\b[A-Z][0-9]{7,9}\\b")
+            val passportNumberRegex = Regex("\\b[A-Z]{1,2}[0-9]{6,9}\\b")
             result["passportNo"] = passportNumberRegex.find(rawText.uppercase(Locale.ROOT))?.value ?: ""
         }
 
@@ -576,41 +552,6 @@ class PassportProcessorFeature(
         }
     }
 
-    private fun extractPortraitFace(bitmap: Bitmap): String {
-        var faceBitmap: Bitmap? = null
-        try {
-            val faces = Tasks.await(
-                faceDetector.process(InputImage.fromBitmap(bitmap, 0)),
-                FACE_TIMEOUT_SECONDS,
-                TimeUnit.SECONDS
-            )
-            val face = faces.firstOrNull() ?: return ""
-            val box = face.boundingBox
-            val padX = (box.width() * 0.25f).toInt()
-            val padY = (box.height() * 0.35f).toInt()
-            val left = (box.left - padX).coerceIn(0, bitmap.width - 1)
-            val top = (box.top - padY).coerceIn(0, bitmap.height - 1)
-            val right = (box.right + padX).coerceIn(left + 1, bitmap.width)
-            val bottom = (box.bottom + padY).coerceIn(top + 1, bitmap.height)
-            val width = right - left
-            val height = bottom - top
-            if (width < 30 || height < 30) {
-                return ""
-            }
-            faceBitmap = Bitmap.createBitmap(bitmap, left, top, width, height)
-            return ByteArrayOutputStream().use { stream ->
-                faceBitmap.compress(Bitmap.CompressFormat.JPEG, 90, stream)
-                "data:image/jpeg;base64," + Base64.encodeToString(stream.toByteArray(), Base64.NO_WRAP)
-            }
-        } catch (_: Exception) {
-            return ""
-        } finally {
-            faceBitmap?.let {
-                if (!it.isRecycled) it.recycle()
-            }
-        }
-    }
-
     private fun notifyScanningStarted() {
         if (destroyed) return
         activity.runOnUiThread {
@@ -625,7 +566,6 @@ class PassportProcessorFeature(
 
     private fun dispatchPassportSuccess(
         fullPageBase64: String,
-        faceBase64: String,
         fields: Map<String, String>,
         rawText: String,
         callback: String?
@@ -663,7 +603,7 @@ class PassportProcessorFeature(
             put("issuingAuthority", fields["issuingAuthority"] ?: "")
             put("placeOfIssue", fields["placeOfIssue"] ?: "")
             put("passportBase64", fullPageBase64)
-            put("faceBase64", faceBase64)
+            put("faceBase64", "")
             put("mrzProcessed", false)
             put("qrProcessed", false)
             put("barcodeProcessed", false)
@@ -748,12 +688,6 @@ class PassportProcessorFeature(
         try {
             if (textRecognizerDelegate.isInitialized()) {
                 textRecognizerDelegate.value.close()
-            }
-        } catch (_: Exception) {
-        }
-        try {
-            if (faceDetectorDelegate.isInitialized()) {
-                faceDetectorDelegate.value.close()
             }
         } catch (_: Exception) {
         }
