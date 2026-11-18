@@ -10,13 +10,73 @@ import org.json.JSONObject
 
 /**
  * BDRSF QR স্ক্যানার রাউটার ও কো-অর্ডিনেটর।
- * MainActivity.kt থেকে আসা সকল ক্যামেরা ও গ্যালারি রিকোয়েস্ট অপারেটর অনুযায়ী নির্দিষ্ট স্ক্যানারে ডেলিগেট করে।
+ * MainActivity.kt থেকে আসা সকল ক্যামেরা ও গ্যালারি রিকোয়েস্ট অপারেটর অনুযায়ী নির্দিষ্ট স্ক্যানারে রাউট করে।
  */
 class QrScannerFeature(
     activity: Activity,
     rootContainer: ViewGroup,
     bridge: AndroidBridge
 ) {
+
+    companion object {
+        internal fun parseEmvTags(raw: String): Map<String, String> {
+            val result = mutableMapOf<String, String>()
+            var i = 0
+            val clean = raw.trim()
+            while (i + 4 <= clean.length) {
+                val tag = clean.substring(i, i + 2)
+                val len = clean.substring(i + 2, i + 4).toIntOrNull() ?: break
+                val start = i + 4
+                val end = start + len
+                if (end > clean.length) break
+                result[tag] = clean.substring(start, end)
+                i = end
+            }
+            return result
+        }
+
+        internal fun extractBdMobile(text: String): String {
+            val clean = text.replace("+88", "").replace(" ", "").replace("-", "")
+            return Regex("(01[3-9][0-9]{8})").find(clean)?.groupValues?.getOrNull(1) ?: ""
+        }
+
+        internal fun buildStandardPayload(
+            provider: String,
+            accountNumber: String,
+            rawAccountNumber: String,
+            accountRole: String,
+            accountName: String,
+            storeName: String,
+            mcc: String,
+            amount: String,
+            rawContent: String,
+            isEncrypted: Boolean = false
+        ): JSONObject {
+            val suggestedAction = when (accountRole) {
+                "agent" -> "cash_out"
+                "merchant" -> "payment"
+                else -> "send_money"
+            }
+            return JSONObject().apply {
+                put("isSupported", true)
+                put("isEncrypted", isEncrypted)
+                put("provider", provider)
+                put("accountNumber", accountNumber)
+                put("rawAccountNumber", rawAccountNumber)
+                put("accountRole", accountRole)
+                put("isAgent", accountRole == "agent")
+                put("isMerchant", accountRole == "merchant")
+                put("suggestedAction", suggestedAction)
+                put("accountName", accountName)
+                put("storeName", storeName)
+                put("ownerName", accountName)
+                put("mcc", mcc)
+                put("amount", amount)
+                put("rawContent", rawContent)
+                put("message", "")
+            }
+        }
+    }
 
     private val walletScanner = WalletQrScannerFeature(activity, rootContainer, bridge)
     private val bkashScanner = BkashQrScannerFeature(activity, rootContainer, bridge)
@@ -36,6 +96,7 @@ class QrScannerFeature(
     private fun resolveTargetScanner(payload: JSONObject): BaseQrScannerFeature {
         val operator = payload.optString("operator", "")
             .ifBlank { payload.optString("provider", "") }
+            .ifBlank { payload.optString("mfsProvider", "") }
             .trim()
             .lowercase()
 
