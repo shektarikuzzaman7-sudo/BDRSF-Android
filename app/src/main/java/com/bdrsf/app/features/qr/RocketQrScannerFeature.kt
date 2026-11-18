@@ -9,7 +9,6 @@ import org.json.JSONObject
 
 /**
  * রকেট (Rocket / DBBL) সম্পূর্ণ স্বাধীন ডিকোডার ও স্ক্যানার।
- * রকেটের ১২ ডিজিট (চেক ডিজিটসহ) এবং ১১ ডিজিট এজেন্ট/মার্চেন্ট QR কোড নিজস্ব নিয়মে ডিকোড করে।
  */
 class RocketQrScannerFeature(
     activity: Activity,
@@ -54,7 +53,7 @@ class RocketQrScannerFeature(
         var amount = ""
 
         if (trimmed.startsWith("000201")) {
-            val rootTags = splitRocketTlv(trimmed)
+            val rootTags = QrScannerFeature.parseEmvTags(trimmed)
             accountName = rootTags["59"] ?: ""
             mcc = rootTags["52"] ?: ""
             amount = rootTags["54"] ?: ""
@@ -62,8 +61,8 @@ class RocketQrScannerFeature(
             for (tagNum in 26..51) {
                 val tagKey = tagNum.toString().padStart(2, '0')
                 val subData = rootTags[tagKey] ?: continue
-                val subTags = splitRocketTlv(subData)
-                val accCandidate = subTags["01"] ?: subTags["02"] ?: subData
+                val subTags = QrScannerFeature.parseEmvTags(subData)
+                val accCandidate = subTags["01"] ?: subTags["02"] ?: subTags["03"] ?: subData
                 val pair = extractRocketAccountPair(accCandidate)
                 if (pair.first.isNotEmpty()) {
                     clean11Mobile = pair.first
@@ -78,6 +77,13 @@ class RocketQrScannerFeature(
                 }
             }
 
+            if (clean11Mobile.isEmpty() && rootTags.containsKey("62")) {
+                val addTags = QrScannerFeature.parseEmvTags(rootTags["62"] ?: "")
+                val pair = extractRocketAccountPair(addTags["02"] ?: addTags["01"] ?: rootTags["62"] ?: "")
+                clean11Mobile = pair.first
+                rawRocketAccount = pair.second
+            }
+
             if (clean11Mobile.isEmpty()) {
                 val pair = extractRocketAccountPair(trimmed)
                 clean11Mobile = pair.first
@@ -85,7 +91,11 @@ class RocketQrScannerFeature(
             }
 
             if (accountRole == "unknown" && clean11Mobile.isNotEmpty()) {
-                accountRole = if (mcc == "0000" || lower.contains("agent")) "agent" else "merchant"
+                accountRole = when {
+                    mcc == "0000" || lower.contains("agent") -> "agent"
+                    expectedMode == "cash_out" || context == "mfs_agent" -> "agent"
+                    else -> "merchant"
+                }
             }
         } else if (trimmed.startsWith("{") && trimmed.endsWith("}")) {
             try {
@@ -117,7 +127,7 @@ class RocketQrScannerFeature(
         }
 
         if (expectedMode == "cash_out" || context == "mfs_agent") {
-            if (accountRole == "merchant") {
+            if (accountRole == "merchant" && mcc.isNotEmpty() && mcc != "0000") {
                 return QrDecodeResult(false, errorMessage = "এটি রকেট মার্চেন্ট QR কোড! ক্যাশ আউটের জন্য রকেট এজেন্ট QR কোড স্ক্যান করুন।")
             }
             if (accountRole != "agent") {
@@ -132,40 +142,18 @@ class RocketQrScannerFeature(
             }
         }
 
-        val json = JSONObject().apply {
-            put("isSupported", true)
-            put("isEncrypted", false)
-            put("provider", "rocket")
-            put("accountNumber", clean11Mobile)
-            put("rawAccountNumber", rawRocketAccount)
-            put("accountRole", accountRole)
-            put("isAgent", accountRole == "agent")
-            put("isMerchant", accountRole == "merchant")
-            put("suggestedAction", if (accountRole == "agent") "cash_out" else "payment")
-            put("accountName", accountName)
-            put("storeName", accountName)
-            put("ownerName", accountName)
-            put("mcc", mcc)
-            put("amount", amount)
-            put("rawContent", trimmed)
-            put("message", "")
-        }
-        return QrDecodeResult(isValid = true, payloadJson = json.toString())
-    }
-
-    private fun splitRocketTlv(raw: String): Map<String, String> {
-        val result = mutableMapOf<String, String>()
-        var i = 0
-        while (i + 4 <= raw.length) {
-            val tag = raw.substring(i, i + 2)
-            val len = raw.substring(i + 2, i + 4).toIntOrNull() ?: break
-            val start = i + 4
-            val end = start + len
-            if (end > raw.length) break
-            result[tag] = raw.substring(start, end)
-            i = end
-        }
-        return result
+        val payload = QrScannerFeature.buildStandardPayload(
+            provider = "rocket",
+            accountNumber = clean11Mobile,
+            rawAccountNumber = rawRocketAccount,
+            accountRole = accountRole,
+            accountName = accountName,
+            storeName = accountName,
+            mcc = mcc,
+            amount = amount,
+            rawContent = trimmed
+        )
+        return QrDecodeResult(isValid = true, payloadJson = payload.toString())
     }
 
     private fun extractRocketAccountPair(text: String): Pair<String, String> {
@@ -174,7 +162,7 @@ class RocketQrScannerFeature(
         if (!m12.isNullOrEmpty()) {
             return Pair(m12.substring(0, 11), m12)
         }
-        val m11 = Regex("(01[3-9][0-9]{8})").find(clean)?.groupValues?.getOrNull(1) ?: ""
+        val m11 = QrScannerFeature.extractBdMobile(clean)
         return Pair(m11, m11)
     }
 }
