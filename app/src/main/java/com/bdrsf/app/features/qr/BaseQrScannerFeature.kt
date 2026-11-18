@@ -53,8 +53,8 @@ import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicBoolean
 
 /**
- * সার্বজনীন CameraX, Google ML Kit, ZXing ফলব্যাক ও HUD ওভারলে বেস ইঞ্জিন।
- * সকল প্রোভাইডার স্ক্যানার (Wallet, bKash, Nagad, Rocket, Upay) এই ক্লাসটি ইনহেরিট করবে।
+ * সার্বজনীন CameraX, Google ML Kit, ZXing ফলব্যাক, EMVCo TLV পার্সার ইউটিলিটি ও HUD ওভারলে ইঞ্জিন।
+ * সকল প্রোভাইডার স্ক্যানার এই বেস ক্লাস ইনহেরিট করে নিজস্ব ডিকোডিং পরিচালনা করবে।
  */
 abstract class BaseQrScannerFeature(
     protected val activity: Activity,
@@ -62,7 +62,7 @@ abstract class BaseQrScannerFeature(
     protected val bridge: AndroidBridge
 ) {
 
-    data class QrValidationResult(
+    data class QrDecodeResult(
         val isValid: Boolean,
         val payloadJson: String = "",
         val errorMessage: String = ""
@@ -122,20 +122,17 @@ abstract class BaseQrScannerFeature(
         )
     }
 
-    /**
-     * প্রতিটি প্রোভাইডার নিজস্ব গাইড টেক্সট ও ব্র্যান্ড কালার নির্ধারণ করবে।
-     */
     protected abstract fun getDefaultPromptText(mode: String, context: String): String
     protected abstract fun getHudAccentColor(): Int
 
     /**
-     * প্রতিটি প্রোভাইডার নিজস্ব নিয়মে স্ক্যান করা QR কোড যাচাই করবে।
+     * প্রতিটি প্রোভাইডার (bKash, Nagad, Rocket, Upay, Wallet) নিজস্ব নিয়মে কাঁচা QR টেক্সট ডিকোড করবে।
      */
-    protected abstract fun validateAndFormatPayload(
+    protected abstract fun decodeProviderQr(
         rawContent: String,
         expectedMode: String,
         context: String
-    ): QrValidationResult
+    ): QrDecodeResult
 
     fun configureContext(payload: JSONObject, callback: String?) {
         activeCallback = if (!callback.isNullOrBlank()) callback else payload.optString("callback", "processScannedData")
@@ -349,22 +346,22 @@ abstract class BaseQrScannerFeature(
         val ctx = activeContext
         activity.runOnUiThread {
             stopScanner(isCancelled = false)
-            dispatchParsedQrResult(rawContent, cb, errCb, expectedMode, ctx)
+            dispatchDecodedResult(rawContent, cb, errCb, expectedMode, ctx)
         }
     }
 
-    protected fun dispatchParsedQrResult(
+    protected fun dispatchDecodedResult(
         rawContent: String,
         successCallback: String?,
         errorCallback: String?,
         expectedMode: String,
         context: String
     ) {
-        val validation = validateAndFormatPayload(rawContent, expectedMode, context)
-        if (validation.isValid) {
-            bridge.sendQrSuccessToWeb(successCallback, validation.payloadJson)
+        val result = decodeProviderQr(rawContent, expectedMode, context)
+        if (result.isValid) {
+            bridge.sendQrSuccessToWeb(successCallback, result.payloadJson)
         } else {
-            bridge.sendQrErrorToWeb(errorCallback, validation.errorMessage)
+            bridge.sendQrErrorToWeb(errorCallback, result.errorMessage)
         }
     }
 
@@ -396,11 +393,11 @@ abstract class BaseQrScannerFeature(
             .addOnSuccessListener { barcodes ->
                 val matched = barcodes.firstOrNull { !it.rawValue.isNullOrBlank() }
                 if (matched != null) {
-                    dispatchParsedQrResult(matched.rawValue ?: "", callback, "onScanFailed", activeExpectedMode, activeContext)
+                    dispatchDecodedResult(matched.rawValue ?: "", callback, "onScanFailed", activeExpectedMode, activeContext)
                 } else {
                     val zxingResult = decodeWithZxingFallback(bitmap)
                     if (zxingResult != null) {
-                        dispatchParsedQrResult(zxingResult, callback, "onScanFailed", activeExpectedMode, activeContext)
+                        dispatchDecodedResult(zxingResult, callback, "onScanFailed", activeExpectedMode, activeContext)
                     } else {
                         bridge.sendQrErrorToWeb("onScanFailed", "ছবিতে কোনো সঠিক কিউআর বা বারকোড পাওয়া যায়নি")
                     }
@@ -409,7 +406,7 @@ abstract class BaseQrScannerFeature(
             .addOnFailureListener {
                 val zxingResult = decodeWithZxingFallback(bitmap)
                 if (zxingResult != null) {
-                    dispatchParsedQrResult(zxingResult, callback, "onScanFailed", activeExpectedMode, activeContext)
+                    dispatchDecodedResult(zxingResult, callback, "onScanFailed", activeExpectedMode, activeContext)
                 } else {
                     bridge.sendQrErrorToWeb("onScanFailed", "বারকোড প্রসেসিং ব্যর্থ হয়েছে")
                 }
@@ -459,6 +456,69 @@ abstract class BaseQrScannerFeature(
             mlKitScanner.close()
             cameraExecutor.shutdown()
         } catch (_: Exception) {}
+    }
+
+    // ---------------------------------------------------------------------------------------------
+    // প্রোভাইডার-নিরপেক্ষ EMVCo TLV ও বাংলাদেশি নম্বর এক্সট্রাকশন হেল্পারসমূহ
+    // ---------------------------------------------------------------------------------------------
+    protected fun parseEmvTlvMap(tlvString: String): Map<String, String> {
+        val map = mutableMapOf<String, String>()
+        var idx = 0
+        val clean = tlvString.trim()
+        while (idx + 4 <= clean.length) {
+            val tag = clean.substring(idx, idx + 2)
+            val lenStr = clean.substring(idx + 2, idx + 4)
+            val len = lenStr.toIntOrNull() ?: break
+            val valStart = idx + 4
+            val valEnd = valStart + len
+            if (valEnd > clean.length) break
+            map[tag] = clean.substring(valStart, valEnd)
+            idx = valEnd
+        }
+        return map
+    }
+
+    protected fun extractBd11DigitMobile(text: String): String {
+        val normalized = text.replace("+88", "").replace(" ", "").replace("-", "")
+        val match = Regex("(01[3-9][0-9]{8})").find(normalized)
+        return match?.groupValues?.getOrNull(1) ?: ""
+    }
+
+    protected fun buildStandardQrJson(
+        provider: String,
+        accountNumber: String,
+        rawAccountNumber: String,
+        accountRole: String,
+        accountName: String,
+        storeName: String,
+        mcc: String,
+        amount: String,
+        rawContent: String,
+        isEncrypted: Boolean = false
+    ): JSONObject {
+        val suggestedAction = when (accountRole) {
+            "agent" -> "cash_out"
+            "merchant" -> "payment"
+            else -> "send_money"
+        }
+        return JSONObject().apply {
+            put("isSupported", true)
+            put("isEncrypted", isEncrypted)
+            put("provider", provider)
+            put("accountNumber", accountNumber)
+            put("rawAccountNumber", rawAccountNumber)
+            put("accountRole", accountRole)
+            put("isAgent", accountRole == "agent")
+            put("isMerchant", accountRole == "merchant")
+            put("suggestedAction", suggestedAction)
+            put("accountName", accountName)
+            put("storeName", storeName)
+            put("ownerName", accountName)
+            put("mcc", mcc)
+            put("amount", amount)
+            put("rawContent", rawContent)
+            put("message", "")
+        }
     }
 
     private fun hasCameraPermission(): Boolean {
