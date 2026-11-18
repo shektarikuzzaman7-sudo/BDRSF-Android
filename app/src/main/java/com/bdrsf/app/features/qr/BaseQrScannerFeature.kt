@@ -58,8 +58,13 @@ import java.util.concurrent.atomic.AtomicBoolean
 import kotlin.math.max
 
 /**
- * পিওর হার্ডওয়্যার ও লো-লেভেল স্ক্যানিং ইঞ্জিন।
- * শুধুমাত্র CameraX, Google ML Kit, ZXing ফলব্যাক, গ্যালারি ইমেজ রিডার এবং HUD ওভারলে পরিচালনা করে।
+ * BDRSF-Android পিওর হার্ডওয়্যার ও ML Kit / ZXing স্ক্যানিং ইঞ্জিন।
+ * দায়িত্ব:
+ *  - CameraX লাইভ প্রিভিউ ও ইমেজ অ্যানালাইসিস পাইপলাইন পরিচালনা
+ *  - Google ML Kit ও ZXing ডুয়াল-ইঞ্জিন বারকোড/কিউআর ডিকোডিং
+ *  - গ্যালারি ইমেজ EXIF রোটেশন ও মেমোরি-সেফ স্কেলিং
+ *  - ডাইনামিক প্রোভাইডার কালার ও গাইড টেক্সটসহ HUD ওভারলে রেন্ডারিং
+ *  - জিরো মেমোরি লিক নিশ্চিতকরণ (Camera unbind, ML Kit close, Executor shutdown)
  */
 abstract class BaseQrScannerFeature(
     protected val activity: Activity,
@@ -85,6 +90,7 @@ abstract class BaseQrScannerFeature(
     protected var activeErrorCallback: String? = null
     protected var activeExpectedMode: String = ""
     protected var activeContext: String = ""
+    protected var activeUserRole: String = ""
     private var isTorchOn: Boolean = false
     private val isProcessingResult = AtomicBoolean(false)
     private var lastZxingFallbackTime: Long = 0L
@@ -131,6 +137,9 @@ abstract class BaseQrScannerFeature(
     protected abstract fun getDefaultPromptText(mode: String, context: String): String
     protected abstract fun getHudAccentColor(): Int
 
+    /**
+     * প্রতিটি প্রোভাইডার সাবক্লাস নিজস্ব ডিকোডিং ও ভ্যালিডেশন লজিক এখানে বাস্তবায়ন করবে।
+     */
     abstract fun decodeProviderQr(
         rawContent: String,
         expectedMode: String,
@@ -138,10 +147,15 @@ abstract class BaseQrScannerFeature(
     ): QrDecodeResult
 
     fun configureContext(payload: JSONObject, callback: String?) {
-        activeCallback = if (!callback.isNullOrBlank()) callback else payload.optString("callback", "processScannedData")
-        activeErrorCallback = payload.optString("errorCallback", "onScanFailed")
+        activeCallback = if (!callback.isNullOrBlank()) {
+            callback
+        } else {
+            payload.optString("callback", "processScannedData").ifBlank { "processScannedData" }
+        }
+        activeErrorCallback = payload.optString("errorCallback", "onScanFailed").ifBlank { "onScanFailed" }
         activeExpectedMode = payload.optString("mode", "").trim().lowercase()
         activeContext = payload.optString("context", "").trim().lowercase()
+        activeUserRole = payload.optString("userRole", payload.optString("accountType", "")).trim().lowercase()
     }
 
     fun startScanner(payload: JSONObject, callback: String?) {
@@ -371,7 +385,7 @@ abstract class BaseQrScannerFeature(
     fun handleGalleryResult(resultCode: Int, data: Intent?, callback: String?) {
         val cb = if (!callback.isNullOrBlank()) callback else (activeCallback ?: "processScannedData")
         if (resultCode != Activity.RESULT_OK || data?.data == null) {
-            bridge.sendQrErrorToWeb("onScanFailed", "গ্যালারি থেকে কোনো ছবি নির্বাচন করা হয়নি")
+            bridge.sendQrErrorToWeb(activeErrorCallback ?: "onScanFailed", "গ্যালারি থেকে কোনো ছবি নির্বাচন করা হয়নি")
             return
         }
 
@@ -381,10 +395,10 @@ abstract class BaseQrScannerFeature(
             if (bitmap != null) {
                 decodeFromBitmap(bitmap, cb)
             } else {
-                bridge.sendQrErrorToWeb("onScanFailed", "ছবি লোড করা সম্ভব হয়নি")
+                bridge.sendQrErrorToWeb(activeErrorCallback ?: "onScanFailed", "ছবি লোড করা সম্ভব হয়নি")
             }
         } catch (e: Exception) {
-            bridge.sendQrErrorToWeb("onScanFailed", e.localizedMessage ?: "গ্যালারি প্রসেসিং ত্রুটি")
+            bridge.sendQrErrorToWeb(activeErrorCallback ?: "onScanFailed", e.localizedMessage ?: "গ্যালারি প্রসেসিং ত্রুটি")
         }
     }
 
@@ -437,28 +451,31 @@ abstract class BaseQrScannerFeature(
 
     fun decodeFromBitmap(bitmap: Bitmap, callback: String?) {
         val cb = if (!callback.isNullOrBlank()) callback else (activeCallback ?: "processScannedData")
+        val errCb = activeErrorCallback ?: "onScanFailed"
         val inputImage = InputImage.fromBitmap(bitmap, 0)
         mlKitScanner.process(inputImage)
             .addOnSuccessListener { barcodes ->
                 val matched = barcodes.firstOrNull { !it.rawValue.isNullOrBlank() }
                 if (matched != null) {
-                    dispatchDecodedResult(matched.rawValue ?: "", cb, "onScanFailed", activeExpectedMode, activeContext)
+                    dispatchDecodedResult(matched.rawValue ?: "", cb, errCb, activeExpectedMode, activeContext)
                 } else {
                     val zxingResult = decodeWithZxingFallback(bitmap)
                     if (zxingResult != null) {
-                        dispatchDecodedResult(zxingResult, cb, "onScanFailed", activeExpectedMode, activeContext)
+                        dispatchDecodedResult(zxingResult, cb, errCb, activeExpectedMode, activeContext)
                     } else {
-                        bridge.sendQrErrorToWeb("onScanFailed", "ছবিতে কোনো সঠিক কিউআর বা বারকোড পাওয়া যায়নি")
+                        bridge.sendQrErrorToWeb(errCb, "ছবিতে কোনো সঠিক কিউআর বা বারকোড পাওয়া যায়নি")
                     }
                 }
+                if (!bitmap.isRecycled) bitmap.recycle()
             }
             .addOnFailureListener {
                 val zxingResult = decodeWithZxingFallback(bitmap)
                 if (zxingResult != null) {
-                    dispatchDecodedResult(zxingResult, cb, "onScanFailed", activeExpectedMode, activeContext)
+                    dispatchDecodedResult(zxingResult, cb, errCb, activeExpectedMode, activeContext)
                 } else {
-                    bridge.sendQrErrorToWeb("onScanFailed", "বারকোড প্রসেসিং ব্যর্থ হয়েছে")
+                    bridge.sendQrErrorToWeb(errCb, "বারকোড প্রসেসিং ব্যর্থ হয়েছে")
                 }
+                if (!bitmap.isRecycled) bitmap.recycle()
             }
     }
 
