@@ -10,9 +10,13 @@ import com.bdrsf.app.bridge.AndroidBridge
 import org.json.JSONObject
 
 /**
- * BDRSF QR স্ক্যানার রাউটার ও কো-অর্ডিনেটর।
- * - অপারেটর (bkash, nagad, rocket, upay, bdrsf) নির্দিষ্ট থাকলে সরাসরি সেই প্রোভাইডারের স্ক্যানার চালায়।
- * - অপারেটর সিলেক্ট না থাকলে (Auto-Detect MFS মোডে) সব প্রোভাইডার ডিকোডার পরীক্ষা করে সঠিক গেটওয়ে খুঁজে নেয়।
+ * BDRSF-Android সার্বজনীন QR রাউটার ও কো-অর্ডিনেটর।
+ * দায়িত্ব:
+ *  1. নির্দিষ্ট অপারেটর (bkash, nagad, rocket, upay, bdrsf) সিলেক্ট থাকলে সরাসরি সেই প্রোভাইডার স্ক্যানারে রাউট করা।
+ *  2. হোম বাটন বা জেনারেল স্ক্যান থেকে কোনো অপারেটর সিলেক্ট না করে QR স্ক্যান করলে:
+ *     - প্রথমে BDRSF Wallet QR যাচাই করা (পার্সোনাল/এজেন্ট/মার্চেন্ট রোল অনুযায়ী অটো সেন্ড মানি, ক্যাশ আউট বা পেমেন্ট নির্ধারণ)।
+ *     - BDRSF Wallet না হলে স্বয়ংক্রিয়ভাবে bKash, Nagad, Rocket ও Upay ডিকোডার চালিয়ে সঠিক গেটওয়ে শনাক্ত করা।
+ *  3. ইউজারের নাম (`ownerName` / `accountName`) এবং স্টোরের নাম (`storeName`) আলাদাভাবে সঠিকভাবে সেট করা।
  */
 class QrScannerFeature(
     activity: Activity,
@@ -42,6 +46,10 @@ class QrScannerFeature(
             return Regex("(01[3-9][0-9]{8})").find(clean)?.groupValues?.getOrNull(1) ?: ""
         }
 
+        /**
+         * প্রোভাইডার-নিরপেক্ষ স্ট্যান্ডার্ড পেলোড বিল্ডার।
+         * স্টোরের নাম (`storeName`) এবং ইউজার/মালিকের নাম (`ownerName` / `accountName`) আলাদাভাবে সংরক্ষণ করে।
+         */
         internal fun buildStandardPayload(
             provider: String,
             accountNumber: String,
@@ -52,28 +60,40 @@ class QrScannerFeature(
             mcc: String,
             amount: String,
             rawContent: String,
-            isEncrypted: Boolean = false
+            isEncrypted: Boolean = false,
+            ownerName: String = "",
+            overrideAction: String = ""
         ): JSONObject {
-            val suggestedAction = when (accountRole) {
-                "agent" -> "cash_out"
-                "merchant" -> "payment"
-                else -> "send_money"
+            val normalizedRole = accountRole.trim().lowercase().ifBlank { "personal" }
+            val resolvedOwner = ownerName.trim().ifBlank { accountName.trim() }
+            val resolvedStore = storeName.trim().ifBlank {
+                if (normalizedRole == "merchant" || normalizedRole == "agent") resolvedOwner else ""
             }
+            val displayName = resolvedOwner.ifBlank { resolvedStore }
+
+            val suggestedAction = overrideAction.trim().lowercase().ifBlank {
+                when (normalizedRole) {
+                    "agent" -> "cash_out"
+                    "merchant" -> "payment"
+                    else -> "send_money"
+                }
+            }
+
             return JSONObject().apply {
                 put("isSupported", true)
                 put("isEncrypted", isEncrypted)
-                put("provider", provider)
-                put("accountNumber", accountNumber)
-                put("rawAccountNumber", rawAccountNumber)
-                put("accountRole", accountRole)
-                put("isAgent", accountRole == "agent")
-                put("isMerchant", accountRole == "merchant")
+                put("provider", provider.trim().lowercase())
+                put("accountNumber", accountNumber.trim())
+                put("rawAccountNumber", rawAccountNumber.trim().ifBlank { accountNumber.trim() })
+                put("accountRole", normalizedRole)
+                put("isAgent", normalizedRole == "agent")
+                put("isMerchant", normalizedRole == "merchant")
                 put("suggestedAction", suggestedAction)
-                put("accountName", accountName)
-                put("storeName", storeName)
-                put("ownerName", accountName)
-                put("mcc", mcc)
-                put("amount", amount)
+                put("accountName", displayName)
+                put("ownerName", resolvedOwner)
+                put("storeName", resolvedStore)
+                put("mcc", mcc.trim())
+                put("amount", amount.trim())
                 put("rawContent", rawContent)
                 put("message", "")
             }
@@ -87,20 +107,21 @@ class QrScannerFeature(
     private val upayScanner = UpayQrScannerFeature(activity, rootContainer, bridge)
 
     /**
-     * যখন ইউজার ক্যাশ আউট বা পেমেন্টে কোনো অপারেটর (বিকাশ/নগদ/রকেট/উপায়) সিলেক্ট না করেই স্ক্যান করে,
-     * তখন এই অটো-ডিটেক্ট স্ক্যানার সব প্রোভাইডারের নিজস্ব ডিকোডার চালিয়ে সঠিক গেটওয়ে বের করে।
+     * হোম বাটন বা জেনারেল QR স্ক্যানার (যখন আগে থেকে কোনো অপারেটর বা মেথড সিলেক্ট করা থাকে না):
+     * - BDRSF Wallet QR হলে পার্সোনাল/এজেন্ট/মার্চেন্ট অনুযায়ী স্বয়ংক্রিয়ভাবে Send Money, Cash Out, Cash In বা Payment সিলেক্ট করে।
+     * - MFS QR হলে বিকাশ, নগদ, রকেট বা উপায় অটো-ডিটেক্ট করে।
      */
-    private val autoMfsScanner = object : BaseQrScannerFeature(activity, rootContainer, bridge) {
+    private val universalHomeAutoScanner = object : BaseQrScannerFeature(activity, rootContainer, bridge) {
         override fun getHudAccentColor(): Int = Color.parseColor("#FFD700")
 
         override fun getDefaultPromptText(mode: String, context: String): String {
             return when {
                 mode == "cash_out" || context == "mfs_agent" ->
-                    "ফ্রেমের ভেতরে এজেন্ট (বিকাশ/নগদ/রকেট/উপায়) QR কোড রাখুন"
+                    "ফ্রেমের ভেতরে এজেন্ট QR কোড রাখুন"
                 mode == "payment" || context == "mfs_merchant" ->
-                    "ফ্রেমের ভেতরে মার্চেন্ট (বিকাশ/নগদ/রকেট/উপায়) QR কোড রাখুন"
+                    "ফ্রেমের ভেতরে মার্চেন্ট QR কোড রাখুন"
                 else ->
-                    "ফ্রেমের ভেতরে QR কোড রাখুন"
+                    "ফ্রেমের ভেতরে ওয়ালেট বা পেমেন্ট QR কোড রাখুন"
             }
         }
 
@@ -109,10 +130,21 @@ class QrScannerFeature(
             expectedMode: String,
             context: String
         ): QrDecodeResult {
-            val decoders = listOf(bkashScanner, nagadScanner, rocketScanner, upayScanner)
+            val isStrictMfsContext = (context == "mfs_agent" || context == "mfs_merchant" || expectedMode == "cash_out" || expectedMode == "payment")
+
+            // ১. জেনারেল বা হোম স্ক্যান হলে আগে BDRSF ওয়ালেট QR পরীক্ষা (মোড ফাঁকা রেখে যাতে সব রোল অটো-ডিটেক্ট হয়)
+            if (!isStrictMfsContext) {
+                val walletRes = walletScanner.decodeProviderQr(rawContent, "", "")
+                if (walletRes.isValid) {
+                    return applyHomeRoleRouting(walletRes.payloadJson, activeUserRole)
+                }
+            }
+
+            // ২. MFS প্রোভাইডার ডিকোডারগুলো (bKash, Nagad, Rocket, Upay) একে একে পরীক্ষা
+            val mfsDecoders = listOf(bkashScanner, nagadScanner, rocketScanner, upayScanner)
             var matchedProviderError: String? = null
 
-            for (decoder in decoders) {
+            for (decoder in mfsDecoders) {
                 val res = decoder.decodeProviderQr(rawContent, expectedMode, context)
                 if (res.isValid) {
                     return res
@@ -122,18 +154,47 @@ class QrScannerFeature(
                 }
             }
 
+            // ৩. MFS না হলে এবং strict MFS কনটেক্সটে BDRSF QR স্ক্যান করলে তার উপযুক্ত বার্তা দেখানো
+            if (isStrictMfsContext) {
+                val walletCheck = walletScanner.decodeProviderQr(rawContent, "", "")
+                if (walletCheck.isValid) {
+                    return QrDecodeResult(
+                        isValid = false,
+                        errorMessage = "এটি BDRSF ওয়ালেট QR কোড! অনুগ্রহ করে বিকাশ, নগদ, রকেট বা উপায় QR কোড স্ক্যান করুন।"
+                    )
+                }
+            }
+
             if (!matchedProviderError.isNullOrBlank()) {
                 return QrDecodeResult(isValid = false, errorMessage = matchedProviderError)
             }
 
             return QrDecodeResult(
                 isValid = false,
-                errorMessage = "সঠিক এমএফএস (বিকাশ, নগদ, রকেট বা উপায়) QR কোড শনাক্ত করা যায়নি।"
+                errorMessage = "সঠিক ওয়ালেট বা এমএফএস QR কোড শনাক্ত করা যায়নি।"
             )
+        }
+
+        private fun applyHomeRoleRouting(payloadJson: String, currentUserRole: String): QrDecodeResult {
+            return try {
+                val obj = JSONObject(payloadJson)
+                val targetRole = obj.optString("accountRole", "personal").lowercase()
+                val autoAction = when {
+                    currentUserRole == "agent" && targetRole == "personal" -> "cash_in"
+                    targetRole == "agent" -> "cash_out"
+                    targetRole == "merchant" -> "payment"
+                    else -> "send_money"
+                }
+                obj.put("suggestedAction", autoAction)
+                obj.put("autoRoute", true)
+                QrDecodeResult(isValid = true, payloadJson = obj.toString(), isProviderMatch = true)
+            } catch (_: Exception) {
+                QrDecodeResult(isValid = true, payloadJson = payloadJson, isProviderMatch = true)
+            }
         }
     }
 
-    private var activeScanner: BaseQrScannerFeature = walletScanner
+    private var activeScanner: BaseQrScannerFeature = universalHomeAutoScanner
 
     val isScanningActive: Boolean
         get() = walletScanner.isScanningActive ||
@@ -141,7 +202,7 @@ class QrScannerFeature(
             nagadScanner.isScanningActive ||
             rocketScanner.isScanningActive ||
             upayScanner.isScanningActive ||
-            autoMfsScanner.isScanningActive
+            universalHomeAutoScanner.isScanningActive
 
     private fun resolveTargetScanner(payload: JSONObject): BaseQrScannerFeature {
         val operator = payload.optString("operator", "")
@@ -160,10 +221,10 @@ class QrScannerFeature(
             "upay" -> upayScanner
             "bdrsf", "wallet" -> walletScanner
             else -> {
-                if (context == "mfs_agent" || context == "mfs_merchant" || mode == "cash_out" || mode == "payment") {
-                    autoMfsScanner
-                } else {
+                if (context == "wallet_personal" || context == "wallet_agent" || context == "wallet_merchant" || mode == "cash_in") {
                     walletScanner
+                } else {
+                    universalHomeAutoScanner
                 }
             }
         }
@@ -195,7 +256,7 @@ class QrScannerFeature(
         if (nagadScanner.isScanningActive) nagadScanner.stopScanner(isCancelled)
         if (rocketScanner.isScanningActive) rocketScanner.stopScanner(isCancelled)
         if (upayScanner.isScanningActive) upayScanner.stopScanner(isCancelled)
-        if (autoMfsScanner.isScanningActive) autoMfsScanner.stopScanner(isCancelled)
+        if (universalHomeAutoScanner.isScanningActive) universalHomeAutoScanner.stopScanner(isCancelled)
     }
 
     fun destroy() {
@@ -204,6 +265,6 @@ class QrScannerFeature(
         nagadScanner.destroy()
         rocketScanner.destroy()
         upayScanner.destroy()
-        autoMfsScanner.destroy()
+        universalHomeAutoScanner.destroy()
     }
 }
