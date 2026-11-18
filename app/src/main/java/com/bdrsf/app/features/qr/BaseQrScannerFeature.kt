@@ -70,7 +70,8 @@ abstract class BaseQrScannerFeature(
     data class QrDecodeResult(
         val isValid: Boolean,
         val payloadJson: String = "",
-        val errorMessage: String = ""
+        val errorMessage: String = "",
+        val isProviderMatch: Boolean = false
     )
 
     private val cameraExecutor: ExecutorService = Executors.newSingleThreadExecutor()
@@ -352,7 +353,7 @@ abstract class BaseQrScannerFeature(
         }
     }
 
-    protected fun dispatchDecodedResult(
+    protected open fun dispatchDecodedResult(
         rawContent: String,
         successCallback: String?,
         errorCallback: String?,
