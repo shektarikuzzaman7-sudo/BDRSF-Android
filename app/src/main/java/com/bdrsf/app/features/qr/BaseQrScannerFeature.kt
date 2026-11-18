@@ -53,8 +53,9 @@ import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicBoolean
 
 /**
- * সার্বজনীন CameraX, Google ML Kit, ZXing ফলব্যাক, EMVCo TLV পার্সার ইউটিলিটি ও HUD ওভারলে ইঞ্জিন।
- * সকল প্রোভাইডার স্ক্যানার এই বেস ক্লাস ইনহেরিট করে নিজস্ব ডিকোডিং পরিচালনা করবে।
+ * পিওর হার্ডওয়্যার ও লো-লেভেল স্ক্যানিং ইঞ্জিন।
+ * শুধুমাত্র CameraX, Google ML Kit, ZXing ফলব্যাক, গ্যালারি ইমেজ রিডার এবং HUD ওভারলে পরিচালনা করে।
+ * এতে কোনো প্রোভাইডার ডিকোডিং বা TLV পার্সিং লজিক নেই।
  */
 abstract class BaseQrScannerFeature(
     protected val activity: Activity,
@@ -126,7 +127,7 @@ abstract class BaseQrScannerFeature(
     protected abstract fun getHudAccentColor(): Int
 
     /**
-     * প্রতিটি প্রোভাইডার (bKash, Nagad, Rocket, Upay, Wallet) নিজস্ব নিয়মে কাঁচা QR টেক্সট ডিকোড করবে।
+     * প্রতিটি প্রোভাইডার সাবক্লাস নিজস্ব ডিকোডিং লজিক এখানে বাস্তবায়ন করবে।
      */
     protected abstract fun decodeProviderQr(
         rawContent: String,
@@ -456,69 +457,6 @@ abstract class BaseQrScannerFeature(
             mlKitScanner.close()
             cameraExecutor.shutdown()
         } catch (_: Exception) {}
-    }
-
-    // ---------------------------------------------------------------------------------------------
-    // প্রোভাইডার-নিরপেক্ষ EMVCo TLV ও বাংলাদেশি নম্বর এক্সট্রাকশন হেল্পারসমূহ
-    // ---------------------------------------------------------------------------------------------
-    protected fun parseEmvTlvMap(tlvString: String): Map<String, String> {
-        val map = mutableMapOf<String, String>()
-        var idx = 0
-        val clean = tlvString.trim()
-        while (idx + 4 <= clean.length) {
-            val tag = clean.substring(idx, idx + 2)
-            val lenStr = clean.substring(idx + 2, idx + 4)
-            val len = lenStr.toIntOrNull() ?: break
-            val valStart = idx + 4
-            val valEnd = valStart + len
-            if (valEnd > clean.length) break
-            map[tag] = clean.substring(valStart, valEnd)
-            idx = valEnd
-        }
-        return map
-    }
-
-    protected fun extractBd11DigitMobile(text: String): String {
-        val normalized = text.replace("+88", "").replace(" ", "").replace("-", "")
-        val match = Regex("(01[3-9][0-9]{8})").find(normalized)
-        return match?.groupValues?.getOrNull(1) ?: ""
-    }
-
-    protected fun buildStandardQrJson(
-        provider: String,
-        accountNumber: String,
-        rawAccountNumber: String,
-        accountRole: String,
-        accountName: String,
-        storeName: String,
-        mcc: String,
-        amount: String,
-        rawContent: String,
-        isEncrypted: Boolean = false
-    ): JSONObject {
-        val suggestedAction = when (accountRole) {
-            "agent" -> "cash_out"
-            "merchant" -> "payment"
-            else -> "send_money"
-        }
-        return JSONObject().apply {
-            put("isSupported", true)
-            put("isEncrypted", isEncrypted)
-            put("provider", provider)
-            put("accountNumber", accountNumber)
-            put("rawAccountNumber", rawAccountNumber)
-            put("accountRole", accountRole)
-            put("isAgent", accountRole == "agent")
-            put("isMerchant", accountRole == "merchant")
-            put("suggestedAction", suggestedAction)
-            put("accountName", accountName)
-            put("storeName", storeName)
-            put("ownerName", accountName)
-            put("mcc", mcc)
-            put("amount", amount)
-            put("rawContent", rawContent)
-            put("message", "")
-        }
     }
 
     private fun hasCameraPermission(): Boolean {
