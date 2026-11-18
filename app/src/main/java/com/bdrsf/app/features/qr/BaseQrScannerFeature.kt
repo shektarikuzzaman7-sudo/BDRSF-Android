@@ -13,9 +13,11 @@ import android.graphics.BitmapFactory
 import android.graphics.Canvas
 import android.graphics.Color
 import android.graphics.LinearGradient
+import android.graphics.Matrix
 import android.graphics.Paint
 import android.graphics.RectF
 import android.graphics.Shader
+import android.net.Uri
 import android.os.SystemClock
 import android.util.Log
 import android.view.Gravity
@@ -33,6 +35,7 @@ import androidx.camera.lifecycle.ProcessCameraProvider
 import androidx.camera.view.PreviewView
 import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
+import androidx.exifinterface.media.ExifInterface
 import androidx.lifecycle.LifecycleOwner
 import com.bdrsf.app.bridge.AndroidBridge
 import com.google.mlkit.vision.barcode.BarcodeScanner
@@ -46,16 +49,17 @@ import com.google.zxing.DecodeHintType
 import com.google.zxing.MultiFormatReader
 import com.google.zxing.PlanarYUVLuminanceSource
 import com.google.zxing.RGBLuminanceSource
+import com.google.zxing.common.GlobalHistogramBinarizer
 import com.google.zxing.common.HybridBinarizer
 import org.json.JSONObject
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicBoolean
+import kotlin.math.max
 
 /**
  * পিওর হার্ডওয়্যার ও লো-লেভেল স্ক্যানিং ইঞ্জিন।
  * শুধুমাত্র CameraX, Google ML Kit, ZXing ফলব্যাক, গ্যালারি ইমেজ রিডার এবং HUD ওভারলে পরিচালনা করে।
- * এতে কোনো প্রোভাইডার ডিকোডিং বা TLV পার্সিং লজিক নেই।
  */
 abstract class BaseQrScannerFeature(
     protected val activity: Activity,
@@ -126,10 +130,7 @@ abstract class BaseQrScannerFeature(
     protected abstract fun getDefaultPromptText(mode: String, context: String): String
     protected abstract fun getHudAccentColor(): Int
 
-    /**
-     * প্রতিটি প্রোভাইডার সাবক্লাস নিজস্ব ডিকোডিং লজিক এখানে বাস্তবায়ন করবে।
-     */
-    protected abstract fun decodeProviderQr(
+    abstract fun decodeProviderQr(
         rawContent: String,
         expectedMode: String,
         context: String
@@ -367,7 +368,7 @@ abstract class BaseQrScannerFeature(
     }
 
     fun handleGalleryResult(resultCode: Int, data: Intent?, callback: String?) {
-        val cb = if (!callback.isNullOrBlank()) callback else "processScannedData"
+        val cb = if (!callback.isNullOrBlank()) callback else (activeCallback ?: "processScannedData")
         if (resultCode != Activity.RESULT_OK || data?.data == null) {
             bridge.sendQrErrorToWeb("onScanFailed", "গ্যালারি থেকে কোনো ছবি নির্বাচন করা হয়নি")
             return
@@ -375,30 +376,76 @@ abstract class BaseQrScannerFeature(
 
         try {
             val imageUri = data.data!!
-            activity.contentResolver.openInputStream(imageUri)?.use { inputStream ->
-                val bitmap = BitmapFactory.decodeStream(inputStream)
-                if (bitmap != null) {
-                    decodeFromBitmap(bitmap, cb)
-                } else {
-                    bridge.sendQrErrorToWeb("onScanFailed", "ছবি লোড করা সম্ভব হয়নি")
-                }
+            val bitmap = loadNormalizedBitmapFromUri(imageUri)
+            if (bitmap != null) {
+                decodeFromBitmap(bitmap, cb)
+            } else {
+                bridge.sendQrErrorToWeb("onScanFailed", "ছবি লোড করা সম্ভব হয়নি")
             }
         } catch (e: Exception) {
             bridge.sendQrErrorToWeb("onScanFailed", e.localizedMessage ?: "গ্যালারি প্রসেসিং ত্রুটি")
         }
     }
 
+    private fun loadNormalizedBitmapFromUri(uri: Uri): Bitmap? {
+        return try {
+            val boundsOptions = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+            activity.contentResolver.openInputStream(uri)?.use {
+                BitmapFactory.decodeStream(it, null, boundsOptions)
+            }
+
+            val maxSide = max(boundsOptions.outWidth, boundsOptions.outHeight)
+            var sampleSize = 1
+            while (maxSide / sampleSize > 1800) {
+                sampleSize *= 2
+            }
+
+            val decodeOptions = BitmapFactory.Options().apply {
+                inSampleSize = sampleSize
+                inPreferredConfig = Bitmap.Config.ARGB_8888
+            }
+            val rawBitmap = activity.contentResolver.openInputStream(uri)?.use {
+                BitmapFactory.decodeStream(it, null, decodeOptions)
+            } ?: return null
+
+            var rotation = 0
+            try {
+                activity.contentResolver.openInputStream(uri)?.use { exifStream ->
+                    val exif = ExifInterface(exifStream)
+                    rotation = when (exif.getAttributeInt(ExifInterface.TAG_ORIENTATION, ExifInterface.ORIENTATION_NORMAL)) {
+                        ExifInterface.ORIENTATION_ROTATE_90 -> 90
+                        ExifInterface.ORIENTATION_ROTATE_180 -> 180
+                        ExifInterface.ORIENTATION_ROTATE_270 -> 270
+                        else -> 0
+                    }
+                }
+            } catch (_: Exception) {}
+
+            if (rotation != 0) {
+                val matrix = Matrix().apply { postRotate(rotation.toFloat()) }
+                val rotated = Bitmap.createBitmap(rawBitmap, 0, 0, rawBitmap.width, rawBitmap.height, matrix, true)
+                if (rotated !== rawBitmap && !rawBitmap.isRecycled) rawBitmap.recycle()
+                rotated
+            } else {
+                rawBitmap
+            }
+        } catch (_: Exception) {
+            null
+        }
+    }
+
     fun decodeFromBitmap(bitmap: Bitmap, callback: String?) {
+        val cb = if (!callback.isNullOrBlank()) callback else (activeCallback ?: "processScannedData")
         val inputImage = InputImage.fromBitmap(bitmap, 0)
         mlKitScanner.process(inputImage)
             .addOnSuccessListener { barcodes ->
                 val matched = barcodes.firstOrNull { !it.rawValue.isNullOrBlank() }
                 if (matched != null) {
-                    dispatchDecodedResult(matched.rawValue ?: "", callback, "onScanFailed", activeExpectedMode, activeContext)
+                    dispatchDecodedResult(matched.rawValue ?: "", cb, "onScanFailed", activeExpectedMode, activeContext)
                 } else {
                     val zxingResult = decodeWithZxingFallback(bitmap)
                     if (zxingResult != null) {
-                        dispatchDecodedResult(zxingResult, callback, "onScanFailed", activeExpectedMode, activeContext)
+                        dispatchDecodedResult(zxingResult, cb, "onScanFailed", activeExpectedMode, activeContext)
                     } else {
                         bridge.sendQrErrorToWeb("onScanFailed", "ছবিতে কোনো সঠিক কিউআর বা বারকোড পাওয়া যায়নি")
                     }
@@ -407,7 +454,7 @@ abstract class BaseQrScannerFeature(
             .addOnFailureListener {
                 val zxingResult = decodeWithZxingFallback(bitmap)
                 if (zxingResult != null) {
-                    dispatchDecodedResult(zxingResult, callback, "onScanFailed", activeExpectedMode, activeContext)
+                    dispatchDecodedResult(zxingResult, cb, "onScanFailed", activeExpectedMode, activeContext)
                 } else {
                     bridge.sendQrErrorToWeb("onScanFailed", "বারকোড প্রসেসিং ব্যর্থ হয়েছে")
                 }
@@ -421,8 +468,12 @@ abstract class BaseQrScannerFeature(
             val pixels = IntArray(width * height)
             bitmap.getPixels(pixels, 0, width, 0, 0, width, height)
             val source = RGBLuminanceSource(width, height, pixels)
-            val binaryBitmap = BinaryBitmap(HybridBinarizer(source))
-            MultiFormatReader().decode(binaryBitmap, zxingHints).text
+            val reader = MultiFormatReader()
+            try {
+                reader.decode(BinaryBitmap(HybridBinarizer(source)), zxingHints).text
+            } catch (_: Exception) {
+                reader.decode(BinaryBitmap(GlobalHistogramBinarizer(source)), zxingHints).text
+            }
         } catch (_: Exception) {
             null
         }
