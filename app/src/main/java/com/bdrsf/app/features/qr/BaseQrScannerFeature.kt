@@ -35,7 +35,6 @@ import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.LifecycleOwner
 import com.bdrsf.app.bridge.AndroidBridge
-import com.bdrsf.app.utils.QrPayloadParser
 import com.google.mlkit.vision.barcode.BarcodeScanner
 import com.google.mlkit.vision.barcode.BarcodeScannerOptions
 import com.google.mlkit.vision.barcode.BarcodeScanning
@@ -53,30 +52,42 @@ import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicBoolean
 
-open class BaseQrScannerFeature(
+/**
+ * সার্বজনীন CameraX, Google ML Kit, ZXing ফলব্যাক ও HUD ওভারলে বেস ইঞ্জিন।
+ * সকল প্রোভাইডার স্ক্যানার (Wallet, bKash, Nagad, Rocket, Upay) এই ক্লাসটি ইনহেরিট করবে।
+ */
+abstract class BaseQrScannerFeature(
     protected val activity: Activity,
-    protected val rootContainer: ViewGroup,
+    private val rootContainer: ViewGroup,
     protected val bridge: AndroidBridge
 ) {
 
-    protected val cameraExecutor: ExecutorService = Executors.newSingleThreadExecutor()
-    protected var cameraProvider: ProcessCameraProvider? = null
-    protected var camera: Camera? = null
-    protected var previewView: PreviewView? = null
-    protected var scannerOverlayLayout: FrameLayout? = null
-    protected var hudView: ScannerHudView? = null
+    data class QrValidationResult(
+        val isValid: Boolean,
+        val payloadJson: String = "",
+        val errorMessage: String = ""
+    )
+
+    private val cameraExecutor: ExecutorService = Executors.newSingleThreadExecutor()
+    private var cameraProvider: ProcessCameraProvider? = null
+    private var camera: Camera? = null
+    private var previewView: PreviewView? = null
+    private var scannerOverlayLayout: FrameLayout? = null
+    private var hudView: ScannerHudView? = null
 
     protected var activeCallback: String? = null
     protected var activeErrorCallback: String? = null
     protected var activeExpectedMode: String = ""
-    protected var isTorchOn: Boolean = false
-    protected val isProcessingResult = AtomicBoolean(false)
-    protected var lastZxingFallbackTime: Long = 0L
+    protected var activeContext: String = ""
+    private var isTorchOn: Boolean = false
+    private val isProcessingResult = AtomicBoolean(false)
+    private var lastZxingFallbackTime: Long = 0L
 
+    @Volatile
     var isScanningActive: Boolean = false
-        protected set
+        private set
 
-    protected val mlKitScanner: BarcodeScanner by lazy {
+    private val mlKitScanner: BarcodeScanner by lazy {
         val options = BarcodeScannerOptions.Builder()
             .setBarcodeFormats(
                 Barcode.FORMAT_QR_CODE,
@@ -94,7 +105,7 @@ open class BaseQrScannerFeature(
         BarcodeScanning.getClient(options)
     }
 
-    protected val zxingHints: Map<DecodeHintType, Any> by lazy {
+    private val zxingHints: Map<DecodeHintType, Any> by lazy {
         mapOf(
             DecodeHintType.TRY_HARDER to true,
             DecodeHintType.ALSO_INVERTED to true,
@@ -111,7 +122,29 @@ open class BaseQrScannerFeature(
         )
     }
 
-    open fun startScanner(payload: JSONObject, callback: String?, defaultPrompt: String) {
+    /**
+     * প্রতিটি প্রোভাইডার নিজস্ব গাইড টেক্সট ও ব্র্যান্ড কালার নির্ধারণ করবে।
+     */
+    protected abstract fun getDefaultPromptText(mode: String, context: String): String
+    protected abstract fun getHudAccentColor(): Int
+
+    /**
+     * প্রতিটি প্রোভাইডার নিজস্ব নিয়মে স্ক্যান করা QR কোড যাচাই করবে।
+     */
+    protected abstract fun validateAndFormatPayload(
+        rawContent: String,
+        expectedMode: String,
+        context: String
+    ): QrValidationResult
+
+    fun configureContext(payload: JSONObject, callback: String?) {
+        activeCallback = if (!callback.isNullOrBlank()) callback else payload.optString("callback", "processScannedData")
+        activeErrorCallback = payload.optString("errorCallback", "onScanFailed")
+        activeExpectedMode = payload.optString("mode", "").trim().lowercase()
+        activeContext = payload.optString("context", "").trim().lowercase()
+    }
+
+    fun startScanner(payload: JSONObject, callback: String?) {
         if (!hasCameraPermission()) {
             ActivityCompat.requestPermissions(activity, arrayOf(Manifest.permission.CAMERA), 1001)
             return
@@ -123,35 +156,43 @@ open class BaseQrScannerFeature(
             isScanningActive = true
             isProcessingResult.set(false)
             lastZxingFallbackTime = 0L
-            activeCallback = if (!callback.isNullOrBlank()) callback else payload.optString("callback", "processScannedData")
-            activeErrorCallback = payload.optString("errorCallback", "onScanFailed")
-            activeExpectedMode = payload.optString("mode", "").trim().lowercase()
+            configureContext(payload, callback)
             isTorchOn = false
 
-            val promptText = payload.optString("prompt", defaultPrompt)
-            buildScannerLayout(promptText)
+            val defaultPrompt = getDefaultPromptText(activeExpectedMode, activeContext)
+            val promptText = payload.optString("prompt", "").ifBlank { defaultPrompt }
+            buildScannerLayout(promptText, getHudAccentColor())
             bindCameraProvider()
         }
     }
 
-    protected fun buildScannerLayout(promptText: String) {
+    private fun buildScannerLayout(promptText: String, accentColor: Int) {
         val density = activity.resources.displayMetrics.density
 
         scannerOverlayLayout = FrameLayout(activity).apply {
-            layoutParams = FrameLayout.LayoutParams(FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT)
+            layoutParams = FrameLayout.LayoutParams(
+                FrameLayout.LayoutParams.MATCH_PARENT,
+                FrameLayout.LayoutParams.MATCH_PARENT
+            )
             setBackgroundColor(Color.BLACK)
         }
 
         previewView = PreviewView(activity).apply {
-            layoutParams = FrameLayout.LayoutParams(FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT)
+            layoutParams = FrameLayout.LayoutParams(
+                FrameLayout.LayoutParams.MATCH_PARENT,
+                FrameLayout.LayoutParams.MATCH_PARENT
+            )
         }
         scannerOverlayLayout?.addView(previewView)
 
-        hudView = ScannerHudView(activity, promptText)
+        hudView = ScannerHudView(activity, promptText, accentColor)
         scannerOverlayLayout?.addView(hudView)
 
         val topControlsLayout = FrameLayout(activity).apply {
-            layoutParams = FrameLayout.LayoutParams(FrameLayout.LayoutParams.MATCH_PARENT, (60 * density).toInt()).apply {
+            layoutParams = FrameLayout.LayoutParams(
+                FrameLayout.LayoutParams.MATCH_PARENT,
+                (60 * density).toInt()
+            ).apply {
                 topMargin = (35 * density).toInt()
                 leftMargin = (20 * density).toInt()
                 rightMargin = (20 * density).toInt()
@@ -164,7 +205,10 @@ open class BaseQrScannerFeature(
             textSize = 15f
             setPadding((14 * density).toInt(), (8 * density).toInt(), (14 * density).toInt(), (8 * density).toInt())
             setBackgroundColor(Color.parseColor("#80000000"))
-            layoutParams = FrameLayout.LayoutParams(FrameLayout.LayoutParams.WRAP_CONTENT, FrameLayout.LayoutParams.WRAP_CONTENT).apply {
+            layoutParams = FrameLayout.LayoutParams(
+                FrameLayout.LayoutParams.WRAP_CONTENT,
+                FrameLayout.LayoutParams.WRAP_CONTENT
+            ).apply {
                 gravity = Gravity.START or Gravity.CENTER_VERTICAL
             }
             setOnClickListener { stopScanner(isCancelled = true) }
@@ -177,7 +221,10 @@ open class BaseQrScannerFeature(
             textSize = 15f
             setPadding((14 * density).toInt(), (8 * density).toInt(), (14 * density).toInt(), (8 * density).toInt())
             setBackgroundColor(Color.parseColor("#80000000"))
-            layoutParams = FrameLayout.LayoutParams(FrameLayout.LayoutParams.WRAP_CONTENT, FrameLayout.LayoutParams.WRAP_CONTENT).apply {
+            layoutParams = FrameLayout.LayoutParams(
+                FrameLayout.LayoutParams.WRAP_CONTENT,
+                FrameLayout.LayoutParams.WRAP_CONTENT
+            ).apply {
                 gravity = Gravity.END or Gravity.CENTER_VERTICAL
             }
             setOnClickListener { toggleTorch(this) }
@@ -188,7 +235,7 @@ open class BaseQrScannerFeature(
         rootContainer.addView(scannerOverlayLayout)
     }
 
-    protected fun bindCameraProvider() {
+    private fun bindCameraProvider() {
         val cameraProviderFuture = ProcessCameraProvider.getInstance(activity)
         cameraProviderFuture.addListener({
             try {
@@ -202,7 +249,7 @@ open class BaseQrScannerFeature(
     }
 
     @SuppressLint("UnsafeOptInUsageError")
-    protected fun setupCameraUseCases() {
+    private fun setupCameraUseCases() {
         val provider = cameraProvider ?: return
         val lifecycleOwner = activity as? LifecycleOwner ?: return
 
@@ -258,7 +305,7 @@ open class BaseQrScannerFeature(
         }
     }
 
-    protected fun decodeImageProxyWithZxing(imageProxy: ImageProxy): String? {
+    private fun decodeImageProxyWithZxing(imageProxy: ImageProxy): String? {
         return try {
             val plane = imageProxy.planes[0]
             val buffer = plane.buffer
@@ -284,7 +331,7 @@ open class BaseQrScannerFeature(
         }
     }
 
-    protected fun toggleTorch(button: TextView) {
+    private fun toggleTorch(button: TextView) {
         val cam = camera ?: return
         if (cam.cameraInfo.hasFlashUnit()) {
             isTorchOn = !isTorchOn
@@ -295,13 +342,14 @@ open class BaseQrScannerFeature(
         }
     }
 
-    protected fun handleScanSuccess(rawContent: String) {
+    private fun handleScanSuccess(rawContent: String) {
         val cb = activeCallback
         val errCb = activeErrorCallback
         val expectedMode = activeExpectedMode
+        val ctx = activeContext
         activity.runOnUiThread {
             stopScanner(isCancelled = false)
-            dispatchParsedQrResult(rawContent, cb, errCb, expectedMode)
+            dispatchParsedQrResult(rawContent, cb, errCb, expectedMode, ctx)
         }
     }
 
@@ -309,17 +357,18 @@ open class BaseQrScannerFeature(
         rawContent: String,
         successCallback: String?,
         errorCallback: String?,
-        expectedMode: String
+        expectedMode: String,
+        context: String
     ) {
-        val parsed = QrPayloadParser.parse(rawContent, expectedMode)
-        if (parsed.isSupported) {
-            bridge.sendQrSuccessToWeb(successCallback, parsed.toJsonObject().toString())
+        val validation = validateAndFormatPayload(rawContent, expectedMode, context)
+        if (validation.isValid) {
+            bridge.sendQrSuccessToWeb(successCallback, validation.payloadJson)
         } else {
-            bridge.sendQrErrorToWeb(errorCallback, parsed.message)
+            bridge.sendQrErrorToWeb(errorCallback, validation.errorMessage)
         }
     }
 
-    open fun handleGalleryResult(resultCode: Int, data: Intent?, callback: String?) {
+    fun handleGalleryResult(resultCode: Int, data: Intent?, callback: String?) {
         val cb = if (!callback.isNullOrBlank()) callback else "processScannedData"
         if (resultCode != Activity.RESULT_OK || data?.data == null) {
             bridge.sendQrErrorToWeb("onScanFailed", "গ্যালারি থেকে কোনো ছবি নির্বাচন করা হয়নি")
@@ -347,11 +396,11 @@ open class BaseQrScannerFeature(
             .addOnSuccessListener { barcodes ->
                 val matched = barcodes.firstOrNull { !it.rawValue.isNullOrBlank() }
                 if (matched != null) {
-                    dispatchParsedQrResult(matched.rawValue ?: "", callback, "onScanFailed", activeExpectedMode)
+                    dispatchParsedQrResult(matched.rawValue ?: "", callback, "onScanFailed", activeExpectedMode, activeContext)
                 } else {
                     val zxingResult = decodeWithZxingFallback(bitmap)
                     if (zxingResult != null) {
-                        dispatchParsedQrResult(zxingResult, callback, "onScanFailed", activeExpectedMode)
+                        dispatchParsedQrResult(zxingResult, callback, "onScanFailed", activeExpectedMode, activeContext)
                     } else {
                         bridge.sendQrErrorToWeb("onScanFailed", "ছবিতে কোনো সঠিক কিউআর বা বারকোড পাওয়া যায়নি")
                     }
@@ -360,14 +409,14 @@ open class BaseQrScannerFeature(
             .addOnFailureListener {
                 val zxingResult = decodeWithZxingFallback(bitmap)
                 if (zxingResult != null) {
-                    dispatchParsedQrResult(zxingResult, callback, "onScanFailed", activeExpectedMode)
+                    dispatchParsedQrResult(zxingResult, callback, "onScanFailed", activeExpectedMode, activeContext)
                 } else {
                     bridge.sendQrErrorToWeb("onScanFailed", "বারকোড প্রসেসিং ব্যর্থ হয়েছে")
                 }
             }
     }
 
-    protected fun decodeWithZxingFallback(bitmap: Bitmap): String? {
+    private fun decodeWithZxingFallback(bitmap: Bitmap): String? {
         return try {
             val width = bitmap.width
             val height = bitmap.height
@@ -381,7 +430,7 @@ open class BaseQrScannerFeature(
         }
     }
 
-    open fun stopScanner(isCancelled: Boolean = false) {
+    fun stopScanner(isCancelled: Boolean = false) {
         isScanningActive = false
         hudView?.stopAnimation()
 
@@ -412,15 +461,37 @@ open class BaseQrScannerFeature(
         } catch (_: Exception) {}
     }
 
-    protected fun hasCameraPermission(): Boolean {
+    private fun hasCameraPermission(): Boolean {
         return ContextCompat.checkSelfPermission(activity, Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED
     }
 
-    protected inner class ScannerHudView(context: Context, private val guideText: String) : View(context) {
-        private val shadePaint = Paint().apply { color = Color.parseColor("#99000000"); style = Paint.Style.FILL }
-        private val cornerPaint = Paint().apply { color = Color.parseColor("#00E676"); style = Paint.Style.STROKE; strokeWidth = 10f; strokeCap = Paint.Cap.ROUND; isAntiAlias = true }
-        private val laserPaint = Paint().apply { isAntiAlias = true; strokeWidth = 6f }
-        private val textPaint = Paint().apply { color = Color.WHITE; textSize = 38f; textAlign = Paint.Align.CENTER; isAntiAlias = true; setShadowLayer(8f, 0f, 0f, Color.BLACK) }
+    private inner class ScannerHudView(
+        context: Context,
+        private val guideText: String,
+        private val accentColor: Int
+    ) : View(context) {
+        private val shadePaint = Paint().apply {
+            color = Color.parseColor("#99000000")
+            style = Paint.Style.FILL
+        }
+        private val cornerPaint = Paint().apply {
+            color = accentColor
+            style = Paint.Style.STROKE
+            strokeWidth = 10f
+            strokeCap = Paint.Cap.ROUND
+            isAntiAlias = true
+        }
+        private val laserPaint = Paint().apply {
+            isAntiAlias = true
+            strokeWidth = 6f
+        }
+        private val textPaint = Paint().apply {
+            color = Color.WHITE
+            textSize = 36f
+            textAlign = Paint.Align.CENTER
+            isAntiAlias = true
+            setShadowLayer(8f, 0f, 0f, Color.BLACK)
+        }
 
         private var scanBox = RectF()
         private var laserY = 0f
@@ -473,12 +544,12 @@ open class BaseQrScannerFeature(
             canvas.drawLine(scanBox.left, scanBox.bottom, scanBox.left + cornerLen, scanBox.bottom, cornerPaint)
             canvas.drawLine(scanBox.left, scanBox.bottom, scanBox.left, scanBox.bottom - cornerLen, cornerPaint)
             canvas.drawLine(scanBox.right, scanBox.bottom, scanBox.right - cornerLen, scanBox.bottom, cornerPaint)
-            canvas.drawLine(scanBox.right, scanBox.bottom, scanBox.right, scanBox.right - cornerLen, cornerPaint)
+            canvas.drawLine(scanBox.right, scanBox.bottom, scanBox.right, scanBox.bottom - cornerLen, cornerPaint)
 
             if (laserY in scanBox.top..scanBox.bottom) {
                 laserPaint.shader = LinearGradient(
                     scanBox.left, laserY, scanBox.right, laserY,
-                    intArrayOf(Color.TRANSPARENT, Color.parseColor("#00E676"), Color.TRANSPARENT),
+                    intArrayOf(Color.TRANSPARENT, accentColor, Color.TRANSPARENT),
                     null,
                     Shader.TileMode.CLAMP
                 )
