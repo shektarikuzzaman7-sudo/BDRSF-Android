@@ -1,3 +1,4 @@
+// File: app/src/main/java/com/bdrsf/app/features/qr/QrScannerFeature.kt
 package com.bdrsf.app.features.qr
 
 import android.app.Activity
@@ -7,60 +8,75 @@ import android.view.ViewGroup
 import com.bdrsf.app.bridge.AndroidBridge
 import org.json.JSONObject
 
+/**
+ * BDRSF QR স্ক্যানার রাউটার ও কো-অর্ডিনেটর।
+ * MainActivity.kt থেকে আসা সকল ক্যামেরা ও গ্যালারি রিকোয়েস্ট অপারেটর অনুযায়ী নির্দিষ্ট স্ক্যানারে ডেলিগেট করে।
+ */
 class QrScannerFeature(
-    private val activity: Activity,
-    private val rootContainer: ViewGroup,
-    private val bridge: AndroidBridge
+    activity: Activity,
+    rootContainer: ViewGroup,
+    bridge: AndroidBridge
 ) {
 
-    // আলাদা আলাদা পেমেন্ট মেথড বা ওয়ালেটের জন্য সাব-স্ক্যানার ইনিশিয়ালাইজেশন
     private val walletScanner = WalletQrScannerFeature(activity, rootContainer, bridge)
     private val bkashScanner = BkashQrScannerFeature(activity, rootContainer, bridge)
     private val nagadScanner = NagadQrScannerFeature(activity, rootContainer, bridge)
     private val rocketScanner = RocketQrScannerFeature(activity, rootContainer, bridge)
     private val upayScanner = UpayQrScannerFeature(activity, rootContainer, bridge)
 
-    private var activeScanner: BaseQrScannerFeature? = null
+    private var activeScanner: BaseQrScannerFeature = walletScanner
 
-    // MainActivity থেকে আগের মতো স্ক্যানিং স্ট্যাটাস চেক করার জন্য
     val isScanningActive: Boolean
-        get() = activeScanner?.isScanningActive == true
+        get() = walletScanner.isScanningActive ||
+            bkashScanner.isScanningActive ||
+            nagadScanner.isScanningActive ||
+            rocketScanner.isScanningActive ||
+            upayScanner.isScanningActive
 
-    /**
-     * ওয়েব থেকে আসা payload-এর ভেতর থেকে 'mode' চেক করে নির্দিষ্ট স্ক্যানার রাউট করবে।
-     * যেমন: mode = "bkash", "nagad", "rocket", "upay", অথবা "wallet" (ডিফল্ট)
-     */
-    fun startScanner(payload: JSONObject, callback: String?) {
-        val mode = payload.optString("mode", "wallet").trim().lowercase()
+    private fun resolveTargetScanner(payload: JSONObject): BaseQrScannerFeature {
+        val operator = payload.optString("operator", "")
+            .ifBlank { payload.optString("provider", "") }
+            .trim()
+            .lowercase()
 
-        activeScanner = when (mode) {
+        return when (operator) {
             "bkash" -> bkashScanner
             "nagad" -> nagadScanner
             "rocket" -> rocketScanner
             "upay" -> upayScanner
             else -> walletScanner
         }
+    }
 
-        activeScanner?.startScanner(payload, callback)
+    fun startScanner(payload: JSONObject, callback: String?) {
+        val target = resolveTargetScanner(payload)
+        activeScanner = target
+        target.startScanner(payload, callback)
+    }
+
+    fun prepareGalleryScanner(payload: JSONObject, callback: String?) {
+        val target = resolveTargetScanner(payload)
+        activeScanner = target
+        target.configureContext(payload, callback)
     }
 
     fun handleGalleryResult(resultCode: Int, data: Intent?, callback: String?) {
-        val scanner = activeScanner ?: walletScanner
-        scanner.handleGalleryResult(resultCode, data, callback)
+        activeScanner.handleGalleryResult(resultCode, data, callback)
     }
 
     fun decodeFromBitmap(bitmap: Bitmap, callback: String?) {
-        val scanner = activeScanner ?: walletScanner
-        scanner.decodeFromBitmap(bitmap, callback)
+        activeScanner.decodeFromBitmap(bitmap, callback)
     }
 
     fun stopScanner(isCancelled: Boolean = false) {
-        activeScanner?.stopScanner(isCancelled)
-        activeScanner = null
+        if (walletScanner.isScanningActive) walletScanner.stopScanner(isCancelled)
+        if (bkashScanner.isScanningActive) bkashScanner.stopScanner(isCancelled)
+        if (nagadScanner.isScanningActive) nagadScanner.stopScanner(isCancelled)
+        if (rocketScanner.isScanningActive) rocketScanner.stopScanner(isCancelled)
+        if (upayScanner.isScanningActive) upayScanner.stopScanner(isCancelled)
     }
 
     fun destroy() {
-        stopScanner(false)
         walletScanner.destroy()
         bkashScanner.destroy()
         nagadScanner.destroy()
