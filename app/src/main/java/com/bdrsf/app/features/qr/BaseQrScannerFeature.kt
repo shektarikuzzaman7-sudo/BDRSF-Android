@@ -64,7 +64,7 @@ import kotlin.math.max
  *  - Google ML Kit ও ZXing ডুয়াল-ইঞ্জিন বারকোড/কিউআর ডিকোডিং
  *  - গ্যালারি ইমেজ EXIF রোটেশন ও মেমোরি-সেফ স্কেলিং
  *  - ডাইনামিক প্রোভাইডার কালার ও গাইড টেক্সটসহ HUD ওভারলে রেন্ডারিং
- *  - জিরো মেমোরি লিক নিশ্চিতকরণ (Camera unbind, ML Kit close, Executor shutdown)
+ *  - জিরো মেমোরি লিক নিশ্চিতকরণ
  */
 abstract class BaseQrScannerFeature(
     protected val activity: Activity,
@@ -137,9 +137,6 @@ abstract class BaseQrScannerFeature(
     protected abstract fun getDefaultPromptText(mode: String, context: String): String
     protected abstract fun getHudAccentColor(): Int
 
-    /**
-     * প্রতিটি প্রোভাইডার সাবক্লাস নিজস্ব ডিকোডিং ও ভ্যালিডেশন লজিক এখানে বাস্তবায়ন করবে।
-     */
     abstract fun decodeProviderQr(
         rawContent: String,
         expectedMode: String,
