@@ -9,7 +9,6 @@ import org.json.JSONObject
 
 /**
  * বিকাশ (bKash) সম্পূর্ণ স্বাধীন ডিকোডার ও স্ক্যানার।
- * বিকাশের নিজস্ব EMVCo TLV ট্যাগ, URL এবং এজেন্ট/মার্চেন্ট রোল ডিকোড করে।
  */
 class BkashQrScannerFeature(
     activity: Activity,
@@ -53,7 +52,7 @@ class BkashQrScannerFeature(
         var amount = ""
 
         if (trimmed.startsWith("000201")) {
-            val rootTags = splitBkashTlv(trimmed)
+            val rootTags = QrScannerFeature.parseEmvTags(trimmed)
             accountName = rootTags["59"] ?: ""
             mcc = rootTags["52"] ?: ""
             amount = rootTags["54"] ?: ""
@@ -61,8 +60,8 @@ class BkashQrScannerFeature(
             for (tagNum in 26..51) {
                 val tagKey = tagNum.toString().padStart(2, '0')
                 val subData = rootTags[tagKey] ?: continue
-                val subTags = splitBkashTlv(subData)
-                val mobile = extractBkashMobile(subTags["01"] ?: subTags["02"] ?: subData)
+                val subTags = QrScannerFeature.parseEmvTags(subData)
+                val mobile = QrScannerFeature.extractBdMobile(subTags["01"] ?: subTags["02"] ?: subTags["03"] ?: subData)
                 if (mobile.isNotEmpty()) {
                     accountNumber = mobile
                 }
@@ -74,16 +73,26 @@ class BkashQrScannerFeature(
                 }
             }
 
-            if (accountNumber.isEmpty()) {
-                accountNumber = extractBkashMobile(trimmed)
+            if (accountNumber.isEmpty() && rootTags.containsKey("62")) {
+                val addTags = QrScannerFeature.parseEmvTags(rootTags["62"] ?: "")
+                accountNumber = QrScannerFeature.extractBdMobile(addTags["02"] ?: addTags["01"] ?: rootTags["62"] ?: "")
             }
+
+            if (accountNumber.isEmpty()) {
+                accountNumber = QrScannerFeature.extractBdMobile(trimmed)
+            }
+
             if (accountRole == "unknown" && accountNumber.isNotEmpty()) {
-                accountRole = if (mcc == "0000" || lower.contains("agent")) "agent" else "merchant"
+                accountRole = when {
+                    mcc == "0000" || lower.contains("agent") -> "agent"
+                    expectedMode == "cash_out" || context == "mfs_agent" -> "agent"
+                    else -> "merchant"
+                }
             }
         } else if (trimmed.startsWith("{") && trimmed.endsWith("}")) {
             try {
                 val obj = JSONObject(trimmed)
-                accountNumber = extractBkashMobile(obj.toString())
+                accountNumber = QrScannerFeature.extractBdMobile(obj.toString())
                 accountName = obj.optString("name", obj.optString("merchantName", ""))
                 val type = obj.optString("type", obj.optString("role", "")).lowercase()
                 accountRole = when {
@@ -93,7 +102,7 @@ class BkashQrScannerFeature(
                 }
             } catch (_: Exception) {}
         } else if (lower.contains("bkash") || lower.contains("bka.sh")) {
-            accountNumber = extractBkashMobile(trimmed)
+            accountNumber = QrScannerFeature.extractBdMobile(trimmed)
             accountRole = when {
                 lower.contains("agent") -> "agent"
                 lower.contains("merchant") || lower.contains("pay") -> "merchant"
@@ -106,7 +115,7 @@ class BkashQrScannerFeature(
         }
 
         if (expectedMode == "cash_out" || context == "mfs_agent") {
-            if (accountRole == "merchant") {
+            if (accountRole == "merchant" && mcc.isNotEmpty() && mcc != "0000") {
                 return QrDecodeResult(false, errorMessage = "এটি বিকাশ মার্চেন্ট QR কোড! ক্যাশ আউটের জন্য বিকাশ এজেন্ট QR কোড স্ক্যান করুন।")
             }
             if (accountRole != "agent") {
@@ -121,44 +130,17 @@ class BkashQrScannerFeature(
             }
         }
 
-        val json = JSONObject().apply {
-            put("isSupported", true)
-            put("isEncrypted", false)
-            put("provider", "bkash")
-            put("accountNumber", accountNumber)
-            put("rawAccountNumber", accountNumber)
-            put("accountRole", accountRole)
-            put("isAgent", accountRole == "agent")
-            put("isMerchant", accountRole == "merchant")
-            put("suggestedAction", if (accountRole == "agent") "cash_out" else "payment")
-            put("accountName", accountName)
-            put("storeName", accountName)
-            put("ownerName", accountName)
-            put("mcc", mcc)
-            put("amount", amount)
-            put("rawContent", trimmed)
-            put("message", "")
-        }
-        return QrDecodeResult(isValid = true, payloadJson = json.toString())
-    }
-
-    private fun splitBkashTlv(raw: String): Map<String, String> {
-        val result = mutableMapOf<String, String>()
-        var i = 0
-        while (i + 4 <= raw.length) {
-            val tag = raw.substring(i, i + 2)
-            val len = raw.substring(i + 2, i + 4).toIntOrNull() ?: break
-            val start = i + 4
-            val end = start + len
-            if (end > raw.length) break
-            result[tag] = raw.substring(start, end)
-            i = end
-        }
-        return result
-    }
-
-    private fun extractBkashMobile(text: String): String {
-        val clean = text.replace("+88", "").replace(" ", "").replace("-", "")
-        return Regex("(01[3-9][0-9]{8})").find(clean)?.groupValues?.getOrNull(1) ?: ""
+        val payload = QrScannerFeature.buildStandardPayload(
+            provider = "bkash",
+            accountNumber = accountNumber,
+            rawAccountNumber = accountNumber,
+            accountRole = accountRole,
+            accountName = accountName,
+            storeName = accountName,
+            mcc = mcc,
+            amount = amount,
+            rawContent = trimmed
+        )
+        return QrDecodeResult(isValid = true, payloadJson = payload.toString())
     }
 }
