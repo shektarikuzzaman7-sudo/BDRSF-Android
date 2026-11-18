@@ -251,6 +251,7 @@ class MainActivity : AppCompatActivity(), AndroidBridge.BridgeActionHandler {
 
     override fun onPickGalleryQrRequested(payload: JSONObject, callback: String?) {
         pendingGalleryQrCallback = callback
+        qrScannerFeature.prepareGalleryScanner(payload, callback)
         val intent = Intent(Intent.ACTION_PICK, MediaStore.Images.Media.EXTERNAL_CONTENT_URI).apply {
             type = "image/*"
         }
