@@ -11,12 +11,9 @@ import org.json.JSONObject
 
 /**
  * BDRSF-Android সার্বজনীন QR রাউটার ও কো-অর্ডিনেটর।
- * দায়িত্ব:
- *  1. নির্দিষ্ট অপারেটর (bkash, nagad, rocket, upay, bdrsf) সিলেক্ট থাকলে সরাসরি সেই প্রোভাইডার স্ক্যানারে রাউট করা।
- *  2. হোম বাটন বা জেনারেল স্ক্যান থেকে কোনো অপারেটর সিলেক্ট না করে QR স্ক্যান করলে:
- *     - প্রথমে BDRSF Wallet QR যাচাই করা (পার্সোনাল/এজেন্ট/মার্চেন্ট রোল অনুযায়ী অটো সেন্ড মানি, ক্যাশ আউট বা পেমেন্ট নির্ধারণ)।
- *     - BDRSF Wallet না হলে স্বয়ংক্রিয়ভাবে bKash, Nagad, Rocket ও Upay ডিকোডার চালিয়ে সঠিক গেটওয়ে শনাক্ত করা।
- *  3. ইউজারের নাম (`ownerName` / `accountName`) এবং স্টোরের নাম (`storeName`) আলাদাভাবে সঠিকভাবে সেট করা।
+ * - প্রোভাইডার (bkash, nagad, rocket, upay, bdrsf) নির্দিষ্ট থাকলে সরাসরি সেই প্রোভাইডার স্ক্যানারে রাউট করে।
+ * - প্রোভাইডার সিলেক্ট না থাকলে স্বয়ংক্রিয়ভাবে সব প্রোভাইডার ডিকোডার চালিয়ে সঠিক গেটওয়ে ও রোল শনাক্ত করে।
+ * - QR কোড থেকে পাওয়া প্রকৃত নাম (`ownerName`) ও ব্যবসায়িক/স্টোরের নাম (`storeName`) আলাদাভাবে সংরক্ষণ করে (কোনো বানানো নাম বসানো হয় না)।
  */
 class QrScannerFeature(
     activity: Activity,
@@ -48,28 +45,28 @@ class QrScannerFeature(
 
         /**
          * প্রোভাইডার-নিরপেক্ষ স্ট্যান্ডার্ড পেলোড বিল্ডার।
-         * স্টোরের নাম (`storeName`) এবং ইউজার/মালিকের নাম (`ownerName` / `accountName`) আলাদাভাবে সংরক্ষণ করে।
+         * QR কোড থেকে পাওয়া প্রকৃত নামগুলোই কেবল সেট করে:
+         *  - `storeName`: ব্যবসা প্রতিষ্ঠান / মার্চেন্ট / এজেন্ট পয়েন্টের নাম (Tag 59)
+         *  - `ownerName`: অ্যাকাউন্ট মালিক / ব্যক্তির নিজস্ব নাম (যদি QR-এ থাকে)
+         *  - `accountName`: মালিকের নাম থাকলে সেটি, নাহলে স্টোরের নাম
          */
         internal fun buildStandardPayload(
             provider: String,
             accountNumber: String,
             rawAccountNumber: String,
             accountRole: String,
-            accountName: String,
             storeName: String,
+            ownerName: String,
             mcc: String,
             amount: String,
             rawContent: String,
             isEncrypted: Boolean = false,
-            ownerName: String = "",
             overrideAction: String = ""
         ): JSONObject {
             val normalizedRole = accountRole.trim().lowercase().ifBlank { "personal" }
-            val resolvedOwner = ownerName.trim().ifBlank { accountName.trim() }
-            val resolvedStore = storeName.trim().ifBlank {
-                if (normalizedRole == "merchant" || normalizedRole == "agent") resolvedOwner else ""
-            }
-            val displayName = resolvedOwner.ifBlank { resolvedStore }
+            val cleanStore = storeName.trim()
+            val cleanOwner = ownerName.trim()
+            val displayAccountName = cleanOwner.ifBlank { cleanStore }
 
             val suggestedAction = overrideAction.trim().lowercase().ifBlank {
                 when (normalizedRole) {
@@ -89,9 +86,9 @@ class QrScannerFeature(
                 put("isAgent", normalizedRole == "agent")
                 put("isMerchant", normalizedRole == "merchant")
                 put("suggestedAction", suggestedAction)
-                put("accountName", displayName)
-                put("ownerName", resolvedOwner)
-                put("storeName", resolvedStore)
+                put("accountName", displayAccountName)
+                put("ownerName", cleanOwner)
+                put("storeName", cleanStore)
                 put("mcc", mcc.trim())
                 put("amount", amount.trim())
                 put("rawContent", rawContent)
@@ -106,11 +103,6 @@ class QrScannerFeature(
     private val rocketScanner = RocketQrScannerFeature(activity, rootContainer, bridge)
     private val upayScanner = UpayQrScannerFeature(activity, rootContainer, bridge)
 
-    /**
-     * হোম বাটন বা জেনারেল QR স্ক্যানার (যখন আগে থেকে কোনো অপারেটর বা মেথড সিলেক্ট করা থাকে না):
-     * - BDRSF Wallet QR হলে পার্সোনাল/এজেন্ট/মার্চেন্ট অনুযায়ী স্বয়ংক্রিয়ভাবে Send Money, Cash Out, Cash In বা Payment সিলেক্ট করে।
-     * - MFS QR হলে বিকাশ, নগদ, রকেট বা উপায় অটো-ডিটেক্ট করে।
-     */
     private val universalHomeAutoScanner = object : BaseQrScannerFeature(activity, rootContainer, bridge) {
         override fun getHudAccentColor(): Int = Color.parseColor("#FFD700")
 
@@ -132,7 +124,6 @@ class QrScannerFeature(
         ): QrDecodeResult {
             val isStrictMfsContext = (context == "mfs_agent" || context == "mfs_merchant" || expectedMode == "cash_out" || expectedMode == "payment")
 
-            // ১. জেনারেল বা হোম স্ক্যান হলে আগে BDRSF ওয়ালেট QR পরীক্ষা (মোড ফাঁকা রেখে যাতে সব রোল অটো-ডিটেক্ট হয়)
             if (!isStrictMfsContext) {
                 val walletRes = walletScanner.decodeProviderQr(rawContent, "", "")
                 if (walletRes.isValid) {
@@ -140,7 +131,6 @@ class QrScannerFeature(
                 }
             }
 
-            // ২. MFS প্রোভাইডার ডিকোডারগুলো (bKash, Nagad, Rocket, Upay) একে একে পরীক্ষা
             val mfsDecoders = listOf(bkashScanner, nagadScanner, rocketScanner, upayScanner)
             var matchedProviderError: String? = null
 
@@ -154,7 +144,6 @@ class QrScannerFeature(
                 }
             }
 
-            // ৩. MFS না হলে এবং strict MFS কনটেক্সটে BDRSF QR স্ক্যান করলে তার উপযুক্ত বার্তা দেখানো
             if (isStrictMfsContext) {
                 val walletCheck = walletScanner.decodeProviderQr(rawContent, "", "")
                 if (walletCheck.isValid) {
