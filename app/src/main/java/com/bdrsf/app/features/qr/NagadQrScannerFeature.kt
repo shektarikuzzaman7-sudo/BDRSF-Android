@@ -3,13 +3,20 @@ package com.bdrsf.app.features.qr
 
 import android.app.Activity
 import android.graphics.Color
+import android.net.Uri
+import android.util.Base64
 import android.view.ViewGroup
 import com.bdrsf.app.bridge.AndroidBridge
 import org.json.JSONObject
+import java.nio.charset.StandardCharsets
 
 /**
- * নগদ (Nagad) সম্পূর্ণ স্বাধীন ডিকোডার ও স্ক্যানার।
- * নগদ উদ্যোক্তা (Agent) এবং নগদ মার্চেন্ট (Merchant) QR কোড আলাদাভাবে শনাক্ত ও ডিকোড করে।
+ * নগদ (Nagad) ডেডিকেটেড QR ডিকোডার ও স্ক্যানার।
+ * দায়িত্ব:
+ *  - নগদ EMVCo / Bangla QR (`000201...`), সাব-ট্যাগ (`26`–`51`), `nagad://` URL এবং JSON পেলোড ডিকোড করা
+ *  - নগদ উদ্যোক্তা / এজেন্ট (Agent) QR কোড এবং নগদ মার্চেন্ট (Merchant) QR কোড আলাদাভাবে শনাক্ত করা
+ *  - নগদ এনক্রিপ্টেড পার্সোনাল QR কোড শনাক্ত করে নিরাপদভাবে প্রত্যাখ্যান করা
+ *  - স্টোরের নাম (`storeName`) এবং মালিক/অ্যাকাউন্টের নাম (`ownerName` / `accountName`) আলাদাভাবে সেট করা
  */
 class NagadQrScannerFeature(
     activity: Activity,
@@ -18,7 +25,8 @@ class NagadQrScannerFeature(
 ) : BaseQrScannerFeature(activity, rootContainer, bridge) {
 
     companion object {
-        private val AGENT_MCCS = setOf("0000", "4829", "6010", "6011", "6012", "7299")
+        // নগদ উদ্যোক্তা / এজেন্ট পয়েন্টের স্ট্যান্ডার্ড MCC কোডসমূহ
+        private val NAGAD_AGENT_MCCS = setOf("0000", "4829", "6010", "6011", "6012", "7299")
     }
 
     override fun getHudAccentColor(): Int = Color.parseColor("#F6921E")
@@ -40,9 +48,21 @@ class NagadQrScannerFeature(
         context: String
     ): QrDecodeResult {
         val trimmed = rawContent.trim()
+        if (trimmed.isEmpty()) {
+            return QrDecodeResult(
+                isValid = false,
+                errorMessage = "খালি QR কোড পাওয়া গেছে।",
+                isProviderMatch = false
+            )
+        }
+
         val lower = trimmed.lowercase()
 
-        if (trimmed.startsWith("{") && lower.contains("\"provider\":\"bdrsf\"")) {
+        // ১. BDRSF ওয়ালেট QR কোড হলে প্রত্যাখ্যান
+        if ((trimmed.startsWith("{") && lower.contains("\"provider\":\"bdrsf\"")) ||
+            lower.startsWith("bdrsf://") ||
+            lower.startsWith("bdrsf:")
+        ) {
             return QrDecodeResult(
                 isValid = false,
                 errorMessage = "এটি BDRSF ওয়ালেট QR কোড! অনুগ্রহ করে নগদ QR কোড স্ক্যান করুন।",
@@ -50,7 +70,14 @@ class NagadQrScannerFeature(
             )
         }
 
-        if (lower.contains("bkash") || lower.contains("bka.sh") || lower.contains("rocket") || lower.contains("dbbl") || lower.contains("upay") || lower.contains("ucb")) {
+        // ২. অন্য MFS অপারেটর (বিকাশ, রকেট, উপায়) হলে প্রত্যাখ্যান
+        if (lower.contains("bkash") ||
+            lower.contains("bka.sh") ||
+            lower.contains("rocket") ||
+            lower.contains("dbbl") ||
+            lower.contains("upay") ||
+            lower.contains("ucb")
+        ) {
             return QrDecodeResult(
                 isValid = false,
                 errorMessage = "এটি অন্য অপারেটরের QR কোড! অনুগ্রহ করে নগদ QR কোড স্ক্যান করুন।",
@@ -60,114 +87,239 @@ class NagadQrScannerFeature(
 
         var accountNumber = ""
         var accountRole = "unknown"
-        var accountName = ""
+        var storeName = ""
+        var ownerName = ""
         var mcc = ""
         var amount = ""
-        var providerExplicitlyMatched = lower.contains("nagad")
+        var isEncryptedPersonal = false
+        var isNagadConfirmed = lower.contains("nagad")
 
+        // ৩. EMVCo / Bangla QR স্ট্যান্ডার্ড ফরম্যাট (`000201...`) ডিকোডিং
         if (trimmed.startsWith("000201")) {
             val rootTags = QrScannerFeature.parseEmvTags(trimmed)
-            accountName = rootTags["59"] ?: ""
-            mcc = rootTags["52"] ?: ""
-            amount = rootTags["54"] ?: ""
+            storeName = (rootTags["59"] ?: "").trim()
+            mcc = (rootTags["52"] ?: "").trim()
+            amount = (rootTags["54"] ?: "").trim()
 
-            var hasExplicitAgent = false
-            var hasExplicitMerchant = false
+            var hasExplicitAgentTag = false
+            var hasExplicitMerchantTag = false
+            var hasExplicitPersonalTag = false
 
+            // ট্যাগ 26 থেকে 51 পর্যন্ত নগদ প্রোপ্রাইটারি অ্যাকাউন্ট ইনফরমেশন বিশ্লেষণ
             for (tagNum in 26..51) {
                 val tagKey = tagNum.toString().padStart(2, '0')
                 val subData = rootTags[tagKey] ?: continue
                 val subLower = subData.lowercase()
-                if (subLower.contains("nagad")) {
-                    providerExplicitlyMatched = true
+
+                if (subLower.contains("nagad") || subLower.contains("uddokta")) {
+                    isNagadConfirmed = true
                 }
 
                 val subTags = QrScannerFeature.parseEmvTags(subData)
-                val mobile = QrScannerFeature.extractBdMobile(
-                    subTags["01"] ?: subTags["02"] ?: subTags["03"] ?: subData
-                )
-                if (mobile.isNotEmpty()) {
-                    accountNumber = mobile
+                val gui = (subTags["00"] ?: "").lowercase()
+                if (gui.contains("nagad")) {
+                    isNagadConfirmed = true
                 }
 
-                val hint = (subTags["03"] ?: subTags["04"] ?: subData).lowercase()
-                if (hint.contains("agent") || hint.contains("uddokta") || hint == "ag" || hint == "02") {
-                    hasExplicitAgent = true
-                } else if (hint.contains("merchant") || hint == "mr" || hint == "03") {
-                    hasExplicitMerchant = true
+                // অ্যাকাউন্ট / মোবাইল নম্বর এক্সট্রাকশন (Sub-tags 01, 02, 03, 04)
+                val candidateAccount = listOf(
+                    subTags["01"],
+                    subTags["02"],
+                    subTags["03"],
+                    subTags["04"],
+                    subData
+                ).firstNotNullOfOrNull { candidate ->
+                    extractNagadAccountNumber(candidate ?: "").takeIf { it.isNotEmpty() }
+                } ?: ""
+
+                if (candidateAccount.isNotEmpty() && (accountNumber.isEmpty() || gui.contains("nagad") || subLower.contains("nagad"))) {
+                    accountNumber = candidateAccount
+                }
+
+                // রোল ইন্ডিকেটর বিশ্লেষণ (Uddokta/Agent vs Merchant vs Personal)
+                val roleTokens = listOf(
+                    subTags["02"],
+                    subTags["03"],
+                    subTags["04"],
+                    subTags["05"],
+                    subData
+                ).joinToString(" ").lowercase()
+
+                when {
+                    roleTokens.contains("personal") || roleTokens.contains("p2p") -> {
+                        hasExplicitPersonalTag = true
+                    }
+                    roleTokens.contains("agent") || roleTokens.contains("uddokta") ||
+                        subTags["03"]?.equals("AG", ignoreCase = true) == true ||
+                        subTags["03"] == "02" -> {
+                        hasExplicitAgentTag = true
+                    }
+                    roleTokens.contains("merchant") || roleTokens.contains("payment") ||
+                        subTags["03"]?.equals("MR", ignoreCase = true) == true ||
+                        subTags["03"] == "03" -> {
+                        hasExplicitMerchantTag = true
+                    }
                 }
             }
 
+            // ট্যাগ 62 (Additional Data Field Template) থেকে মোবাইল নম্বর, মালিকের নাম ও রোল বিশ্লেষণ
             if (rootTags.containsKey("62")) {
                 val addRaw = rootTags["62"] ?: ""
                 val addLower = addRaw.lowercase()
-                if (addLower.contains("agent") || addLower.contains("uddokta") || addLower.contains("cash out")) {
-                    hasExplicitAgent = true
+                val addTags = QrScannerFeature.parseEmvTags(addRaw)
+
+                if (addLower.contains("agent") || addLower.contains("uddokta") || addLower.contains("cash out") || addLower.contains("cashout")) {
+                    hasExplicitAgentTag = true
                 }
                 if (addLower.contains("merchant") || addLower.contains("payment")) {
-                    hasExplicitMerchant = true
+                    hasExplicitMerchantTag = true
                 }
+                if (addLower.contains("personal") || addLower.contains("p2p")) {
+                    hasExplicitPersonalTag = true
+                }
+
                 if (accountNumber.isEmpty()) {
-                    val addTags = QrScannerFeature.parseEmvTags(addRaw)
-                    accountNumber = QrScannerFeature.extractBdMobile(addTags["02"] ?: addTags["01"] ?: addRaw)
+                    accountNumber = extractNagadAccountNumber(
+                        addTags["02"] ?: addTags["01"] ?: addTags["05"] ?: addRaw
+                    )
+                }
+
+                // মালিকের নাম বা উদ্যোক্তার নাম আলাদাভাবে সংগ্রহ
+                val possibleOwner = (addTags["03"] ?: addTags["06"] ?: addTags["09"] ?: "").trim()
+                if (possibleOwner.isNotEmpty() && !possibleOwner.all { it.isDigit() }) {
+                    ownerName = possibleOwner
                 }
             }
 
+            // শেষ ফলব্যাক: পুরো স্ট্রিং থেকে ১১ ডিজিট নগদ নম্বর খোঁজা
             if (accountNumber.isEmpty()) {
-                accountNumber = QrScannerFeature.extractBdMobile(trimmed)
+                accountNumber = extractNagadAccountNumber(trimmed)
             }
 
-            if (accountNumber.isNotEmpty()) {
+            // রোল নির্ধারণ লজিক
+            if (hasExplicitPersonalTag && !hasExplicitAgentTag && !hasExplicitMerchantTag) {
+                isEncryptedPersonal = true
+                accountRole = "personal"
+            } else if (accountNumber.isNotEmpty()) {
                 accountRole = when {
-                    hasExplicitAgent && !hasExplicitMerchant -> "agent"
-                    hasExplicitMerchant && !hasExplicitAgent -> "merchant"
-                    mcc in AGENT_MCCS -> "agent"
-                    mcc.isNotEmpty() && mcc !in AGENT_MCCS -> "merchant"
+                    hasExplicitAgentTag && !hasExplicitMerchantTag -> "agent"
+                    hasExplicitMerchantTag && !hasExplicitAgentTag -> "merchant"
+                    mcc in NAGAD_AGENT_MCCS -> "agent"
+                    mcc.isNotEmpty() && mcc !in NAGAD_AGENT_MCCS -> "merchant"
                     expectedMode == "cash_out" || context == "mfs_agent" -> "agent"
                     expectedMode == "payment" || context == "mfs_merchant" -> "merchant"
-                    else -> "agent"
+                    else -> "merchant"
                 }
             }
-        } else if (trimmed.startsWith("{") && trimmed.endsWith("}")) {
+        }
+        // ৪. নগদ JSON ফরম্যাট ডিকোডিং
+        else if (trimmed.startsWith("{") && trimmed.endsWith("}")) {
             try {
                 val obj = JSONObject(trimmed)
                 val prov = obj.optString("provider", "").lowercase()
-                if (prov == "nagad") providerExplicitlyMatched = true
-                accountNumber = QrScannerFeature.extractBdMobile(obj.toString())
-                accountName = obj.optString("name", obj.optString("merchantName", ""))
-                val type = obj.optString("type", obj.optString("role", "")).lowercase()
-                accountRole = when {
-                    type.contains("agent") || type.contains("uddokta") -> "agent"
-                    type.contains("merchant") -> "merchant"
-                    expectedMode == "cash_out" || context == "mfs_agent" -> "agent"
-                    expectedMode == "payment" || context == "mfs_merchant" -> "merchant"
-                    else -> "unknown"
+                if (prov == "nagad") isNagadConfirmed = true
+
+                if (isNagadConfirmed) {
+                    accountNumber = extractNagadAccountNumber(
+                        obj.optString("accountNumber", obj.optString("phone", obj.optString("wallet", obj.toString())))
+                    )
+                    storeName = obj.optString("storeName", obj.optString("merchantName", obj.optString("shopName", ""))).trim()
+                    ownerName = obj.optString("ownerName", obj.optString("accountName", obj.optString("name", ""))).trim()
+                    mcc = obj.optString("mcc", "").trim()
+                    amount = obj.optString("amount", "").trim()
+
+                    val typeStr = obj.optString("accountRole", obj.optString("role", obj.optString("type", ""))).lowercase()
+                    when {
+                        typeStr.contains("personal") || obj.optBoolean("isEncrypted", false) -> {
+                            isEncryptedPersonal = true
+                            accountRole = "personal"
+                        }
+                        typeStr.contains("agent") || typeStr.contains("uddokta") -> accountRole = "agent"
+                        typeStr.contains("merchant") -> accountRole = "merchant"
+                    }
                 }
             } catch (_: Exception) {}
-        } else if (providerExplicitlyMatched) {
-            accountNumber = QrScannerFeature.extractBdMobile(trimmed)
+        }
+        // ৫. নগদ URL / Deep-link (`nagad://...` বা `https://...nagad...`) ডিকোডিং
+        else if (lower.startsWith("http://") || lower.startsWith("https://") || lower.startsWith("nagad://")) {
+            if (isNagadConfirmed) {
+                try {
+                    val uri = Uri.parse(trimmed)
+                    val queryAccount = uri.getQueryParameter("account")
+                        ?: uri.getQueryParameter("phone")
+                        ?: uri.getQueryParameter("wallet")
+                        ?: uri.getQueryParameter("msisdn")
+                        ?: trimmed
+                    accountNumber = extractNagadAccountNumber(queryAccount)
+                    storeName = (uri.getQueryParameter("store") ?: uri.getQueryParameter("merchant") ?: "").trim()
+                    ownerName = (uri.getQueryParameter("name") ?: uri.getQueryParameter("owner") ?: "").trim()
+                    amount = (uri.getQueryParameter("amount") ?: "").trim()
+
+                    val pathAndQuery = (uri.path.orEmpty() + " " + uri.query.orEmpty()).lowercase()
+                    when {
+                        pathAndQuery.contains("personal") || pathAndQuery.contains("send") -> {
+                            isEncryptedPersonal = true
+                            accountRole = "personal"
+                        }
+                        pathAndQuery.contains("agent") || pathAndQuery.contains("uddokta") || pathAndQuery.contains("cashout") -> {
+                            accountRole = "agent"
+                        }
+                        pathAndQuery.contains("merchant") || pathAndQuery.contains("pay") -> {
+                            accountRole = "merchant"
+                        }
+                    }
+                } catch (_: Exception) {
+                    accountNumber = extractNagadAccountNumber(trimmed)
+                }
+            }
+        }
+        // ৬. নগদ প্রিফিক্স বা Base64 টোকেন ডিকোডিং
+        else if (isNagadConfirmed) {
+            accountNumber = extractNagadAccountNumber(trimmed)
+            if (accountNumber.isEmpty()) {
+                val decodedBase64 = tryDecodeBase64Text(trimmed)
+                if (decodedBase64.isNotEmpty()) {
+                    accountNumber = extractNagadAccountNumber(decodedBase64)
+                }
+            }
             accountRole = when {
+                lower.contains("personal") -> {
+                    isEncryptedPersonal = true
+                    "personal"
+                }
                 lower.contains("agent") || lower.contains("uddokta") -> "agent"
-                lower.contains("merchant") -> "merchant"
-                expectedMode == "cash_out" || context == "mfs_agent" -> "agent"
-                expectedMode == "payment" || context == "mfs_merchant" -> "merchant"
+                lower.contains("merchant") || lower.contains("pay") -> "merchant"
                 else -> "unknown"
             }
+        }
+
+        // ৭. এনক্রিপ্টেড বা পার্সোনাল নগদ QR ব্লক করা
+        if (isEncryptedPersonal || accountRole == "personal") {
+            return QrDecodeResult(
+                isValid = false,
+                errorMessage = "এটি নগদ পার্সোনাল QR কোড! অনুগ্রহ করে নগদ এজেন্ট বা মার্চেন্ট QR কোড স্ক্যান করুন।",
+                isProviderMatch = true
+            )
         }
 
         if (accountNumber.isEmpty()) {
             return QrDecodeResult(
                 isValid = false,
-                errorMessage = "সঠিক নগদ QR কোড শনাক্ত করা যায়নি অথবা এটি এনক্রিপ্টেড পার্সোনাল QR কোড।",
-                isProviderMatch = providerExplicitlyMatched
+                errorMessage = if (isNagadConfirmed) {
+                    "এটি এনক্রিপ্টেড পার্সোনাল নগদ QR কোড! অনুগ্রহ করে নগদ এজেন্ট বা মার্চেন্ট QR কোড স্ক্যান করুন।"
+                } else {
+                    "সঠিক নগদ QR কোড শনাক্ত করা যায়নি।"
+                },
+                isProviderMatch = isNagadConfirmed
             )
         }
 
+        // ৮. ব্যবহারকারীর নির্বাচিত মোড অনুযায়ী এজেন্ট বনাম মার্চেন্ট যাচাই
         if (expectedMode == "cash_out" || context == "mfs_agent") {
             if (accountRole == "merchant") {
                 return QrDecodeResult(
                     isValid = false,
-                    errorMessage = "এটি নগদ মার্চেন্ট QR কোড! ক্যাশ আউটের জন্য নগদ এজেন্ট QR কোড স্ক্যান করুন।",
+                    errorMessage = "এটি নগদ মার্চেন্ট QR কোড! ক্যাশ আউটের জন্য অনুগ্রহ করে নগদ এজেন্ট QR কোড স্ক্যান করুন।",
                     isProviderMatch = true
                 )
             }
@@ -182,7 +334,7 @@ class NagadQrScannerFeature(
             if (accountRole == "agent") {
                 return QrDecodeResult(
                     isValid = false,
-                    errorMessage = "এটি নগদ এজেন্ট QR কোড! পেমেন্টের জন্য নগদ মার্চেন্ট QR কোড স্ক্যান করুন।",
+                    errorMessage = "এটি নগদ এজেন্ট QR কোড! পেমেন্টের জন্য অনুগ্রহ করে নগদ মার্চেন্ট QR কোড স্ক্যান করুন।",
                     isProviderMatch = true
                 )
             }
@@ -195,17 +347,45 @@ class NagadQrScannerFeature(
             }
         }
 
+        val finalDisplayName = ownerName.ifBlank { storeName }
         val payload = QrScannerFeature.buildStandardPayload(
             provider = "nagad",
             accountNumber = accountNumber,
             rawAccountNumber = accountNumber,
             accountRole = accountRole,
-            accountName = accountName,
-            storeName = accountName,
+            accountName = finalDisplayName,
+            storeName = storeName,
             mcc = mcc,
             amount = amount,
-            rawContent = trimmed
+            rawContent = trimmed,
+            isEncrypted = false,
+            ownerName = ownerName
         )
-        return QrDecodeResult(isValid = true, payloadJson = payload.toString(), isProviderMatch = true)
+
+        return QrDecodeResult(
+            isValid = true,
+            payloadJson = payload.toString(),
+            isProviderMatch = true
+        )
+    }
+
+    private fun extractNagadAccountNumber(text: String): String {
+        if (text.isBlank()) return ""
+        val sanitized = text
+            .replace("+880", "0")
+            .replace("8801", "01")
+            .replace(" ", "")
+            .replace("-", "")
+        return Regex("(01[3-9][0-9]{8})").find(sanitized)?.groupValues?.getOrNull(1) ?: ""
+    }
+
+    private fun tryDecodeBase64Text(input: String): String {
+        return try {
+            val clean = input.substringAfterLast("/").substringAfterLast(":")
+            val decoded = Base64.decode(clean, Base64.DEFAULT)
+            String(decoded, StandardCharsets.UTF_8)
+        } catch (_: Exception) {
+            ""
+        }
     }
 }
