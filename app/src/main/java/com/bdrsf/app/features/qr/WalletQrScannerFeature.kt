@@ -10,7 +10,7 @@ import org.json.JSONObject
 
 /**
  * BDRSF ওয়ালেট সম্পূর্ণ স্বাধীন ডিকোডার ও স্ক্যানার।
- * ওয়ালেটের নিজস্ব JSON, URI, Encrypted টোকেন এবং পার্সোনাল/এজেন্ট/মার্চেন্ট QR কোড ডিকোড করে।
+ * ওয়ালেটের প্লেইন নম্বর, JSON, Deep-Link এবং এনক্রিপ্টেড BDRSF QR টোকেন ডিকোড করে।
  */
 class WalletQrScannerFeature(
     activity: Activity,
@@ -70,88 +70,91 @@ class WalletQrScannerFeature(
                 if (prov != "bdrsf" && prov.isNotEmpty()) {
                     return QrDecodeResult(false, errorMessage = "এটি BDRSF ওয়ালেট QR কোড নয়!")
                 }
-                accountNumber = obj.optString("accountNumber", obj.optString("account", obj.optString("phone", ""))).trim()
-                accountRole = obj.optString("accountRole", obj.optString("role", obj.optString("type", "personal"))).trim().lowercase()
-                accountName = obj.optString("accountName", obj.optString("name", "")).trim()
+                accountNumber = obj.optString(
+                    "accountNumber",
+                    obj.optString("account", obj.optString("account_number", obj.optString("phone", obj.optString("uid", ""))))
+                ).trim()
+                accountRole = obj.optString(
+                    "accountRole",
+                    obj.optString("role", obj.optString("account_type", obj.optString("type", "personal")))
+                ).trim().lowercase()
+                accountName = obj.optString("accountName", obj.optString("name", obj.optString("full_name", ""))).trim()
                 storeName = obj.optString("storeName", accountName).trim()
                 amount = obj.optString("amount", "").trim()
                 isEncrypted = obj.optBoolean("isEncrypted", false)
             } catch (_: Exception) {
                 return QrDecodeResult(false, errorMessage = "অকার্যকর BDRSF QR ফরম্যাট।")
             }
-        } else if (lower.startsWith("bdrsf://") || lower.startsWith("https://bdrfs.com")) {
+        } else if (lower.startsWith("bdrsf://") || lower.startsWith("https://bdrfs.com") || lower.startsWith("https://www.bdrfs.com")) {
             try {
                 val uri = Uri.parse(trimmed)
                 accountNumber = uri.getQueryParameter("account")
+                    ?: uri.getQueryParameter("account_number")
                     ?: uri.getQueryParameter("phone")
-                    ?: extractWalletMobile(trimmed)
+                    ?: uri.getQueryParameter("uid")
+                    ?: QrScannerFeature.extractBdMobile(trimmed)
                 accountRole = (uri.getQueryParameter("role") ?: uri.getQueryParameter("type") ?: "personal").lowercase()
                 accountName = uri.getQueryParameter("name") ?: ""
                 storeName = uri.getQueryParameter("store") ?: accountName
                 amount = uri.getQueryParameter("amount") ?: ""
             } catch (_: Exception) {}
-        } else if (trimmed.startsWith("BDRSF_ENC:", ignoreCase = true)) {
-            isEncrypted = true
-            accountNumber = trimmed
-            accountRole = "personal"
         } else if (trimmed.startsWith("BDRSF:", ignoreCase = true)) {
             val parts = trimmed.split(":")
             if (parts.size >= 3) {
                 accountRole = parts[1].trim().lowercase()
-                accountNumber = extractWalletMobile(parts[2]).ifBlank { parts[2].trim() }
+                accountNumber = QrScannerFeature.extractBdMobile(parts[2]).ifBlank { parts[2].trim() }
                 accountName = parts.getOrNull(3)?.trim() ?: ""
             } else {
-                accountNumber = extractWalletMobile(trimmed)
+                accountNumber = QrScannerFeature.extractBdMobile(trimmed).ifBlank { trimmed }
             }
         } else {
-            accountNumber = extractWalletMobile(trimmed)
+            val mobile = QrScannerFeature.extractBdMobile(trimmed)
+            if (mobile.isNotEmpty()) {
+                accountNumber = mobile
+            } else if (!trimmed.contains(" ") && trimmed.length >= 6) {
+                // এনক্রিপ্টেড BDRSF ওয়ালেট QR টোকেন (যেমন CryptoJS AES 'U2FsdGVkX1...')
+                isEncrypted = true
+                accountNumber = trimmed
+                accountRole = when {
+                    expectedMode == "cash_out" || context == "wallet_agent" -> "agent"
+                    expectedMode == "payment" || context == "wallet_merchant" -> "merchant"
+                    else -> "personal"
+                }
+            }
         }
 
         if (accountNumber.isEmpty()) {
             return QrDecodeResult(false, errorMessage = "সঠিক BDRSF ওয়ালেট QR কোড শনাক্ত করা যায়নি।")
         }
 
-        if (expectedMode == "cash_out" || context == "wallet_agent") {
-            if (accountRole != "agent") {
-                return QrDecodeResult(false, errorMessage = "এটি ওয়ালেট এজেন্ট QR কোড নয়! ক্যাশ আউটের জন্য অনুগ্রহ করে ওয়ালেট এজেন্ট QR কোড স্ক্যান করুন।")
-            }
-        } else if (expectedMode == "payment" || context == "wallet_merchant") {
-            if (accountRole != "merchant") {
-                return QrDecodeResult(false, errorMessage = "এটি ওয়ালেট মার্চেন্ট QR কোড নয়! পেমেন্টের জন্য অনুগ্রহ করে ওয়ালেট মার্চেন্ট QR কোড স্ক্যান করুন।")
-            }
-        } else if (expectedMode == "cash_in" || expectedMode == "send_money" || context == "wallet_personal") {
-            if (accountRole == "agent" || accountRole == "merchant") {
-                return QrDecodeResult(false, errorMessage = "এটি পার্সোনাল ওয়ালেট QR কোড নয়! অনুগ্রহ করে পার্সোনাল ওয়ালেট QR কোড স্ক্যান করুন।")
+        if (!isEncrypted) {
+            if (expectedMode == "cash_out" || context == "wallet_agent") {
+                if (accountRole != "agent") {
+                    return QrDecodeResult(false, errorMessage = "এটি ওয়ালেট এজেন্ট QR কোড নয়! ক্যাশ আউটের জন্য অনুগ্রহ করে ওয়ালেট এজেন্ট QR কোড স্ক্যান করুন।")
+                }
+            } else if (expectedMode == "payment" || context == "wallet_merchant") {
+                if (accountRole != "merchant") {
+                    return QrDecodeResult(false, errorMessage = "এটি ওয়ালেট মার্চেন্ট QR কোড নয়! পেমেন্টের জন্য অনুগ্রহ করে ওয়ালেট মার্চেন্ট QR কোড স্ক্যান করুন।")
+                }
+            } else if (expectedMode == "cash_in" || expectedMode == "send_money" || context == "wallet_personal") {
+                if (accountRole == "agent" || accountRole == "merchant") {
+                    return QrDecodeResult(false, errorMessage = "এটি পার্সোনাল ওয়ালেট QR কোড নয়! অনুগ্রহ করে পার্সোনাল ওয়ালেট QR কোড স্ক্যান করুন।")
+                }
             }
         }
 
-        val json = JSONObject().apply {
-            put("isSupported", true)
-            put("isEncrypted", isEncrypted)
-            put("provider", "bdrsf")
-            put("accountNumber", accountNumber)
-            put("rawAccountNumber", accountNumber)
-            put("accountRole", accountRole)
-            put("isAgent", accountRole == "agent")
-            put("isMerchant", accountRole == "merchant")
-            put("suggestedAction", when (accountRole) {
-                "agent" -> "cash_out"
-                "merchant" -> "payment"
-                else -> "send_money"
-            })
-            put("accountName", accountName)
-            put("storeName", storeName)
-            put("ownerName", accountName)
-            put("mcc", "")
-            put("amount", amount)
-            put("rawContent", trimmed)
-            put("message", "")
-        }
-        return QrDecodeResult(isValid = true, payloadJson = json.toString())
-    }
-
-    private fun extractWalletMobile(text: String): String {
-        val clean = text.replace("+88", "").replace(" ", "").replace("-", "")
-        return Regex("(01[3-9][0-9]{8})").find(clean)?.groupValues?.getOrNull(1) ?: ""
+        val payload = QrScannerFeature.buildStandardPayload(
+            provider = "bdrsf",
+            accountNumber = accountNumber,
+            rawAccountNumber = accountNumber,
+            accountRole = accountRole,
+            accountName = accountName,
+            storeName = storeName,
+            mcc = "",
+            amount = amount,
+            rawContent = trimmed,
+            isEncrypted = isEncrypted
+        )
+        return QrDecodeResult(isValid = true, payloadJson = payload.toString())
     }
 }
