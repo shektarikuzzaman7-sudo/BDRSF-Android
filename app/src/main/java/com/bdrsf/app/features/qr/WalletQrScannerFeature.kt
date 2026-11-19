@@ -40,25 +40,29 @@ class WalletQrScannerFeature(
     ): QrDecodeResult {
         val trimmed = rawContent.trim()
         if (trimmed.isEmpty()) {
-            return QrDecodeResult(false, errorMessage = "খালি QR কোড পাওয়া গেছে।")
+            return QrDecodeResult(isValid = false, errorMessage = "খালি QR কোড পাওয়া গেছে।", isProviderMatch = false)
         }
 
         val lower = trimmed.lowercase()
         if (trimmed.startsWith("000201") ||
             lower.contains("bkash") ||
+            lower.contains("bka.sh") ||
             lower.contains("nagad") ||
             lower.contains("rocket") ||
-            lower.contains("upay")
+            lower.contains("dbbl") ||
+            lower.contains("upay") ||
+            lower.contains("ucb")
         ) {
             return QrDecodeResult(
                 isValid = false,
-                errorMessage = "এটি থার্ড-পার্টি MFS QR কোড! অনুগ্রহ করে BDRSF ওয়ালেট QR কোড স্ক্যান করুন।"
+                errorMessage = "এটি থার্ড-পার্টি MFS QR কোড! অনুগ্রহ করে BDRSF ওয়ালেট QR কোড স্ক্যান করুন।",
+                isProviderMatch = false
             )
         }
 
         var accountNumber = ""
         var accountRole = "personal"
-        var accountName = ""
+        var ownerName = ""
         var storeName = ""
         var amount = ""
         var isEncrypted = false
@@ -68,7 +72,7 @@ class WalletQrScannerFeature(
                 val obj = JSONObject(trimmed)
                 val prov = obj.optString("provider", "bdrsf").lowercase()
                 if (prov != "bdrsf" && prov.isNotEmpty()) {
-                    return QrDecodeResult(false, errorMessage = "এটি BDRSF ওয়ালেট QR কোড নয়!")
+                    return QrDecodeResult(isValid = false, errorMessage = "এটি BDRSF ওয়ালেট QR কোড নয়!", isProviderMatch = false)
                 }
                 accountNumber = obj.optString(
                     "accountNumber",
@@ -78,12 +82,12 @@ class WalletQrScannerFeature(
                     "accountRole",
                     obj.optString("role", obj.optString("account_type", obj.optString("type", "personal")))
                 ).trim().lowercase()
-                accountName = obj.optString("accountName", obj.optString("name", obj.optString("full_name", ""))).trim()
-                storeName = obj.optString("storeName", accountName).trim()
+                ownerName = obj.optString("ownerName", obj.optString("accountName", obj.optString("name", obj.optString("full_name", "")))).trim()
+                storeName = obj.optString("storeName", obj.optString("shopName", "")).trim()
                 amount = obj.optString("amount", "").trim()
                 isEncrypted = obj.optBoolean("isEncrypted", false)
             } catch (_: Exception) {
-                return QrDecodeResult(false, errorMessage = "অকার্যকর BDRSF QR ফরম্যাট।")
+                return QrDecodeResult(isValid = false, errorMessage = "অকার্যকর BDRSF QR ফরম্যাট।", isProviderMatch = false)
             }
         } else if (lower.startsWith("bdrsf://") || lower.startsWith("https://bdrfs.com") || lower.startsWith("https://www.bdrfs.com")) {
             try {
@@ -94,8 +98,8 @@ class WalletQrScannerFeature(
                     ?: uri.getQueryParameter("uid")
                     ?: QrScannerFeature.extractBdMobile(trimmed)
                 accountRole = (uri.getQueryParameter("role") ?: uri.getQueryParameter("type") ?: "personal").lowercase()
-                accountName = uri.getQueryParameter("name") ?: ""
-                storeName = uri.getQueryParameter("store") ?: accountName
+                ownerName = uri.getQueryParameter("name") ?: ""
+                storeName = uri.getQueryParameter("store") ?: ""
                 amount = uri.getQueryParameter("amount") ?: ""
             } catch (_: Exception) {}
         } else if (trimmed.startsWith("BDRSF:", ignoreCase = true)) {
@@ -103,7 +107,8 @@ class WalletQrScannerFeature(
             if (parts.size >= 3) {
                 accountRole = parts[1].trim().lowercase()
                 accountNumber = QrScannerFeature.extractBdMobile(parts[2]).ifBlank { parts[2].trim() }
-                accountName = parts.getOrNull(3)?.trim() ?: ""
+                ownerName = parts.getOrNull(3)?.trim() ?: ""
+                storeName = parts.getOrNull(4)?.trim() ?: ""
             } else {
                 accountNumber = QrScannerFeature.extractBdMobile(trimmed).ifBlank { trimmed }
             }
@@ -112,7 +117,6 @@ class WalletQrScannerFeature(
             if (mobile.isNotEmpty()) {
                 accountNumber = mobile
             } else if (!trimmed.contains(" ") && trimmed.length >= 6) {
-                // এনক্রিপ্টেড BDRSF ওয়ালেট QR টোকেন (যেমন CryptoJS AES 'U2FsdGVkX1...')
                 isEncrypted = true
                 accountNumber = trimmed
                 accountRole = when {
@@ -124,21 +128,33 @@ class WalletQrScannerFeature(
         }
 
         if (accountNumber.isEmpty()) {
-            return QrDecodeResult(false, errorMessage = "সঠিক BDRSF ওয়ালেট QR কোড শনাক্ত করা যায়নি।")
+            return QrDecodeResult(isValid = false, errorMessage = "সঠিক BDRSF ওয়ালেট QR কোড শনাক্ত করা যায়নি।", isProviderMatch = false)
         }
 
         if (!isEncrypted) {
             if (expectedMode == "cash_out" || context == "wallet_agent") {
                 if (accountRole != "agent") {
-                    return QrDecodeResult(false, errorMessage = "এটি ওয়ালেট এজেন্ট QR কোড নয়! ক্যাশ আউটের জন্য অনুগ্রহ করে ওয়ালেট এজেন্ট QR কোড স্ক্যান করুন।")
+                    return QrDecodeResult(
+                        isValid = false,
+                        errorMessage = "এটি ওয়ালেট এজেন্ট QR কোড নয়! ক্যাশ আউটের জন্য অনুগ্রহ করে ওয়ালেট এজেন্ট QR কোড স্ক্যান করুন।",
+                        isProviderMatch = true
+                    )
                 }
             } else if (expectedMode == "payment" || context == "wallet_merchant") {
                 if (accountRole != "merchant") {
-                    return QrDecodeResult(false, errorMessage = "এটি ওয়ালেট মার্চেন্ট QR কোড নয়! পেমেন্টের জন্য অনুগ্রহ করে ওয়ালেট মার্চেন্ট QR কোড স্ক্যান করুন।")
+                    return QrDecodeResult(
+                        isValid = false,
+                        errorMessage = "এটি ওয়ালেট মার্চেন্ট QR কোড নয়! পেমেন্টের জন্য অনুগ্রহ করে ওয়ালেট মার্চেন্ট QR কোড স্ক্যান করুন।",
+                        isProviderMatch = true
+                    )
                 }
             } else if (expectedMode == "cash_in" || expectedMode == "send_money" || context == "wallet_personal") {
                 if (accountRole == "agent" || accountRole == "merchant") {
-                    return QrDecodeResult(false, errorMessage = "এটি পার্সোনাল ওয়ালেট QR কোড নয়! অনুগ্রহ করে পার্সোনাল ওয়ালেট QR কোড স্ক্যান করুন।")
+                    return QrDecodeResult(
+                        isValid = false,
+                        errorMessage = "এটি পার্সোনাল ওয়ালেট QR কোড নয়! অনুগ্রহ করে পার্সোনাল ওয়ালেট QR কোড স্ক্যান করুন।",
+                        isProviderMatch = true
+                    )
                 }
             }
         }
@@ -148,13 +164,13 @@ class WalletQrScannerFeature(
             accountNumber = accountNumber,
             rawAccountNumber = accountNumber,
             accountRole = accountRole,
-            accountName = accountName,
             storeName = storeName,
+            ownerName = ownerName,
             mcc = "",
             amount = amount,
             rawContent = trimmed,
             isEncrypted = isEncrypted
         )
-        return QrDecodeResult(isValid = true, payloadJson = payload.toString())
+        return QrDecodeResult(isValid = true, payloadJson = payload.toString(), isProviderMatch = true)
     }
 }
