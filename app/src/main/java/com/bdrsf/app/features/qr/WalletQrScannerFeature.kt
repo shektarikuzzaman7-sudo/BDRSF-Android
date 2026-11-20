@@ -10,7 +10,7 @@ import org.json.JSONObject
 
 /**
  * BDRSF ওয়ালেট সম্পূর্ণ স্বাধীন ডিকোডার ও স্ক্যানার।
- * ওয়ালেটের প্লেইন নম্বর, JSON, Deep-Link এবং এনক্রিপ্টেড BDRSF QR টোকেন ডিকোড করে।
+ * ওয়ালেটের প্লেইন নম্বর, JSON, Deep-Link এবং সার্ভার-সাইড AES-256 এনক্রিপ্টেড BDRSF-QR টোকেন শনাক্ত করে।
  */
 class WalletQrScannerFeature(
     activity: Activity,
@@ -29,7 +29,7 @@ class WalletQrScannerFeature(
             mode == "cash_in" || mode == "send_money" || context == "wallet_personal" ->
                 "ফ্রেমের ভেতরে পার্সোনাল ওয়ালেট QR কোড রাখুন"
             else ->
-                "ফ্রেমের ভেতরে পার্সোনাল ওয়ালেট QR কোড রাখুন"
+                "ফ্রেমের ভেতরে BDRSF ওয়ালেট QR কোড রাখুন"
         }
     }
 
@@ -58,6 +58,33 @@ class WalletQrScannerFeature(
                 errorMessage = "এটি থার্ড-পার্টি MFS QR কোড! অনুগ্রহ করে BDRSF ওয়ালেট QR কোড স্ক্যান করুন।",
                 isProviderMatch = false
             )
+        }
+
+        // ১. সার্ভার-সাইনড ও AES-256-GCM এনক্রিপ্টেড BDRSF-QR টোকেন শনাক্তকরণ
+        if (trimmed.startsWith("BDRSF-QR:", ignoreCase = false)) {
+            val tokenBody = trimmed.substringAfter("BDRSF-QR:").trim()
+            if (tokenBody.length < 40 || tokenBody.contains(" ")) {
+                return QrDecodeResult(
+                    isValid = false,
+                    errorMessage = "অকার্যকর বা অসম্পূর্ণ BDRSF এনক্রিপ্টেড QR টোকেন।",
+                    isProviderMatch = true
+                )
+            }
+
+            val payload = QrScannerFeature.buildStandardPayload(
+                provider = "bdrsf",
+                accountNumber = "",
+                rawAccountNumber = "",
+                accountRole = "encrypted_token",
+                storeName = "",
+                ownerName = "",
+                mcc = "",
+                amount = "",
+                rawContent = trimmed,
+                isEncrypted = true,
+                overrideAction = "resolve_server_token"
+            )
+            return QrDecodeResult(isValid = true, payloadJson = payload.toString(), isProviderMatch = true)
         }
 
         var accountNumber = ""
@@ -89,7 +116,7 @@ class WalletQrScannerFeature(
             } catch (_: Exception) {
                 return QrDecodeResult(isValid = false, errorMessage = "অকার্যকর BDRSF QR ফরম্যাট।", isProviderMatch = false)
             }
-        } else if (lower.startsWith("bdrsf://") || lower.startsWith("https://bdrfs.com") || lower.startsWith("https://www.bdrfs.com")) {
+        } else if (lower.startsWith("bdrsf://") || lower.startsWith("https://bdrsf.com") || lower.startsWith("https://www.bdrsf.com") || lower.startsWith("https://bdrfs.com")) {
             try {
                 val uri = Uri.parse(trimmed)
                 accountNumber = uri.getQueryParameter("account")
