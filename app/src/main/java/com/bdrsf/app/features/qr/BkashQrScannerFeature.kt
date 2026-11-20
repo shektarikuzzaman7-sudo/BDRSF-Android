@@ -21,10 +21,6 @@ class BkashQrScannerFeature(
     bridge: AndroidBridge
 ) : BaseQrScannerFeature(activity, rootContainer, bridge) {
 
-    companion object {
-        private val BKASH_AGENT_MCCS = setOf("0000", "4829", "6010", "6011", "6012")
-    }
-
     override fun getHudAccentColor(): Int = Color.parseColor("#E2136E")
 
     override fun getDefaultPromptText(mode: String, context: String): String {
@@ -84,6 +80,12 @@ class BkashQrScannerFeature(
 
         // ১. EMVCo / Bangla QR (`000201...`) ডিকোডিং
         if (trimmed.startsWith("000201")) {
+            if (QrScannerFeature.isBanglaQrPayload(trimmed)) {
+                return QrDecodeResult(false, errorMessage = "Bangla QR শনাক্ত হয়েছে, কিন্তু BDRSF-এ Bangla QR/NPSB লেনদেন সংযুক্ত নেই। ভুল অ্যাকাউন্টে লেনদেন এড়াতে QR গ্রহণ করা হয়নি।", isProviderMatch = true)
+            }
+            if (!QrScannerFeature.hasValidEmvCrc(trimmed)) {
+                return QrDecodeResult(false, errorMessage = "QR কোডের CRC যাচাই ব্যর্থ হয়েছে। নতুন QR স্ক্যান করুন।", isProviderMatch = false)
+            }
             val rootTags = QrScannerFeature.parseEmvTags(trimmed)
             // Tag 59 = ব্যবসা প্রতিষ্ঠান / মার্চেন্ট / এজেন্ট স্টোরের নাম
             storeName = (rootTags["59"] ?: "").trim()
@@ -116,17 +118,16 @@ class BkashQrScannerFeature(
                         accountNumber = mobile
                     }
                 }
-                if (accountNumber.isEmpty()) {
+if (accountNumber.isEmpty()) {
                     val fallbackMobile = extractBkashMobile(subData)
                     if (fallbackMobile.isNotEmpty()) accountNumber = fallbackMobile
                 }
 
                 // রোল ডিটেকশন (শুধুমাত্র সুনির্দিষ্ট সাব-ট্যাগ কোড থেকে)
-                val roleCode = (subTags["03"] ?: "").trim().uppercase()
                 val subTokens = listOf(subTags["02"], subTags["03"], subTags["04"]).joinToString(" ").lowercase()
-                if (roleCode == "AG" || roleCode == "02" || subTokens.contains("agent")) {
+                if (subTokens.contains("agent")) {
                     hasExplicitAgentTag = true
-                } else if (roleCode == "MR" || roleCode == "03" || subTokens.contains("merchant")) {
+                } else if (subTokens.contains("merchant")) {
                     hasExplicitMerchantTag = true
                 }
             }
@@ -161,11 +162,7 @@ class BkashQrScannerFeature(
                 accountRole = when {
                     hasExplicitAgentTag && !hasExplicitMerchantTag -> "agent"
                     hasExplicitMerchantTag && !hasExplicitAgentTag -> "merchant"
-                    mcc in BKASH_AGENT_MCCS -> "agent"
-                    mcc.isNotEmpty() && mcc !in BKASH_AGENT_MCCS -> "merchant"
-                    expectedMode == "cash_out" || context == "mfs_agent" -> "agent"
-                    expectedMode == "payment" || context == "mfs_merchant" -> "merchant"
-                    else -> "merchant"
+                    else -> "unknown"
                 }
             }
         }
@@ -228,6 +225,10 @@ class BkashQrScannerFeature(
                 lower.contains("merchant") || lower.contains("pay") -> "merchant"
                 else -> "unknown"
             }
+        }
+
+        if (!isBkashConfirmed) {
+            return QrDecodeResult(false, errorMessage = "Provider signature was not identified; QR rejected.", isProviderMatch = false)
         }
 
         if (accountNumber.isEmpty()) {
