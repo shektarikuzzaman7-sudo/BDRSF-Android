@@ -1,6 +1,7 @@
 plugins {
     id("com.android.application")
     id("org.jetbrains.kotlin.android")
+    id("com.google.gms.google-services")
 }
 
 android {
@@ -40,6 +41,10 @@ dependencies {
     implementation("androidx.appcompat:appcompat:1.7.0")
     implementation("com.google.android.material:material:1.12.0")
     implementation("androidx.exifinterface:exifinterface:1.3.7")
+
+    // Firebase Cloud Messaging (পুশ নোটিফিকেশনের জন্য)
+    implementation(platform("com.google.firebase:firebase-bom:33.7.0"))
+    implementation("com.google.firebase:firebase-messaging")
 
     // Google ML Kit: বারকোড স্ক্যানার (PDF417, QR Code, Code 128 ইত্যাদি)
     implementation("com.google.mlkit:barcode-scanning:17.3.0")
