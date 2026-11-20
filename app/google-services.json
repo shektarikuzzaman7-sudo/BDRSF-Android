@@ -1,0 +1,29 @@
+{
+  "project_info": {
+    "project_number": "147801919978",
+    "project_id": "bdrsf-network",
+    "storage_bucket": "bdrsf-network.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:147801919978:android:c9880452e78cb6310da293",
+        "android_client_info": {
+          "package_name": "com.bdrsf.app"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyCjUVzt6IeNzcXWRmExw5q7hPz423nd-Ws"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}
