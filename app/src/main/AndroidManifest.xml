@@ -6,6 +6,9 @@
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
 
+    <!-- পুশ নোটিফিকেশন পারমিশন (Android 13+) -->
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+
     <!-- ক্যামেরা ও হার্ডওয়্যার ফিচার পারমিশন -->
     <uses-permission android:name="android.permission.CAMERA" />
     <uses-feature
@@ -55,6 +58,19 @@
         android:usesCleartextTraffic="false"
         tools:targetApi="35">
 
+        <meta-data
+            android:name="com.google.firebase.messaging.default_notification_channel_id"
+            android:value="bdrsf_live_alerts" />
+
+        <meta-data
+            android:name="com.google.firebase.messaging.default_notification_icon"
+            android:resource="@drawable/ic_launcher" />
+
+        <meta-data
+            android:name="com.google.firebase.messaging.default_notification_color"
+            android:resource="@color/purple_500"
+            tools:replace="android:resource" />
+
         <activity
             android:name=".MainActivity"
             android:configChanges="orientation|screenSize|keyboardHidden"
@@ -67,6 +83,14 @@
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
         </activity>
+
+        <service
+            android:name=".services.BdrsfFirebaseMessagingService"
+            android:exported="false">
+            <intent-filter>
+                <action android:name="com.google.firebase.MESSAGING_EVENT" />
+            </intent-filter>
+        </service>
 
         <!-- ফাইল ও ক্যামেরা ফটো আপলোডের জন্য FileProvider -->
         <provider
