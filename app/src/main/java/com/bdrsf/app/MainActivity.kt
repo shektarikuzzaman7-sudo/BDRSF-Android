@@ -1,8 +1,14 @@
 // File: app/src/main/java/com/bdrsf/app/MainActivity.kt
 package com.bdrsf.app
 
+import android.Manifest
+import android.annotation.SuppressLint
+import android.content.BroadcastReceiver
+import android.content.Context
 import android.content.Intent
+import android.content.IntentFilter
 import android.content.pm.ActivityInfo
+import android.content.pm.PackageManager
 import android.graphics.Color
 import android.graphics.PorterDuff
 import android.net.Uri
@@ -20,8 +26,10 @@ import android.widget.ProgressBar
 import android.widget.RelativeLayout
 import android.widget.Toast
 import androidx.activity.OnBackPressedCallback
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AlertDialog
 import androidx.appcompat.app.AppCompatActivity
+import androidx.core.content.ContextCompat
 import androidx.core.view.ViewCompat
 import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
@@ -39,9 +47,11 @@ import com.bdrsf.app.features.document.PassportProcessorFeature
 import com.bdrsf.app.features.download.DownloadFeature
 import com.bdrsf.app.features.qr.QrScannerFeature
 import com.bdrsf.app.features.share.ShareFeature
+import com.bdrsf.app.services.BdrsfFirebaseMessagingService
 import com.bdrsf.app.utils.PermissionHelper
 import com.bdrsf.app.webview.NativeWebChromeClient
 import com.bdrsf.app.webview.NativeWebViewClient
+import com.google.firebase.messaging.FirebaseMessaging
 import org.json.JSONObject
 
 class MainActivity : AppCompatActivity(), AndroidBridge.BridgeActionHandler {
@@ -68,6 +78,24 @@ class MainActivity : AppCompatActivity(), AndroidBridge.BridgeActionHandler {
 
     private var pendingGalleryQrCallback: String? = null
     private var lastBackPressTime: Long = 0L
+    private var isTokenReceiverRegistered = false
+
+    private val notificationPermissionLauncher =
+        registerForActivityResult(ActivityResultContracts.RequestPermission()) { _ ->
+            fetchAndSyncFcmToken()
+        }
+
+    private val newTokenReceiver = object : BroadcastReceiver() {
+        override fun onReceive(context: Context?, intent: Intent?) {
+            if (intent?.action == "com.bdrsf.app.ACTION_NEW_FCM_TOKEN") {
+                val token = intent.getStringExtra("fcm_token").orEmpty()
+                if (token.isNotBlank()) {
+                    BdrsfFirebaseMessagingService.saveTokenLocally(applicationContext, token)
+                    pushTokenToWebView(token)
+                }
+            }
+        }
+    }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -79,9 +107,82 @@ class MainActivity : AppCompatActivity(), AndroidBridge.BridgeActionHandler {
         initFeatures()
         setupWebView()
         setupBackNavigation()
+        registerFcmTokenReceiver()
 
         PermissionHelper.requestAllInitialPermissions(this)
-        webView.loadUrl(WebAppConfig.BASE_URL)
+        requestNotificationPermissionIfNeeded()
+
+        val initialUrl = intent?.getStringExtra("fcm_target_url")?.takeIf { it.isNotBlank() }
+            ?: WebAppConfig.BASE_URL
+        webView.loadUrl(initialUrl)
+    }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        val targetUrl = intent.getStringExtra("fcm_target_url")?.takeIf { it.isNotBlank() }
+        if (!targetUrl.isNullOrBlank() && ::webView.isInitialized) {
+            webView.loadUrl(targetUrl)
+        }
+    }
+
+    @SuppressLint("UnspecifiedRegisterReceiverFlag")
+    private fun registerFcmTokenReceiver() {
+        if (isTokenReceiverRegistered) return
+        val filter = IntentFilter("com.bdrsf.app.ACTION_NEW_FCM_TOKEN")
+        try {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                registerReceiver(newTokenReceiver, filter, Context.RECEIVER_NOT_EXPORTED)
+            } else {
+                registerReceiver(newTokenReceiver, filter)
+            }
+            isTokenReceiverRegistered = true
+        } catch (_: Exception) {}
+    }
+
+    private fun requestNotificationPermissionIfNeeded() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            val granted = ContextCompat.checkSelfPermission(
+                this,
+                Manifest.permission.POST_NOTIFICATIONS
+            ) == PackageManager.PERMISSION_GRANTED
+            if (!granted) {
+                notificationPermissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
+                return
+            }
+        }
+        fetchAndSyncFcmToken()
+    }
+
+    private fun fetchAndSyncFcmToken() {
+        val saved = BdrsfFirebaseMessagingService.getSavedToken(applicationContext)
+        if (!saved.isNullOrBlank()) {
+            pushTokenToWebView(saved)
+        }
+
+        try {
+            FirebaseMessaging.getInstance().token.addOnCompleteListener { task ->
+                if (!task.isSuccessful) return@addOnCompleteListener
+                val token = task.result?.trim().orEmpty()
+                if (token.isNotEmpty()) {
+                    BdrsfFirebaseMessagingService.saveTokenLocally(applicationContext, token)
+                    pushTokenToWebView(token)
+                }
+            }
+        } catch (_: Exception) {}
+    }
+
+    private fun pushTokenToWebView(token: String) {
+        if (!::webView.isInitialized || token.isBlank()) return
+        val escaped = JSONObject.quote(token)
+        runOnUiThread {
+            try {
+                webView.evaluateJavascript(
+                    "(function(){ if (typeof window.bdrsfSyncFcmTokenToServer === 'function') { window.bdrsfSyncFcmTokenToServer($escaped); } })();",
+                    null
+                )
+            } catch (_: Exception) {}
+        }
     }
 
     private fun setupSystemWindows() {
@@ -187,6 +288,10 @@ class MainActivity : AppCompatActivity(), AndroidBridge.BridgeActionHandler {
                         }
                     }
                     WebAppConfig.syncCookies()
+                    val token = BdrsfFirebaseMessagingService.getSavedToken(applicationContext)
+                    if (!token.isNullOrBlank()) {
+                        pushTokenToWebView(token)
+                    }
                 }
             }
         )
@@ -435,6 +540,12 @@ class MainActivity : AppCompatActivity(), AndroidBridge.BridgeActionHandler {
 
     override fun onDestroy() {
         super.onDestroy()
+        if (isTokenReceiverRegistered) {
+            try {
+                unregisterReceiver(newTokenReceiver)
+            } catch (_: Exception) {}
+            isTokenReceiverRegistered = false
+        }
         WebAppConfig.syncCookies()
         qrScannerFeature.destroy()
         documentScannerFeature.destroy()
