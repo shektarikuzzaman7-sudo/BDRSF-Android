@@ -10,6 +10,7 @@ import android.webkit.JavascriptInterface
 import android.webkit.WebView
 import com.bdrsf.app.bridge.WebBridgeContract.Actions
 import com.bdrsf.app.bridge.WebBridgeContract.BridgeResponse
+import com.bdrsf.app.services.BdrsfFirebaseMessagingService
 import org.json.JSONObject
 
 /**
@@ -91,8 +92,17 @@ class AndroidBridge(
     }
 
     // ---------------------------------------------------------------------------------------------
-    // bdrsf-bridge.js এর সরাসরি ফলব্যাক মেথডসমূহ
+    // bdrsf-bridge.js এর সরাসরি ফলব্যাক ও FCM টোকেন মেথডসমূহ
     // ---------------------------------------------------------------------------------------------
+
+    @JavascriptInterface
+    fun getFcmToken(): String {
+        return try {
+            BdrsfFirebaseMessagingService.getSavedToken(activity.applicationContext) ?: ""
+        } catch (_: Exception) {
+            ""
+        }
+    }
 
     @JavascriptInterface
     fun startNativeMLKitScanner() {
@@ -159,6 +169,11 @@ class AndroidBridge(
 
     fun sendQrErrorToWeb(errorCallbackFunction: String?, errorMessage: String) {
         val script = WebBridgeContract.buildQrErrorScripts(errorCallbackFunction, errorMessage)
+        evaluateJavascript(script)
+    }
+
+    fun sendPushAlertToWeb(title: String, message: String, type: String = "info") {
+        val script = WebBridgeContract.buildPushAlertScript(title, message, type)
         evaluateJavascript(script)
     }
 
