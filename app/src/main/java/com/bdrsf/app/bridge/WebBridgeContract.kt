@@ -19,6 +19,7 @@ object WebBridgeContract {
         const val SHARE_CONTENT = "SHARE_CONTENT"
         const val OPEN_EXTERNAL_URL = "OPEN_EXTERNAL_URL"
         const val GET_APP_INFO = "GET_APP_INFO"
+        const val GET_FCM_TOKEN = "GET_FCM_TOKEN"
         const val CLEAR_WEBVIEW_HISTORY = "CLEAR_WEBVIEW_HISTORY"
         const val HANDLE_BACK_PRESS = "HANDLE_BACK_PRESS"
         const val SET_SYSTEM_BARS = "SET_SYSTEM_BARS"
@@ -78,8 +79,27 @@ object WebBridgeContract {
     }
 
     /**
+     * নেটিভ পুশ নোটিফিকেশন এলে ওয়েবভিউতে লাইভ অ্যালার্ট ও সিঙ্ক ট্রিগার করে
+     */
+    fun buildPushAlertScript(title: String, message: String, type: String = "info"): String {
+        val safeTitle = escapeJsString(title)
+        val safeMsg = escapeJsString(message)
+        val safeType = escapeJsString(type)
+        return """
+            (function() {
+                try {
+                    if (typeof window.onNativePushReceived === 'function') {
+                        window.onNativePushReceived('$safeTitle', '$safeMsg', '$safeType');
+                    }
+                } catch(e) {
+                    console.error('[Push Alert Dispatch Error]', e);
+                }
+            })();
+        """.trimIndent()
+    }
+
+    /**
      * কিউআর স্ক্যান সফল হওয়ার গ্লোবাল লিসেনার স্ক্রিপ্ট বিল্ডার
-     * bdrsf-bridge.js এর window.processScannedData, window.onNativeQrScanned এবং window.onQrScanned কে সিঙ্ক করে।
      */
     fun buildQrSuccessScripts(callbackName: String?, scannedContent: String): String {
         val safeText = escapeJsString(scannedContent)
