@@ -1,5 +1,6 @@
 package com.bdrsf.app.services
 
+import android.app.ActivityManager
 import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.PendingIntent
@@ -12,6 +13,7 @@ import com.bdrsf.app.MainActivity
 import com.bdrsf.app.R
 import com.google.firebase.messaging.FirebaseMessagingService
 import com.google.firebase.messaging.RemoteMessage
+import org.json.JSONObject
 
 class BdrsfFirebaseMessagingService : FirebaseMessagingService() {
 
@@ -29,6 +31,21 @@ class BdrsfFirebaseMessagingService : FirebaseMessagingService() {
             if (token.isBlank()) return
             val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
             prefs.edit().putString(KEY_FCM_TOKEN, token).apply()
+        }
+
+        fun isAppInForeground(context: Context): Boolean {
+            return try {
+                val activityManager =
+                    context.getSystemService(Context.ACTIVITY_SERVICE) as? ActivityManager
+                        ?: return false
+                val processes = activityManager.runningAppProcesses ?: return false
+                processes.any {
+                    it.processName == context.packageName &&
+                        it.importance == ActivityManager.RunningAppProcessInfo.IMPORTANCE_FOREGROUND
+                }
+            } catch (_: Exception) {
+                false
+            }
         }
     }
 
@@ -51,16 +68,28 @@ class BdrsfFirebaseMessagingService : FirebaseMessagingService() {
         val dataPayload = remoteMessage.data
         val title = remoteMessage.notification?.title
             ?: dataPayload["title"]
-            ?: "BDRSF Live Alert"
+            ?: "BDRSF Alert"
 
         val body = remoteMessage.notification?.body
             ?: dataPayload["message"]
             ?: dataPayload["body"]
-            ?: "আপনার অ্যাকাউন্টে নতুন আপডেট এসেছে।"
+            ?: ""
 
+        val pushType = dataPayload["type"] ?: "info"
         val targetUrl = dataPayload["url"]
             ?: dataPayload["link_url"]
             ?: ""
+
+        if (isAppInForeground(applicationContext)) {
+            val liveIntent = Intent("com.bdrsf.app.ACTION_LIVE_PUSH_EVENT").apply {
+                setPackage(applicationContext.packageName)
+                putExtra("title", title)
+                putExtra("message", body)
+                putExtra("type", pushType)
+            }
+            applicationContext.sendBroadcast(liveIntent)
+            return
+        }
 
         showSystemNotification(title, body, targetUrl)
     }
@@ -115,5 +144,13 @@ class BdrsfFirebaseMessagingService : FirebaseMessagingService() {
             .setContentIntent(pendingIntent)
 
         notificationManager.notify(requestCode, builder.build())
+    }
+
+    fun buildWebAlertPayload(title: String, message: String, type: String): String {
+        return JSONObject().apply {
+            put("title", title)
+            put("message", message)
+            put("type", type)
+        }.toString()
     }
 }
