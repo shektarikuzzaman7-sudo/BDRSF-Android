@@ -8,6 +8,7 @@ import android.graphics.Color
 import android.view.ViewGroup
 import com.bdrsf.app.bridge.AndroidBridge
 import org.json.JSONObject
+import java.nio.charset.StandardCharsets
 
 /**
  * BDRSF-Android সার্বজনীন QR রাউটার ও কো-অর্ডিনেটর।
@@ -36,6 +37,67 @@ class QrScannerFeature(
                 i = end
             }
             return result
+        }
+
+        /**
+         * EMVCo QR পেলোডের শেষের Tag 63 (CRC-16/CCITT-FALSE) চেকসাম যাচাই করে।
+         */
+        internal fun hasValidEmvCrc(raw: String): Boolean {
+            val clean = raw.trim()
+            if (clean.length < 8) return false
+
+            val crcPrefixIndex = clean.length - 8
+            if (clean.substring(crcPrefixIndex, crcPrefixIndex + 4) != "6304") {
+                return false
+            }
+
+            val expectedCrc = clean.substring(clean.length - 4).uppercase()
+            val payloadToVerify = clean.substring(0, clean.length - 4)
+            val bytes = payloadToVerify.toByteArray(StandardCharsets.UTF_8)
+
+            var crc = 0xFFFF
+            for (b in bytes) {
+                crc = crc xor ((b.toInt() and 0xFF) shl 8)
+                for (bit in 0 until 8) {
+                    crc = if ((crc and 0x8000) != 0) {
+                        ((crc shl 1) xor 0x1021) and 0xFFFF
+                    } else {
+                        (crc shl 1) and 0xFFFF
+                    }
+                }
+            }
+
+            val calculatedCrc = crc.toString(16).uppercase().padStart(4, '0')
+            return calculatedCrc == expectedCrc
+        }
+
+        /**
+         * বাংলাদেশ ব্যাংকের ইন্টারঅপারেবল Bangla QR / NPSB পেলোড শনাক্ত করে।
+         * (EMVCo RID: A000000727 বা Bangla QR / NPSB GUI উপস্থিত থাকলে true রিটার্ন করে)
+         */
+        internal fun isBanglaQrPayload(raw: String): Boolean {
+            val clean = raw.trim()
+            if (!clean.startsWith("000201")) return false
+
+            val rootTags = parseEmvTags(clean)
+            for (tagNum in 26..51) {
+                val tagKey = tagNum.toString().padStart(2, '0')
+                val subData = rootTags[tagKey] ?: continue
+                val subTags = parseEmvTags(subData)
+                val gui = (subTags["00"] ?: "").trim().lowercase()
+                val subLower = subData.lowercase()
+
+                if (gui.startsWith("a000000727") ||
+                    gui.contains("banglaqr") ||
+                    gui.contains("npsb") ||
+                    gui.contains("bd.gov.bb") ||
+                    subLower.contains("a000000727") ||
+                    subLower.contains("banglaqr")
+                ) {
+                    return true
+                }
+            }
+            return false
         }
 
         internal fun extractBdMobile(text: String): String {
