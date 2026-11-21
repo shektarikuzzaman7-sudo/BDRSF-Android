@@ -4,22 +4,22 @@ APP_HOME=$(pwd -P)
 APP_NAME="Gradle"
 APP_BASE_NAME=$(basename "$0")
 
-DEFAULT_JVM_OPTS='"-Xmx2048m" "-XX:MaxMetaspaceSize=512m"'
+DEFAULT_JVM_OPTS="-Xmx2048m -XX:MaxMetaspaceSize=512m"
 
-CLASSPATH=$APP_HOME/gradle/wrapper/gradle-wrapper.jar
+CLASSPATH="$APP_HOME/gradle/wrapper/gradle-wrapper.jar"
 
 if [ -n "$JAVA_HOME" ] ; then
     if [ -x "$JAVA_HOME/jre/sh/java" ] ; then
-        JAVACMD=$JAVA_HOME/jre/sh/java
+        JAVACMD="$JAVA_HOME/jre/sh/java"
     else
-        JAVACMD=$JAVA_HOME/bin/java
+        JAVACMD="$JAVA_HOME/bin/java"
     fi
     if [ ! -x "$JAVACMD" ] ; then
         echo "ERROR: JAVA_HOME is set to an invalid directory: $JAVA_HOME" >&2
         exit 1
     fi
 else
-    JAVACMD=java
+    JAVACMD="java"
     if ! command -v java >/dev/null 2>&1 ; then
         echo "ERROR: JAVA_HOME is not set and no 'java' command could be found in your PATH." >&2
         exit 1
