@@ -14,7 +14,9 @@ import android.graphics.PorterDuff
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
+import android.os.PowerManager
 import android.provider.MediaStore
+import android.provider.Settings
 import android.view.Gravity
 import android.view.HapticFeedbackConstants
 import android.view.View
@@ -59,6 +61,8 @@ class MainActivity : AppCompatActivity(), AndroidBridge.BridgeActionHandler {
 
     companion object {
         private const val RC_GALLERY_QR = 6001
+        private const val PREFS_BATTERY_PROMPT = "bdrsf_battery_prompt_prefs"
+        private const val KEY_BATTERY_PROMPTED = "battery_exemption_prompted"
     }
 
     private lateinit var mainLayout: RelativeLayout
@@ -85,6 +89,7 @@ class MainActivity : AppCompatActivity(), AndroidBridge.BridgeActionHandler {
     private val notificationPermissionLauncher =
         registerForActivityResult(ActivityResultContracts.RequestPermission()) { _ ->
             fetchAndSyncFcmToken()
+            requestBatteryOptimizationExemptionIfNeeded()
         }
 
     private val newTokenReceiver = object : BroadcastReceiver() {
@@ -161,6 +166,7 @@ class MainActivity : AppCompatActivity(), AndroidBridge.BridgeActionHandler {
 
         val isFromPush = extras.getBoolean("from_notification", false) ||
             sourceIntent.action == "com.bdrsf.app.ACTION_OPEN_NOTIFICATION" ||
+            sourceIntent.action == "FLUTTER_NOTIFICATION_CLICK" ||
             extras.containsKey("google.message_id") ||
             extras.containsKey("gcm.message_id") ||
             !rawUrl.isNullOrBlank() ||
@@ -215,6 +221,27 @@ class MainActivity : AppCompatActivity(), AndroidBridge.BridgeActionHandler {
             }
         }
         fetchAndSyncFcmToken()
+        requestBatteryOptimizationExemptionIfNeeded()
+    }
+
+    @SuppressLint("BatteryLife")
+    private fun requestBatteryOptimizationExemptionIfNeeded() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+            try {
+                val powerManager = getSystemService(Context.POWER_SERVICE) as? PowerManager ?: return
+                if (powerManager.isIgnoringBatteryOptimizations(packageName)) return
+
+                val prefs = getSharedPreferences(PREFS_BATTERY_PROMPT, Context.MODE_PRIVATE)
+                if (prefs.getBoolean(KEY_BATTERY_PROMPTED, false)) return
+                prefs.edit().putBoolean(KEY_BATTERY_PROMPTED, true).apply()
+
+                val batteryIntent = Intent(
+                    Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS,
+                    Uri.parse("package:$packageName")
+                )
+                startActivity(batteryIntent)
+            } catch (_: Exception) {}
+        }
     }
 
     private fun fetchAndSyncFcmToken() {
