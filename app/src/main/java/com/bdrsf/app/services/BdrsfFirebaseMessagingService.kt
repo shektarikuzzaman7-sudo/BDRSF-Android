@@ -7,10 +7,12 @@ import android.app.PendingIntent
 import android.content.Context
 import android.content.Intent
 import android.media.RingtoneManager
+import android.net.Uri
 import android.os.Build
 import androidx.core.app.NotificationCompat
 import com.bdrsf.app.MainActivity
 import com.bdrsf.app.R
+import com.bdrsf.app.config.WebAppConfig
 import com.google.firebase.messaging.FirebaseMessagingService
 import com.google.firebase.messaging.RemoteMessage
 import me.leolin.shortcutbadger.ShortcutBadger
@@ -68,6 +70,28 @@ class BdrsfFirebaseMessagingService : FirebaseMessagingService() {
                 false
             }
         }
+
+        fun resolveTargetUrl(rawUrl: String?, pageParam: String? = null, notifId: String? = null): String {
+            val baseUrl = WebAppConfig.BASE_URL.trimEnd('/')
+            val cleanedUrl = rawUrl?.trim().orEmpty()
+
+            val resolvedBase = when {
+                cleanedUrl.startsWith("http://") || cleanedUrl.startsWith("https://") -> cleanedUrl
+                cleanedUrl.startsWith("/") -> "$baseUrl$cleanedUrl"
+                cleanedUrl.startsWith("?") -> "$baseUrl/index.php$cleanedUrl"
+                cleanedUrl.isNotBlank() -> "$baseUrl/$cleanedUrl"
+                !pageParam.isNullOrBlank() -> "$baseUrl/index.php?page=${Uri.encode(pageParam.trim())}"
+                else -> "$baseUrl/index.php?page=inbox"
+            }
+
+            val cleanNotifId = notifId?.trim().orEmpty()
+            return if (cleanNotifId.isNotBlank() && !resolvedBase.contains("notif_id=")) {
+                val separator = if (resolvedBase.contains("?")) "&" else "?"
+                "$resolvedBase${separator}notif_id=${Uri.encode(cleanNotifId)}"
+            } else {
+                resolvedBase
+            }
+        }
     }
 
     override fun onNewToken(token: String) {
@@ -97,9 +121,11 @@ class BdrsfFirebaseMessagingService : FirebaseMessagingService() {
             ?: ""
 
         val pushType = dataPayload["type"] ?: "info"
-        val targetUrl = dataPayload["url"]
-            ?: dataPayload["link_url"]
-            ?: ""
+        val resolvedUrl = resolveTargetUrl(
+            rawUrl = dataPayload["url"] ?: dataPayload["link_url"],
+            pageParam = dataPayload["page"],
+            notifId = dataPayload["notif_id"] ?: dataPayload["notification_id"]
+        )
 
         val serverUnread = dataPayload["unread_count"]?.toIntOrNull()
         val updatedUnread = if (serverUnread != null) {
@@ -115,13 +141,14 @@ class BdrsfFirebaseMessagingService : FirebaseMessagingService() {
                 putExtra("title", title)
                 putExtra("message", body)
                 putExtra("type", pushType)
+                putExtra("fcm_target_url", resolvedUrl)
                 putExtra("unread_count", updatedUnread)
             }
             applicationContext.sendBroadcast(liveIntent)
             return
         }
 
-        showSystemNotification(title, body, targetUrl, updatedUnread)
+        showSystemNotification(title, body, resolvedUrl, updatedUnread)
     }
 
     private fun showSystemNotification(title: String, message: String, targetUrl: String, badgeCount: Int) {
@@ -141,24 +168,16 @@ class BdrsfFirebaseMessagingService : FirebaseMessagingService() {
             notificationManager.createNotificationChannel(channel)
         }
 
-        val launchIntent = packageManager.getLaunchIntentForPackage(packageName)?.apply {
-            action = Intent.ACTION_MAIN
-            addCategory(Intent.CATEGORY_LAUNCHER)
+        val requestCode = (System.currentTimeMillis() % Int.MAX_VALUE).toInt()
+
+        val clickIntent = Intent(this, MainActivity::class.java).apply {
+            action = "com.bdrsf.app.ACTION_OPEN_NOTIFICATION"
+            data = Uri.parse("bdrsf://notification/$requestCode")
             flags = Intent.FLAG_ACTIVITY_NEW_TASK or
                 Intent.FLAG_ACTIVITY_CLEAR_TOP or
                 Intent.FLAG_ACTIVITY_SINGLE_TOP
-            if (targetUrl.isNotBlank()) {
-                putExtra("fcm_target_url", targetUrl)
-            }
-        } ?: Intent(this, MainActivity::class.java).apply {
-            action = Intent.ACTION_MAIN
-            addCategory(Intent.CATEGORY_LAUNCHER)
-            flags = Intent.FLAG_ACTIVITY_NEW_TASK or
-                Intent.FLAG_ACTIVITY_CLEAR_TOP or
-                Intent.FLAG_ACTIVITY_SINGLE_TOP
-            if (targetUrl.isNotBlank()) {
-                putExtra("fcm_target_url", targetUrl)
-            }
+            putExtra("fcm_target_url", targetUrl)
+            putExtra("from_notification", true)
         }
 
         val pendingIntentFlags = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
@@ -167,11 +186,10 @@ class BdrsfFirebaseMessagingService : FirebaseMessagingService() {
             PendingIntent.FLAG_UPDATE_CURRENT
         }
 
-        val requestCode = (System.currentTimeMillis() % Int.MAX_VALUE).toInt()
         val pendingIntent = PendingIntent.getActivity(
             this,
             requestCode,
-            launchIntent,
+            clickIntent,
             pendingIntentFlags
         )
 
