@@ -149,12 +149,26 @@ class MainActivity : AppCompatActivity(), AndroidBridge.BridgeActionHandler {
 
     private fun extractNotificationTargetUrl(sourceIntent: Intent?): String? {
         if (sourceIntent == null) return null
-        val extras = sourceIntent.extras
-        val fromExtra = extras?.getString("fcm_target_url")
-            ?: extras?.getString("url")
-            ?: extras?.getString("link_url")
+        val extras = sourceIntent.extras ?: return null
+
+        val rawUrl = extras.getString("fcm_target_url")
+            ?: extras.getString("url")
+            ?: extras.getString("link_url")
             ?: sourceIntent.getStringExtra("fcm_target_url")
-        return fromExtra?.trim()?.takeIf { it.isNotBlank() }
+
+        val pageParam = extras.getString("page")
+        val notifId = extras.getString("notif_id") ?: extras.getString("notification_id")
+
+        val isFromPush = extras.getBoolean("from_notification", false) ||
+            sourceIntent.action == "com.bdrsf.app.ACTION_OPEN_NOTIFICATION" ||
+            extras.containsKey("google.message_id") ||
+            extras.containsKey("gcm.message_id") ||
+            !rawUrl.isNullOrBlank() ||
+            !pageParam.isNullOrBlank()
+
+        if (!isFromPush) return null
+
+        return BdrsfFirebaseMessagingService.resolveTargetUrl(rawUrl, pageParam, notifId)
     }
 
     private fun restorePersistedLauncherBadge() {
