@@ -105,6 +105,8 @@ class MainActivity : AppCompatActivity(), AndroidBridge.BridgeActionHandler {
                 val title = intent.getStringExtra("title").orEmpty()
                 val message = intent.getStringExtra("message").orEmpty()
                 val type = intent.getStringExtra("type").orEmpty().ifBlank { "info" }
+                val unread = intent.getIntExtra("unread_count", BdrsfFirebaseMessagingService.getUnreadCount(applicationContext))
+                BdrsfFirebaseMessagingService.applyLauncherBadge(applicationContext, unread)
                 if (::webView.isInitialized) {
                     val script = WebBridgeContract.buildPushAlertScript(title, message, type)
                     androidBridge.evaluateJavascript(script)
@@ -124,6 +126,7 @@ class MainActivity : AppCompatActivity(), AndroidBridge.BridgeActionHandler {
         setupWebView()
         setupBackNavigation()
         registerPushReceivers()
+        restorePersistedLauncherBadge()
 
         PermissionHelper.requestAllInitialPermissions(this)
         requestNotificationPermissionIfNeeded()
@@ -136,12 +139,18 @@ class MainActivity : AppCompatActivity(), AndroidBridge.BridgeActionHandler {
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
         setIntent(intent)
+        restorePersistedLauncherBadge()
         val targetUrl = intent.getStringExtra("fcm_target_url")?.takeIf { it.isNotBlank() }
         if (!targetUrl.isNullOrBlank() && ::webView.isInitialized) {
             webView.loadUrl(targetUrl)
         } else if (::webView.isInitialized) {
             triggerWebViewLiveSync()
         }
+    }
+
+    private fun restorePersistedLauncherBadge() {
+        val currentUnread = BdrsfFirebaseMessagingService.getUnreadCount(applicationContext)
+        BdrsfFirebaseMessagingService.applyLauncherBadge(applicationContext, currentUnread)
     }
 
     @SuppressLint("UnspecifiedRegisterReceiverFlag")
@@ -331,6 +340,7 @@ class MainActivity : AppCompatActivity(), AndroidBridge.BridgeActionHandler {
                         }
                     }
                     WebAppConfig.syncCookies()
+                    restorePersistedLauncherBadge()
                     val token = BdrsfFirebaseMessagingService.getSavedToken(applicationContext)
                     if (!token.isNullOrBlank()) {
                         pushTokenToWebView(token)
@@ -387,17 +397,20 @@ class MainActivity : AppCompatActivity(), AndroidBridge.BridgeActionHandler {
     override fun onResume() {
         super.onResume()
         registerPushReceivers()
+        restorePersistedLauncherBadge()
         WebAppConfig.syncCookies()
         triggerWebViewLiveSync()
     }
 
     override fun onPause() {
         super.onPause()
+        restorePersistedLauncherBadge()
         WebAppConfig.syncCookies()
     }
 
     override fun onStop() {
         super.onStop()
+        restorePersistedLauncherBadge()
         WebAppConfig.syncCookies()
     }
 
@@ -513,6 +526,7 @@ class MainActivity : AppCompatActivity(), AndroidBridge.BridgeActionHandler {
             .setTitle("প্রস্থান নিশ্চিতকরণ")
             .setMessage("আপনি কি নিশ্চিতভাবে অ্যাপ থেকে বের হতে চান?")
             .setPositiveButton("হ্যাঁ") { _, _ ->
+                restorePersistedLauncherBadge()
                 WebAppConfig.syncCookies()
                 finishAffinity()
             }
@@ -603,6 +617,7 @@ class MainActivity : AppCompatActivity(), AndroidBridge.BridgeActionHandler {
             } catch (_: Exception) {}
             isLivePushReceiverRegistered = false
         }
+        restorePersistedLauncherBadge()
         WebAppConfig.syncCookies()
         qrScannerFeature.destroy()
         documentScannerFeature.destroy()
