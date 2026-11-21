@@ -35,6 +35,7 @@ import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
 import com.bdrsf.app.bridge.AndroidBridge
+import com.bdrsf.app.bridge.WebBridgeContract
 import com.bdrsf.app.bridge.WebBridgeContract.Actions
 import com.bdrsf.app.bridge.WebBridgeContract.BridgeResponse
 import com.bdrsf.app.bridge.WebBridgeContract.Status
@@ -79,6 +80,7 @@ class MainActivity : AppCompatActivity(), AndroidBridge.BridgeActionHandler {
     private var pendingGalleryQrCallback: String? = null
     private var lastBackPressTime: Long = 0L
     private var isTokenReceiverRegistered = false
+    private var isLivePushReceiverRegistered = false
 
     private val notificationPermissionLauncher =
         registerForActivityResult(ActivityResultContracts.RequestPermission()) { _ ->
@@ -97,6 +99,20 @@ class MainActivity : AppCompatActivity(), AndroidBridge.BridgeActionHandler {
         }
     }
 
+    private val livePushReceiver = object : BroadcastReceiver() {
+        override fun onReceive(context: Context?, intent: Intent?) {
+            if (intent?.action == "com.bdrsf.app.ACTION_LIVE_PUSH_EVENT") {
+                val title = intent.getStringExtra("title").orEmpty()
+                val message = intent.getStringExtra("message").orEmpty()
+                val type = intent.getStringExtra("type").orEmpty().ifBlank { "info" }
+                if (::webView.isInitialized) {
+                    val script = WebBridgeContract.buildPushAlertScript(title, message, type)
+                    androidBridge.evaluateJavascript(script)
+                }
+            }
+        }
+    }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         supportActionBar?.hide()
@@ -107,7 +123,7 @@ class MainActivity : AppCompatActivity(), AndroidBridge.BridgeActionHandler {
         initFeatures()
         setupWebView()
         setupBackNavigation()
-        registerFcmTokenReceiver()
+        registerPushReceivers()
 
         PermissionHelper.requestAllInitialPermissions(this)
         requestNotificationPermissionIfNeeded()
@@ -123,21 +139,36 @@ class MainActivity : AppCompatActivity(), AndroidBridge.BridgeActionHandler {
         val targetUrl = intent.getStringExtra("fcm_target_url")?.takeIf { it.isNotBlank() }
         if (!targetUrl.isNullOrBlank() && ::webView.isInitialized) {
             webView.loadUrl(targetUrl)
+        } else if (::webView.isInitialized) {
+            triggerWebViewLiveSync()
         }
     }
 
     @SuppressLint("UnspecifiedRegisterReceiverFlag")
-    private fun registerFcmTokenReceiver() {
-        if (isTokenReceiverRegistered) return
-        val filter = IntentFilter("com.bdrsf.app.ACTION_NEW_FCM_TOKEN")
-        try {
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-                registerReceiver(newTokenReceiver, filter, Context.RECEIVER_NOT_EXPORTED)
-            } else {
-                registerReceiver(newTokenReceiver, filter)
-            }
-            isTokenReceiverRegistered = true
-        } catch (_: Exception) {}
+    private fun registerPushReceivers() {
+        if (!isTokenReceiverRegistered) {
+            val tokenFilter = IntentFilter("com.bdrsf.app.ACTION_NEW_FCM_TOKEN")
+            try {
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                    registerReceiver(newTokenReceiver, tokenFilter, Context.RECEIVER_NOT_EXPORTED)
+                } else {
+                    registerReceiver(newTokenReceiver, tokenFilter)
+                }
+                isTokenReceiverRegistered = true
+            } catch (_: Exception) {}
+        }
+
+        if (!isLivePushReceiverRegistered) {
+            val pushFilter = IntentFilter("com.bdrsf.app.ACTION_LIVE_PUSH_EVENT")
+            try {
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                    registerReceiver(livePushReceiver, pushFilter, Context.RECEIVER_NOT_EXPORTED)
+                } else {
+                    registerReceiver(livePushReceiver, pushFilter)
+                }
+                isLivePushReceiverRegistered = true
+            } catch (_: Exception) {}
+        }
     }
 
     private fun requestNotificationPermissionIfNeeded() {
@@ -179,6 +210,18 @@ class MainActivity : AppCompatActivity(), AndroidBridge.BridgeActionHandler {
             try {
                 webView.evaluateJavascript(
                     "(function(){ if (typeof window.bdrsfSyncFcmTokenToServer === 'function') { window.bdrsfSyncFcmTokenToServer($escaped); } })();",
+                    null
+                )
+            } catch (_: Exception) {}
+        }
+    }
+
+    private fun triggerWebViewLiveSync() {
+        if (!::webView.isInitialized) return
+        runOnUiThread {
+            try {
+                webView.evaluateJavascript(
+                    "(function(){ if (window.BDRSF_BRIDGE && typeof window.BDRSF_BRIDGE.forceSync === 'function') { window.BDRSF_BRIDGE.forceSync(); } else if (typeof window.syncRealTimeData === 'function') { window.syncRealTimeData(true); } })();",
                     null
                 )
             } catch (_: Exception) {}
@@ -292,6 +335,7 @@ class MainActivity : AppCompatActivity(), AndroidBridge.BridgeActionHandler {
                     if (!token.isNullOrBlank()) {
                         pushTokenToWebView(token)
                     }
+                    triggerWebViewLiveSync()
                 }
             }
         )
@@ -338,6 +382,13 @@ class MainActivity : AppCompatActivity(), AndroidBridge.BridgeActionHandler {
                 }
             }
         })
+    }
+
+    override fun onResume() {
+        super.onResume()
+        registerPushReceivers()
+        WebAppConfig.syncCookies()
+        triggerWebViewLiveSync()
     }
 
     override fun onPause() {
@@ -545,6 +596,12 @@ class MainActivity : AppCompatActivity(), AndroidBridge.BridgeActionHandler {
                 unregisterReceiver(newTokenReceiver)
             } catch (_: Exception) {}
             isTokenReceiverRegistered = false
+        }
+        if (isLivePushReceiverRegistered) {
+            try {
+                unregisterReceiver(livePushReceiver)
+            } catch (_: Exception) {}
+            isLivePushReceiverRegistered = false
         }
         WebAppConfig.syncCookies()
         qrScannerFeature.destroy()
