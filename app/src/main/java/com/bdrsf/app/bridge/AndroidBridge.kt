@@ -92,7 +92,7 @@ class AndroidBridge(
     }
 
     // ---------------------------------------------------------------------------------------------
-    // bdrsf-bridge.js এর সরাসরি ফলব্যাক ও FCM টোকেন মেথডসমূহ
+    // bdrsf-bridge.js এর সরাসরি ফলব্যাক, FCM টোকেন ও ব্যাজ সিঙ্ক মেথডসমূহ
     // ---------------------------------------------------------------------------------------------
 
     @JavascriptInterface
@@ -102,6 +102,16 @@ class AndroidBridge(
         } catch (_: Exception) {
             ""
         }
+    }
+
+    @JavascriptInterface
+    fun syncLauncherBadge(unreadCount: Int) {
+        try {
+            BdrsfFirebaseMessagingService.applyLauncherBadge(
+                activity.applicationContext,
+                unreadCount.coerceAtLeast(0)
+            )
+        } catch (_: Exception) {}
     }
 
     @JavascriptInterface
