@@ -24,33 +24,27 @@ jobs:
           distribution: temurin
           java-version: "17"
 
-      - name: Set up Gradle fallback
-        uses: gradle/setup-gradle@v4
-
       - name: Build Debug APK
         run: |
           GRADLEW_PATH=$(find . -maxdepth 3 -name "gradlew" -type f | head -n 1)
-          if [ -n "$GRADLEW_PATH" ]; then
-            PROJECT_DIR=$(dirname "$GRADLEW_PATH")
-            echo "Found gradlew at: $GRADLEW_PATH"
-            chmod +x "$GRADLEW_PATH"
-            (cd "$PROJECT_DIR" && ./gradlew assembleDebug)
-          else
-            echo "gradlew not found, using system gradle..."
-            APP_BUILD=$(find . -maxdepth 3 -path "*/app/build.gradle*" -type f | head -n 1)
-            if [ -n "$APP_BUILD" ]; then
-              PROJECT_DIR=$(dirname "$(dirname "$APP_BUILD")")
-              (cd "$PROJECT_DIR" && gradle assembleDebug)
-            else
-              gradle assembleDebug
-            fi
+          if [ -z "$GRADLEW_PATH" ]; then
+            echo "ERROR: gradlew not found!"
+            exit 1
           fi
+          PROJECT_DIR=$(dirname "$GRADLEW_PATH")
+          WRAPPER_JAR="$PROJECT_DIR/gradle/wrapper/gradle-wrapper.jar"
+          if [ ! -f "$WRAPPER_JAR" ]; then
+            mkdir -p "$PROJECT_DIR/gradle/wrapper"
+            curl -fsSL "https://raw.githubusercontent.com/gradle/gradle/v8.7.0/gradle/wrapper/gradle-wrapper.jar" -o "$WRAPPER_JAR" || true
+          fi
+          chmod +x "$GRADLEW_PATH"
+          (cd "$PROJECT_DIR" && ./gradlew assembleDebug)
 
       - name: Prepare final APK
         run: |
           APK_PATH=$(find . -path "*/app/build/outputs/apk/debug/*.apk" -type f | head -n 1)
           if [ -z "$APK_PATH" ]; then
-            echo "Debug APK not found!"
+            echo "ERROR: Debug APK not found!"
             exit 1
           fi
           cp "$APK_PATH" BDRSF-Android-debug.apk
