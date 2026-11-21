@@ -1,0 +1,60 @@
+name: BDRSF Android Debug Build & Release
+
+on:
+  push:
+    branches:
+      - main
+      - master
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build-and-release:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Grant execute permission to gradlew
+        run: chmod +x gradlew
+
+      - name: Build Debug APK
+        run: ./gradlew assembleDebug
+
+      - name: Prepare latest Debug APK
+        run: |
+          APK_PATH=$(find app/build/outputs/apk/debug -name "*.apk" | head -n 1)
+          if [ -z "$APK_PATH" ]; then
+            echo "Debug APK not found!"
+            exit 1
+          fi
+          cp "$APK_PATH" BDRSF-Android-debug.apk
+          ls -lh BDRSF-Android-debug.apk
+
+      - name: Ensure debug-latest release exists
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if ! gh release view debug-latest >/dev/null 2>&1; then
+            gh release create debug-latest \
+              --title "Debug Latest" \
+              --notes "Latest automated debug build for BDRSF-Android"
+          fi
+
+      - name: Upload latest APK to debug-latest (overwrite if exists)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release upload debug-latest BDRSF-Android-debug.apk --clobber
+          gh release edit debug-latest \
+            --title "Debug Latest" \
+            --notes "Latest automated debug build for BDRSF-Android | Commit: ${{ github.sha }} | Run: #${{ github.run_number }}"
