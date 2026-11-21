@@ -12,7 +12,7 @@ import org.json.JSONObject
  * নগদ (Nagad) ডেডিকেটেড QR ডিকোডার ও স্ক্যানার।
  * দায়িত্ব:
  *  - নগদ উদ্যোক্তা/এজেন্ট (Agent) এবং নগদ মার্চেন্ট (Merchant) QR কোড নির্ভুলভাবে ডিকোড করা
- *  - প্রকৃত ব্যবসায়িক/স্টোরের নাম (`storeName`) এবং মালিকের নাম (`ownerName`) আলাদাভাবে সেট করা (কোনো বানানো নাম নয়)
+ *  - প্রকৃত ব্যবসায়িক/স্টোরের নাম (`storeName`), মালিকের নাম (`ownerName`) এবং লোকেশন (`storeLocation`) নির্ভুলভাবে সেট করা
  *  - নগদ এনক্রিপ্টেড পার্সোনাল QR কোড শনাক্ত করে নিরাপদভাবে প্রত্যাখ্যান করা
  */
 class NagadQrScannerFeature(
@@ -22,7 +22,7 @@ class NagadQrScannerFeature(
 ) : BaseQrScannerFeature(activity, rootContainer, bridge) {
 
     companion object {
-        private val NAGAD_AGENT_MCCS = setOf("0000", "4829", "6010", "6011", "6012", "7299")
+        private val NAGAD_AGENT_MCCS = setOf("0000", "4111", "4829", "6010", "6011", "6012", "7299")
     }
 
     override fun getHudAccentColor(): Int = Color.parseColor("#F6921E")
@@ -79,6 +79,7 @@ class NagadQrScannerFeature(
         var accountRole = "unknown"
         var storeName = ""
         var ownerName = ""
+        var storeLocation = ""
         var mcc = ""
         var amount = ""
         var isNagadConfirmed = lower.contains("nagad") || lower.contains("uddokta")
@@ -86,8 +87,8 @@ class NagadQrScannerFeature(
         // ১. EMVCo / Bangla QR (`000201...`) ডিকোডিং
         if (trimmed.startsWith("000201")) {
             val rootTags = QrScannerFeature.parseEmvTags(trimmed)
-            // Tag 59 = ব্যবসা প্রতিষ্ঠান / উদ্যোক্তা পয়েন্ট / স্টোরের নাম
-            storeName = (rootTags["59"] ?: "").trim()
+            val tag59Val = (rootTags["59"] ?: "").trim()
+            val tag60City = (rootTags["60"] ?: "").trim()
             mcc = (rootTags["52"] ?: "").trim()
             amount = (rootTags["54"] ?: "").trim()
 
@@ -122,22 +123,6 @@ class NagadQrScannerFeature(
                     if (fallbackMobile.isNotEmpty()) accountNumber = fallbackMobile
                 }
 
-                // মালিক/ব্যক্তির নাম যদি প্রোপ্রাইটারি সাব-ট্যাগে আলাদাভাবে থাকে (যেমন সাব-ট্যাগ 04 বা 05)
-                for (nameKey in listOf("04", "05", "06")) {
-                    val candidateName = (subTags[nameKey] ?: "").trim()
-                    if (candidateName.length >= 3 &&
-                        candidateName.any { it.isLetter() } &&
-                        !candidateName.contains("nagad", ignoreCase = true) &&
-                        !candidateName.contains("agent", ignoreCase = true) &&
-                        !candidateName.contains("merchant", ignoreCase = true) &&
-                        !candidateName.contains("uddokta", ignoreCase = true) &&
-                        !candidateName.equals(storeName, ignoreCase = true) &&
-                        ownerName.isEmpty()
-                    ) {
-                        ownerName = candidateName
-                    }
-                }
-
                 val roleCode = (subTags["03"] ?: "").trim().uppercase()
                 val subTokens = listOf(subTags["02"], subTags["03"], subTags["04"]).joinToString(" ").lowercase()
                 if (roleCode == "AG" || roleCode == "02" || subTokens.contains("agent") || subTokens.contains("uddokta")) {
@@ -147,7 +132,7 @@ class NagadQrScannerFeature(
                 }
             }
 
-            // Tag 62 (Additional Data Field Template) থেকে মোবাইল নম্বর ও মালিকের নাম
+            // Tag 62 (Additional Data Field Template) থেকে স্টোরের নাম ও ঠিকানা সংগ্রহ
             if (rootTags.containsKey("62")) {
                 val addRaw = rootTags["62"] ?: ""
                 val addTags = QrScannerFeature.parseEmvTags(addRaw)
@@ -158,13 +143,42 @@ class NagadQrScannerFeature(
                     )
                 }
 
-                val candidateOwner = (addTags["03"] ?: addTags["06"] ?: addTags["09"] ?: "").trim()
-                if (candidateOwner.isNotEmpty() &&
-                    candidateOwner.any { it.isLetter() } &&
-                    !candidateOwner.equals(storeName, ignoreCase = true) &&
-                    ownerName.isEmpty()
-                ) {
-                    ownerName = candidateOwner
+                // Tag 62 সাব-ট্যাগ 03 বা 07/08-এ সাধারণত স্টোর/ব্যবসার নাম থাকে
+                for (storeKey in listOf("03", "07", "08")) {
+                    val candidateStore = cleanFieldValue(addTags[storeKey] ?: "")
+                    if (candidateStore.isNotEmpty() &&
+                        !candidateStore.equals(tag59Val, ignoreCase = true) &&
+                        !candidateStore.matches(Regex("^01[3-9][0-9]{8}$"))
+                    ) {
+                        storeName = candidateStore
+                        break
+                    }
+                }
+
+                // Tag 62 সাব-ট্যাগ 50 (বা 04/09)-এ লোকেশন/ঠিকানা থাকলে
+                val rawAddr = cleanFieldValue(addTags["50"] ?: addTags["04"] ?: addTags["09"] ?: "")
+                storeLocation = buildNagadLocation(rawAddr, tag60City)
+            }
+
+            if (storeLocation.isEmpty() && tag60City.isNotEmpty()) {
+                storeLocation = cleanFieldValue(tag60City)
+            }
+
+            // Nagad EMVCo QR-এ Tag 59 সাধারণত মালিক/অ্যাকাউন্ট হোল্ডারের নাম (যেমন: MOZAMMEL HOQUE),
+            // আর Tag 62(03)-এ স্টোরের নাম (যেমন: MAMA VAGINA TELECOM) থাকে।
+            // যদি Tag 62-এ স্টোর না থাকে কিন্তু Tag 59-এ স্পষ্টভাবে দোকান/প্রতিষ্ঠানের নাম থাকে, তবে সেটি storeName হবে।
+            val cleaned59 = cleanFieldValue(tag59Val)
+            if (cleaned59.isNotEmpty()) {
+                if (storeName.isNotEmpty()) {
+                    if (!cleaned59.equals(storeName, ignoreCase = true)) {
+                        ownerName = cleaned59
+                    }
+                } else {
+                    if (looksLikeBusinessTitle(cleaned59)) {
+                        storeName = cleaned59
+                    } else {
+                        ownerName = cleaned59
+                    }
                 }
             }
 
@@ -195,8 +209,15 @@ class NagadQrScannerFeature(
                     accountNumber = extractNagadMobile(
                         obj.optString("accountNumber", obj.optString("phone", obj.optString("wallet", obj.toString())))
                     )
-                    storeName = obj.optString("storeName", obj.optString("merchantName", obj.optString("shopName", ""))).trim()
-                    ownerName = obj.optString("ownerName", obj.optString("accountName", obj.optString("name", ""))).trim()
+                    storeName = cleanFieldValue(
+                        obj.optString("storeName", obj.optString("merchantName", obj.optString("shopName", "")))
+                    )
+                    ownerName = cleanFieldValue(
+                        obj.optString("ownerName", obj.optString("accountName", obj.optString("name", "")))
+                    )
+                    val city = cleanFieldValue(obj.optString("city", obj.optString("district", "")))
+                    val loc = cleanFieldValue(obj.optString("storeLocation", obj.optString("location", obj.optString("area", obj.optString("address", "")))))
+                    storeLocation = buildNagadLocation(loc, city)
                     mcc = obj.optString("mcc", "").trim()
                     amount = obj.optString("amount", "").trim()
 
@@ -220,8 +241,11 @@ class NagadQrScannerFeature(
                         ?: uri.getQueryParameter("msisdn")
                         ?: trimmed
                     accountNumber = extractNagadMobile(queryAccount)
-                    storeName = (uri.getQueryParameter("store") ?: uri.getQueryParameter("merchant") ?: "").trim()
-                    ownerName = (uri.getQueryParameter("name") ?: uri.getQueryParameter("owner") ?: "").trim()
+                    storeName = cleanFieldValue(uri.getQueryParameter("store") ?: uri.getQueryParameter("merchant") ?: "")
+                    ownerName = cleanFieldValue(uri.getQueryParameter("name") ?: uri.getQueryParameter("owner") ?: "")
+                    val loc = cleanFieldValue(uri.getQueryParameter("location") ?: uri.getQueryParameter("area") ?: "")
+                    val city = cleanFieldValue(uri.getQueryParameter("city") ?: uri.getQueryParameter("district") ?: "")
+                    storeLocation = buildNagadLocation(loc, city)
                     amount = (uri.getQueryParameter("amount") ?: "").trim()
 
                     val pathAndQuery = (uri.path.orEmpty() + " " + uri.query.orEmpty()).lowercase()
@@ -301,13 +325,49 @@ class NagadQrScannerFeature(
             amount = amount,
             rawContent = trimmed,
             isEncrypted = false
-        )
+        ).apply {
+            if (storeLocation.isNotEmpty()) {
+                put("storeLocation", storeLocation)
+                put("location", storeLocation)
+            }
+        }
 
         return QrDecodeResult(
             isValid = true,
             payloadJson = payload.toString(),
             isProviderMatch = true
         )
+    }
+
+    private fun cleanFieldValue(raw: String): String {
+        return raw
+            .replace(Regex("^[A-Za-z]-"), "")
+            .replace(Regex("\\s+"), " ")
+            .trim(',', ' ', '-', '/')
+            .trim()
+    }
+
+    private fun buildNagadLocation(rawAddress: String, rawCity: String): String {
+        val parts = mutableListOf<String>()
+        if (rawAddress.isNotEmpty()) {
+            rawAddress.split(',', '/', '|').map { cleanFieldValue(it) }.filter { it.isNotEmpty() }.forEach { token ->
+                if (parts.none { it.equals(token, ignoreCase = true) }) {
+                    parts.add(token)
+                }
+            }
+        }
+        val city = cleanFieldValue(rawCity)
+        if (city.isNotEmpty() && parts.none { it.equals(city, ignoreCase = true) }) {
+            parts.add(city)
+        }
+        return parts.take(3).joinToString(" • ")
+    }
+
+    private fun looksLikeBusinessTitle(text: String): Boolean {
+        return Regex(
+            "\\b(store|shop|enterprise|telecom|traders|mart|pharmacy|center|centre|agency|point|bazar|bazaar|group|sons|brothers|ltd|limited|variety|general|digital|service|services|uddokta)\\b",
+            RegexOption.IGNORE_CASE
+        ).containsMatchIn(text)
     }
 
     private fun extractNagadMobile(text: String): String {
