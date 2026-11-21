@@ -13,6 +13,7 @@ import com.bdrsf.app.MainActivity
 import com.bdrsf.app.R
 import com.google.firebase.messaging.FirebaseMessagingService
 import com.google.firebase.messaging.RemoteMessage
+import me.leolin.shortcutbadger.ShortcutBadger
 import org.json.JSONObject
 
 class BdrsfFirebaseMessagingService : FirebaseMessagingService() {
@@ -34,10 +35,18 @@ class BdrsfFirebaseMessagingService : FirebaseMessagingService() {
             prefs.edit().putString(KEY_FCM_TOKEN, token).apply()
         }
 
-        fun setUnreadCount(context: Context, count: Int) {
+        fun applyLauncherBadge(context: Context, count: Int) {
             val safeCount = count.coerceAtLeast(0)
             val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
             prefs.edit().putInt(KEY_UNREAD_COUNT, safeCount).apply()
+
+            try {
+                if (safeCount > 0) {
+                    ShortcutBadger.applyCount(context.applicationContext, safeCount)
+                } else {
+                    ShortcutBadger.removeCount(context.applicationContext)
+                }
+            } catch (_: Exception) {}
         }
 
         fun getUnreadCount(context: Context): Int {
@@ -98,7 +107,7 @@ class BdrsfFirebaseMessagingService : FirebaseMessagingService() {
         } else {
             (getUnreadCount(applicationContext) + 1)
         }
-        setUnreadCount(applicationContext, updatedUnread)
+        applyLauncherBadge(applicationContext, updatedUnread)
 
         if (isAppInForeground(applicationContext)) {
             val liveIntent = Intent("com.bdrsf.app.ACTION_LIVE_PUSH_EVENT").apply {
@@ -167,6 +176,7 @@ class BdrsfFirebaseMessagingService : FirebaseMessagingService() {
         )
 
         val defaultSoundUri = RingtoneManager.getDefaultUri(RingtoneManager.TYPE_NOTIFICATION)
+        val safeBadge = badgeCount.coerceAtLeast(1)
 
         val builder = NotificationCompat.Builder(this, CHANNEL_ID)
             .setSmallIcon(R.drawable.ic_launcher)
@@ -174,7 +184,7 @@ class BdrsfFirebaseMessagingService : FirebaseMessagingService() {
             .setContentText(message)
             .setStyle(NotificationCompat.BigTextStyle().bigText(message))
             .setAutoCancel(true)
-            .setNumber(badgeCount.coerceAtLeast(1))
+            .setNumber(safeBadge)
             .setBadgeIconType(NotificationCompat.BADGE_ICON_SMALL)
             .setSound(defaultSoundUri)
             .setPriority(NotificationCompat.PRIORITY_HIGH)
@@ -182,6 +192,7 @@ class BdrsfFirebaseMessagingService : FirebaseMessagingService() {
             .setContentIntent(pendingIntent)
 
         notificationManager.notify(requestCode, builder.build())
+        applyLauncherBadge(applicationContext, safeBadge)
     }
 
     fun buildWebAlertPayload(title: String, message: String, type: String): String {
