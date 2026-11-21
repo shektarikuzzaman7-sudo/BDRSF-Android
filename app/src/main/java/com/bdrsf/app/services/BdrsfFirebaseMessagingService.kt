@@ -21,6 +21,7 @@ class BdrsfFirebaseMessagingService : FirebaseMessagingService() {
         const val CHANNEL_ID = "bdrsf_live_alerts"
         private const val PREFS_NAME = "bdrsf_fcm_prefs"
         private const val KEY_FCM_TOKEN = "fcm_token"
+        private const val KEY_UNREAD_COUNT = "unread_notif_count"
 
         fun getSavedToken(context: Context): String? {
             val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
@@ -31,6 +32,17 @@ class BdrsfFirebaseMessagingService : FirebaseMessagingService() {
             if (token.isBlank()) return
             val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
             prefs.edit().putString(KEY_FCM_TOKEN, token).apply()
+        }
+
+        fun setUnreadCount(context: Context, count: Int) {
+            val safeCount = count.coerceAtLeast(0)
+            val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            prefs.edit().putInt(KEY_UNREAD_COUNT, safeCount).apply()
+        }
+
+        fun getUnreadCount(context: Context): Int {
+            val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            return prefs.getInt(KEY_UNREAD_COUNT, 0)
         }
 
         fun isAppInForeground(context: Context): Boolean {
@@ -80,21 +92,30 @@ class BdrsfFirebaseMessagingService : FirebaseMessagingService() {
             ?: dataPayload["link_url"]
             ?: ""
 
+        val serverUnread = dataPayload["unread_count"]?.toIntOrNull()
+        val updatedUnread = if (serverUnread != null) {
+            serverUnread.coerceAtLeast(0)
+        } else {
+            (getUnreadCount(applicationContext) + 1)
+        }
+        setUnreadCount(applicationContext, updatedUnread)
+
         if (isAppInForeground(applicationContext)) {
             val liveIntent = Intent("com.bdrsf.app.ACTION_LIVE_PUSH_EVENT").apply {
                 setPackage(applicationContext.packageName)
                 putExtra("title", title)
                 putExtra("message", body)
                 putExtra("type", pushType)
+                putExtra("unread_count", updatedUnread)
             }
             applicationContext.sendBroadcast(liveIntent)
             return
         }
 
-        showSystemNotification(title, body, targetUrl)
+        showSystemNotification(title, body, targetUrl, updatedUnread)
     }
 
-    private fun showSystemNotification(title: String, message: String, targetUrl: String) {
+    private fun showSystemNotification(title: String, message: String, targetUrl: String, badgeCount: Int) {
         val notificationManager =
             getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
 
@@ -106,12 +127,26 @@ class BdrsfFirebaseMessagingService : FirebaseMessagingService() {
             ).apply {
                 description = "Transaction, balance update & system notifications"
                 enableVibration(true)
+                setShowBadge(true)
             }
             notificationManager.createNotificationChannel(channel)
         }
 
-        val intent = Intent(this, MainActivity::class.java).apply {
-            flags = Intent.FLAG_ACTIVITY_CLEAR_TOP or Intent.FLAG_ACTIVITY_SINGLE_TOP
+        val launchIntent = packageManager.getLaunchIntentForPackage(packageName)?.apply {
+            action = Intent.ACTION_MAIN
+            addCategory(Intent.CATEGORY_LAUNCHER)
+            flags = Intent.FLAG_ACTIVITY_NEW_TASK or
+                Intent.FLAG_ACTIVITY_CLEAR_TOP or
+                Intent.FLAG_ACTIVITY_SINGLE_TOP
+            if (targetUrl.isNotBlank()) {
+                putExtra("fcm_target_url", targetUrl)
+            }
+        } ?: Intent(this, MainActivity::class.java).apply {
+            action = Intent.ACTION_MAIN
+            addCategory(Intent.CATEGORY_LAUNCHER)
+            flags = Intent.FLAG_ACTIVITY_NEW_TASK or
+                Intent.FLAG_ACTIVITY_CLEAR_TOP or
+                Intent.FLAG_ACTIVITY_SINGLE_TOP
             if (targetUrl.isNotBlank()) {
                 putExtra("fcm_target_url", targetUrl)
             }
@@ -127,7 +162,7 @@ class BdrsfFirebaseMessagingService : FirebaseMessagingService() {
         val pendingIntent = PendingIntent.getActivity(
             this,
             requestCode,
-            intent,
+            launchIntent,
             pendingIntentFlags
         )
 
@@ -139,8 +174,11 @@ class BdrsfFirebaseMessagingService : FirebaseMessagingService() {
             .setContentText(message)
             .setStyle(NotificationCompat.BigTextStyle().bigText(message))
             .setAutoCancel(true)
+            .setNumber(badgeCount.coerceAtLeast(1))
+            .setBadgeIconType(NotificationCompat.BADGE_ICON_SMALL)
             .setSound(defaultSoundUri)
             .setPriority(NotificationCompat.PRIORITY_HIGH)
+            .setCategory(NotificationCompat.CATEGORY_MESSAGE)
             .setContentIntent(pendingIntent)
 
         notificationManager.notify(requestCode, builder.build())
