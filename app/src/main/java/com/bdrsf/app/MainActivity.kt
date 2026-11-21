@@ -131,8 +131,7 @@ class MainActivity : AppCompatActivity(), AndroidBridge.BridgeActionHandler {
         PermissionHelper.requestAllInitialPermissions(this)
         requestNotificationPermissionIfNeeded()
 
-        val initialUrl = intent?.getStringExtra("fcm_target_url")?.takeIf { it.isNotBlank() }
-            ?: WebAppConfig.BASE_URL
+        val initialUrl = extractNotificationTargetUrl(intent) ?: WebAppConfig.BASE_URL
         webView.loadUrl(initialUrl)
     }
 
@@ -140,12 +139,22 @@ class MainActivity : AppCompatActivity(), AndroidBridge.BridgeActionHandler {
         super.onNewIntent(intent)
         setIntent(intent)
         restorePersistedLauncherBadge()
-        val targetUrl = intent.getStringExtra("fcm_target_url")?.takeIf { it.isNotBlank() }
+        val targetUrl = extractNotificationTargetUrl(intent)
         if (!targetUrl.isNullOrBlank() && ::webView.isInitialized) {
             webView.loadUrl(targetUrl)
         } else if (::webView.isInitialized) {
             triggerWebViewLiveSync()
         }
+    }
+
+    private fun extractNotificationTargetUrl(sourceIntent: Intent?): String? {
+        if (sourceIntent == null) return null
+        val extras = sourceIntent.extras
+        val fromExtra = extras?.getString("fcm_target_url")
+            ?: extras?.getString("url")
+            ?: extras?.getString("link_url")
+            ?: sourceIntent.getStringExtra("fcm_target_url")
+        return fromExtra?.trim()?.takeIf { it.isNotBlank() }
     }
 
     private fun restorePersistedLauncherBadge() {
