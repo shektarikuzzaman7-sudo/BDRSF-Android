@@ -1,4 +1,3 @@
-// File: app/src/main/java/com/bdrsf/app/features/document/DocumentScannerFeature.kt
 package com.bdrsf.app.features.document
 
 import android.Manifest
@@ -55,10 +54,6 @@ import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicBoolean
 
-/**
- * PHP-পলিসি চালিত সার্বজনীন ক্যামেরা স্ক্যানার।
- * PHP থেকে পাঠানো `frameRatio` এবং `guideText` অনুযায়ী ভিউফাইন্ডার তৈরি করে।
- */
 class DocumentScannerFeature(
     private val activity: Activity,
     private val rootContainer: ViewGroup,
@@ -311,7 +306,7 @@ class DocumentScannerFeature(
                     else -> {
                         stableFrameCount++
                         val progress = (stableFrameCount.toFloat() / requiredStableFrames).coerceIn(0f, 1f)
-                        faceView?.updateGuidance("স্থির থাকুন... ছবি তোলা হচ্ছে", Color.parseColor("#00E676"), progress)
+                        faceView?.updateGuidance("স্থির থাকুন... ছবি তোলা ও মিলানো হচ্ছে", Color.parseColor("#00E676"), progress)
                         if (stableFrameCount >= requiredStableFrames && isCapturing.compareAndSet(false, true)) {
                             triggerTakePicture()
                         }
@@ -369,7 +364,7 @@ class DocumentScannerFeature(
 
                 override fun onError(exception: ImageCaptureException) {
                     isCapturing.set(false)
-                    Toast.makeText(activity, "ক্যাপচার ব্যর্থ হয়েছে: ${exception.message}", Toast.LENGTH_SHORT).show()
+                    Toast.makeText(activity, "ক্যাপচার ব্যর্থ হয়েছে: ${exception.message}", Toast.LENGTH_SHORT).show()
                 }
             }
         )
