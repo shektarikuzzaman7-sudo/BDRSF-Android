@@ -43,12 +43,8 @@ import com.bdrsf.app.bridge.WebBridgeContract.BridgeResponse
 import com.bdrsf.app.bridge.WebBridgeContract.Status
 import com.bdrsf.app.config.WebAppConfig
 import com.bdrsf.app.features.contact.ContactPickerFeature
-import com.bdrsf.app.features.document.DocumentScannerFeature
-import com.bdrsf.app.features.document.GenericOcrFeature
-import com.bdrsf.app.features.document.NidProcessorFeature
-import com.bdrsf.app.features.document.PassportProcessorFeature
 import com.bdrsf.app.features.download.DownloadFeature
-import com.bdrsf.app.features.face.FaceVerificationFeature
+import com.bdrsf.app.features.kyc.KycOperatingEngine
 import com.bdrsf.app.features.qr.QrScannerFeature
 import com.bdrsf.app.features.share.ShareFeature
 import com.bdrsf.app.services.BdrsfFirebaseMessagingService
@@ -57,7 +53,6 @@ import com.bdrsf.app.webview.NativeWebChromeClient
 import com.bdrsf.app.webview.NativeWebViewClient
 import com.google.firebase.messaging.FirebaseMessaging
 import org.json.JSONObject
-import java.util.Locale
 
 class MainActivity : AppCompatActivity(), AndroidBridge.BridgeActionHandler {
 
@@ -78,11 +73,7 @@ class MainActivity : AppCompatActivity(), AndroidBridge.BridgeActionHandler {
     private lateinit var shareFeature: ShareFeature
     private lateinit var contactPickerFeature: ContactPickerFeature
     private lateinit var qrScannerFeature: QrScannerFeature
-    private lateinit var faceVerificationFeature: FaceVerificationFeature
-    private lateinit var documentScannerFeature: DocumentScannerFeature
-    private lateinit var passportProcessorFeature: PassportProcessorFeature
-    private lateinit var nidProcessorFeature: NidProcessorFeature
-    private lateinit var genericOcrFeature: GenericOcrFeature
+    private lateinit var kycOperatingEngine: KycOperatingEngine
 
     private var pendingGalleryQrCallback: String? = null
     private var lastBackPressTime: Long = 0L
@@ -370,20 +361,7 @@ class MainActivity : AppCompatActivity(), AndroidBridge.BridgeActionHandler {
         shareFeature = ShareFeature(this)
         contactPickerFeature = ContactPickerFeature(this, androidBridge)
         qrScannerFeature = QrScannerFeature(this, mainLayout, androidBridge)
-
-        faceVerificationFeature = FaceVerificationFeature(this, androidBridge, webView, mainLayout)
-        passportProcessorFeature = PassportProcessorFeature(this, androidBridge, webView)
-        nidProcessorFeature = NidProcessorFeature(this, androidBridge, webView)
-        genericOcrFeature = GenericOcrFeature(this, androidBridge, webView)
-
-        documentScannerFeature = DocumentScannerFeature(this, mainLayout, androidBridge) { capturedFile, scanMode, policy, callback ->
-            when (scanMode) {
-                "passport" -> passportProcessorFeature.processPassportFile(capturedFile, policy, callback)
-                "nid_front", "nid_back" -> nidProcessorFeature.processNidSlot(capturedFile, scanMode, callback)
-                "face_liveness" -> faceVerificationFeature.verifyCapturedSelfieAgainstDocument(capturedFile, null, callback)
-                else -> genericOcrFeature.processWithPolicy(capturedFile, policy, callback)
-            }
-        }
+        kycOperatingEngine = KycOperatingEngine(this, mainLayout, androidBridge, webView)
 
         webViewClient = NativeWebViewClient(
             activity = this,
@@ -424,8 +402,7 @@ class MainActivity : AppCompatActivity(), AndroidBridge.BridgeActionHandler {
             override fun handleOnBackPressed() {
                 when {
                     qrScannerFeature.isScanningActive -> qrScannerFeature.stopScanner(isCancelled = true)
-                    faceVerificationFeature.isScanningActive -> faceVerificationFeature.stopScanner(isCancelled = true)
-                    documentScannerFeature.isScanningActive -> documentScannerFeature.stopScanner(isCancelled = true)
+                    kycOperatingEngine.handleBackPressed() -> Unit
                     else -> {
                         webView.evaluateJavascript(
                             "(function() { if (typeof window.onAndroidBackPressed === 'function') { window.onAndroidBackPressed(); return true; } return false; })();"
@@ -489,71 +466,11 @@ class MainActivity : AppCompatActivity(), AndroidBridge.BridgeActionHandler {
     }
 
     override fun onStartKycRequested(payload: JSONObject, callback: String?) {
-        val actionType = payload.optString("actionType", "").trim().lowercase(Locale.ROOT)
-        val source = payload.optString("source", "").trim().lowercase(Locale.ROOT)
-        val rawDocType = listOf(
-            payload.optString("scanMode", ""),
-            payload.optString("mode", ""),
-            payload.optString("docCategory", ""),
-            payload.optString("documentType", ""),
-            payload.optString("docType", "nid_front")
-        ).firstOrNull { it.isNotBlank() }.orEmpty().trim().lowercase(Locale.ROOT)
-
-        when {
-            actionType == "process_hybrid" || actionType == "submit" -> {
-                nidProcessorFeature.submitNidHybrid(callback)
-            }
-            actionType == "face_verification" || actionType == "face_liveness" ||
-                rawDocType.contains("face") || rawDocType.contains("selfie") || rawDocType.contains("live") -> {
-                val docFace = payload.optString("docFaceImage", "").trim().ifEmpty { null }
-                faceVerificationFeature.startFaceVerificationScanner(docFace, callback)
-            }
-            rawDocType.contains("pass") -> {
-                if (source == "gallery") {
-                    passportProcessorFeature.openGalleryPicker(payload, callback)
-                } else {
-                    val passPayload = JSONObject(payload.toString()).apply {
-                        put("mode", "passport")
-                        put("scanMode", "passport")
-                    }
-                    documentScannerFeature.startScanner(passPayload, callback)
-                }
-            }
-            rawDocType.contains("back") -> {
-                if (source == "gallery") {
-                    nidProcessorFeature.openGalleryPicker("nid_back", callback)
-                } else {
-                    val nidBackPayload = JSONObject(payload.toString()).apply {
-                        put("mode", "nid_back")
-                        put("scanMode", "nid_back")
-                    }
-                    documentScannerFeature.startScanner(nidBackPayload, callback)
-                }
-            }
-            rawDocType.contains("nid") || rawDocType.contains("front") -> {
-                if (source == "gallery") {
-                    nidProcessorFeature.openGalleryPicker("nid_front", callback)
-                } else {
-                    val nidFrontPayload = JSONObject(payload.toString()).apply {
-                        put("mode", "nid_front")
-                        put("scanMode", "nid_front")
-                    }
-                    documentScannerFeature.startScanner(nidFrontPayload, callback)
-                }
-            }
-            else -> {
-                val normalizedPayload = JSONObject(payload.toString()).apply {
-                    put("mode", "generic")
-                    put("scanMode", "generic")
-                }
-                documentScannerFeature.startScanner(normalizedPayload, callback)
-            }
-        }
+        kycOperatingEngine.handleStartKyc(payload, callback)
     }
 
     override fun onClearKycCacheRequested(callback: String?) {
-        nidProcessorFeature.clearCache()
-        faceVerificationFeature.setReferenceDocumentFace("")
+        kycOperatingEngine.clearCache()
         androidBridge.sendResponseToWeb(
             BridgeResponse(action = Actions.CLEAR_KYC_CACHE, status = Status.SUCCESS, message = "Cache cleared"),
             callback
@@ -673,33 +590,15 @@ class MainActivity : AppCompatActivity(), AndroidBridge.BridgeActionHandler {
         when (action) {
             "PICK_CONTACT" -> contactPickerFeature.pickContact(callback)
             "FORCE_REFRESH" -> WebAppConfig.forceRefreshWithCacheBypass(webView)
-            "FACE_VERIFICATION", "START_FACE_LIVENESS" -> {
-                val docFace = payload.optString("docFaceImage", "").trim().ifEmpty { null }
-                faceVerificationFeature.startFaceVerificationScanner(docFace, callback)
+            "START_HD_FACE_CAMERA", "FACE_VERIFICATION", "START_FACE_LIVENESS" -> {
+                kycOperatingEngine.startHdFaceCamera(callback)
+            }
+            "PICK_KYC_GALLERY", "PICK_NID_GALLERY", "PICK_PASSPORT_GALLERY" -> {
+                val slot = payload.optString("slot", payload.optString("mode", "nid_front"))
+                kycOperatingEngine.pickGallery(slot, callback)
             }
             "SCAN_DOCUMENT_WITH_POLICY" -> {
-                val mode = payload.optString("mode", payload.optString("docCategory", "")).lowercase(Locale.ROOT)
-                val normalized = JSONObject(payload.toString()).apply {
-                    val resolvedMode = when {
-                        mode.contains("pass") -> "passport"
-                        mode.contains("back") -> "nid_back"
-                        mode.contains("nid") || mode.contains("front") -> "nid_front"
-                        else -> "generic"
-                    }
-                    put("mode", resolvedMode)
-                    put("scanMode", resolvedMode)
-                }
-                documentScannerFeature.startScanner(normalized, callback)
-            }
-            "PICK_NID_GALLERY" -> {
-                val slot = payload.optString("slot", payload.optString("mode", "nid_front"))
-                nidProcessorFeature.openGalleryPicker(slot, callback)
-            }
-            "PICK_PASSPORT_GALLERY" -> {
-                passportProcessorFeature.openGalleryPicker(payload, callback)
-            }
-            "PROCESS_SAVED_DOCUMENTS" -> {
-                nidProcessorFeature.submitNidHybrid(callback)
+                kycOperatingEngine.handleStartKyc(payload, callback)
             }
             else -> {
                 androidBridge.sendResponseToWeb(
@@ -717,9 +616,7 @@ class MainActivity : AppCompatActivity(), AndroidBridge.BridgeActionHandler {
         } else if (requestCode == RC_GALLERY_QR) {
             qrScannerFeature.handleGalleryResult(resultCode, data, pendingGalleryQrCallback)
             pendingGalleryQrCallback = null
-        } else if (nidProcessorFeature.handleActivityResult(requestCode, resultCode, data)) {
-            return
-        } else if (passportProcessorFeature.handleActivityResult(requestCode, resultCode, data)) {
+        } else if (kycOperatingEngine.handleActivityResult(requestCode, resultCode, data)) {
             return
         } else if (contactPickerFeature.handleActivityResult(requestCode, resultCode, data)) {
             return
@@ -745,11 +642,7 @@ class MainActivity : AppCompatActivity(), AndroidBridge.BridgeActionHandler {
         restorePersistedLauncherBadge()
         WebAppConfig.syncCookies()
         qrScannerFeature.destroy()
-        faceVerificationFeature.destroy()
-        documentScannerFeature.destroy()
-        passportProcessorFeature.destroy()
-        nidProcessorFeature.destroy()
-        genericOcrFeature.destroy()
+        kycOperatingEngine.destroy()
 
         try {
             webView.stopLoading()
