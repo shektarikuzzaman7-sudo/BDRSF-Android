@@ -1,4 +1,3 @@
-// File: app/src/main/java/com/bdrsf/app/features/document/NidProcessorFeature.kt
 package com.bdrsf.app.features.document
 
 import android.app.Activity
@@ -14,6 +13,7 @@ import com.bdrsf.app.bridge.WebBridgeContract.Actions
 import com.bdrsf.app.bridge.WebBridgeContract.BridgeResponse
 import com.bdrsf.app.bridge.WebBridgeContract.Status
 import com.bdrsf.app.config.WebAppConfig
+import com.bdrsf.app.features.face.FaceVerificationFeature
 import com.google.android.gms.tasks.Tasks
 import com.google.mlkit.vision.barcode.BarcodeScanner
 import com.google.mlkit.vision.barcode.BarcodeScannerOptions
@@ -49,13 +49,15 @@ import java.util.concurrent.atomic.AtomicBoolean
 import kotlin.math.max
 
 /**
- * BDRSF ডেডিকেটেড NID ও সেলফি প্রসেসর ইঞ্জিন।
- * পাসপোর্ট লজিক থেকে সম্পূর্ণ বিচ্ছিন্ন (Zero Cross-Contamination)।
+ * BDRSF ডেডিকেটেড NID প্রসেসর ইঞ্জিন (ML Kit First + Gemini Last)।
+ * - বানানো/কোডবিহীন বা অমিল এনআইডি কার্ড আটকে দেয়।
+ * - ফ্রন্ট ও ব্যাক পার্টের তথ্য/কোড ক্রস-ম্যাচ করে।
  */
 class NidProcessorFeature(
     private val activity: Activity,
     private val bridge: AndroidBridge,
-    private val webView: WebView
+    private val webView: WebView,
+    private val faceVerificationFeature: FaceVerificationFeature? = null
 ) {
 
     private val bgExecutor: ExecutorService = Executors.newFixedThreadPool(2)
@@ -63,6 +65,7 @@ class NidProcessorFeature(
     @Volatile private var cachedFrontBase64: String = ""
     @Volatile private var cachedBackBase64: String = ""
     @Volatile private var cachedFaceBase64: String = ""
+    @Volatile private var cachedRawBackCode: String = ""
     @Volatile private var cachedBarcodeMap: Map<String, String> = emptyMap()
     @Volatile private var cachedFrontData: Map<String, String> = emptyMap()
 
@@ -75,7 +78,7 @@ class NidProcessorFeature(
 
     private val faceDetector: FaceDetector by lazy {
         val options = FaceDetectorOptions.Builder()
-            .setPerformanceMode(FaceDetectorOptions.PERFORMANCE_MODE_FAST)
+            .setPerformanceMode(FaceDetectorOptions.PERFORMANCE_MODE_ACCURATE)
             .setLandmarkMode(FaceDetectorOptions.LANDMARK_MODE_NONE)
             .setClassificationMode(FaceDetectorOptions.CLASSIFICATION_MODE_NONE)
             .build()
@@ -103,7 +106,7 @@ class NidProcessorFeature(
         when (targetSlot.lowercase(Locale.ROOT)) {
             "nid_front", "card_front" -> processNidFront(file, targetSlot, callback)
             "nid_back", "card_back" -> processNidBack(file, targetSlot, callback)
-            "face_liveness", "selfie" -> processFaceSelfie(file, targetSlot, callback)
+            "face_liveness", "selfie" -> faceVerificationFeature?.verifyCapturedSelfieAgainstDocument(file, cachedFaceBase64, callback)
             else -> processNidFront(file, targetSlot, callback)
         }
     }
@@ -115,26 +118,37 @@ class NidProcessorFeature(
                 cropCardBoxFromImage(file)
                 val (bitmap, base64) = optimizeAndCompressToBase64(file)
                 if (bitmap == null) {
-                    notifyValidationFailed(slot, "ছবি লোড করা যায়নি", callback)
+                    notifyValidationFailed(slot, "ছবি লোড করা যায়নি", callback)
                     return@execute
                 }
 
                 val faceBase64 = extractFaceFromBitmap(bitmap)
-                val inputImage = InputImage.fromBitmap(bitmap, 0)
+                if (faceBase64.isBlank()) {
+                    notifyValidationFailed(slot, "এনআইডি ফ্রন্ট পার্টে স্পষ্ট মুখমণ্ডলের ছবি পাওয়া যায়নি। বানানো বা অস্পষ্ট কার্ড গ্রহণযোগ্য নয়।", callback)
+                    cachedFrontBase64 = ""
+                    return@execute
+                }
 
+                val inputImage = InputImage.fromBitmap(bitmap, 0)
                 textRecognizer.process(inputImage)
                     .addOnSuccessListener { visionText ->
                         val allText = visionText.text
                         if (allText.contains("PASSPORT", true) || allText.contains("P<", true)) {
-                            notifyValidationFailed(slot, "ভুল ডকুমেন্ট! আপনি এনআইডির জায়গায় পাসপোর্টের ছবি দিয়েছেন।", callback)
+                            notifyValidationFailed(slot, "ভুল ডকুমেন্ট! এনআইডির জায়গায় পাসপোর্টের ছবি দেওয়া হয়েছে।", callback)
                             cachedFrontBase64 = ""
                             return@addOnSuccessListener
                         }
 
                         val extractedData = extractNidFrontData(allText)
                         val nidNo = extractedData["nid"] ?: ""
-                        if (nidNo.isEmpty() && !isNidFront(allText)) {
-                            notifyValidationFailed(slot, "সঠিক এনআইডি কার্ড সনাক্ত করা যায়নি। পরিষ্কার ছবি দিন।", callback)
+                        if (nidNo.isBlank() || nidNo.length !in listOf(10, 13, 17)) {
+                            notifyValidationFailed(slot, "সঠিক ১০, ১৩ বা ১৭ ডিজিটের এনআইডি নম্বর পাওয়া যায়নি। বানানো বা অসম্পূর্ণ কার্ড গ্রহণযোগ্য নয়।", callback)
+                            cachedFrontBase64 = ""
+                            return@addOnSuccessListener
+                        }
+
+                        if (!isNidFront(allText)) {
+                            notifyValidationFailed(slot, "বৈধ এনআইডি কার্ড সনাক্ত করা যায়নি। পরিষ্কার ছবি দিন।", callback)
                             cachedFrontBase64 = ""
                             return@addOnSuccessListener
                         }
@@ -142,10 +156,11 @@ class NidProcessorFeature(
                         cachedFrontData = extractedData
                         cachedFrontBase64 = base64
                         cachedFaceBase64 = faceBase64
+                        faceVerificationFeature?.setReferenceDocumentFace(faceBase64)
                         notifyValidationSuccess(slot, base64, extractedData, callback)
                     }
                     .addOnFailureListener {
-                        notifyValidationFailed(slot, "লেখা পড়া যায়নি, পুনরায় চেষ্টা করুন।", callback)
+                        notifyValidationFailed(slot, "লেখা পড়া যায়নি, পুনরায় চেষ্টা করুন।", callback)
                         cachedFrontBase64 = ""
                     }
             } catch (e: Exception) {
@@ -160,10 +175,17 @@ class NidProcessorFeature(
         isBackProcessing.set(true)
         bgExecutor.execute {
             try {
+                if (cachedFrontBase64.isBlank() || cachedFrontData["nid"].isNullOrBlank()) {
+                    notifyValidationFailed(slot, "আগে এনআইডি ফ্রন্ট পার্ট সঠিকভাবে ভেরিফাই করুন।", callback)
+                    isBackProcessing.set(false)
+                    return@execute
+                }
+
                 cropCardBoxFromImage(file)
                 val (bitmap, base64) = optimizeAndCompressToBase64(file)
                 if (bitmap == null) {
-                    notifyValidationFailed(slot, "ছবি লোড করা যায়নি", callback)
+                    notifyValidationFailed(slot, "ছবি লোড করা যায়নি", callback)
+                    isBackProcessing.set(false)
                     return@execute
                 }
 
@@ -184,56 +206,59 @@ class NidProcessorFeature(
                                 rawBarcode = decodeBarcodeWithZxing(bitmap) ?: ""
                             }
 
-                            val parsedBarcode = parseNidBarcodeData(rawBarcode)
-                            if (rawBarcode.isBlank() && !isNidBack(backText)) {
-                                notifyValidationFailed(slot, "পেছনের অংশে কোনো বৈধ বারকোড বা তথ্য পাওয়া যায়নি!", callback)
+                            val cleanCode = rawBarcode.trim()
+                            // বানানো এনআইডি বা যেকোনো কার্ডে ব্যাক কোড/বারকোড না থাকলে আটকে দেবে
+                            if (cleanCode.isBlank()) {
+                                notifyValidationFailed(slot, "এনআইডি ব্যাক পার্টে বারকোড/কিউআর/কোড পাওয়া যায়নি! বানানো বা কোডবিহীন কার্ড গ্রহণযোগ্য নয়।", callback)
                                 cachedBackBase64 = ""
+                                cachedRawBackCode = ""
+                                isBackProcessing.set(false)
+                                return@addOnSuccessListener
+                            }
+
+                            val parsedBarcode = parseNidBarcodeData(cleanCode, backText)
+                            val frontNid = cachedFrontData["nid"].orEmpty()
+                            val backNid = parsedBarcode["nid"].orEmpty()
+
+                            if (backNid.isNotBlank() && backNid != frontNid) {
+                                notifyValidationFailed(slot, "ফ্রন্ট পার্টের এনআইডি ($frontNid) ও ব্যাক পার্টের কোডের তথ্য ($backNid) মিলছে না! একই কার্ডের উভয় পাশ দিন।", callback)
+                                cachedBackBase64 = ""
+                                cachedRawBackCode = ""
+                                isBackProcessing.set(false)
+                                return@addOnSuccessListener
+                            }
+
+                            if (!isNidBack(backText) && backNid.isBlank()) {
+                                notifyValidationFailed(slot, "এনআইডি ব্যাক পার্টের তথ্য যাচাই করা যায়নি।", callback)
+                                cachedBackBase64 = ""
+                                cachedRawBackCode = ""
                                 isBackProcessing.set(false)
                                 return@addOnSuccessListener
                             }
 
                             cachedBackBase64 = base64
+                            cachedRawBackCode = cleanCode
                             cachedBarcodeMap = parsedBarcode
-                            val responseData = HashMap(parsedBarcode)
-                            responseData["raw_text"] = backText
+                            val responseData = HashMap(parsedBarcode).apply {
+                                put("raw_text", backText)
+                                put("back_code", cleanCode)
+                                put("matched_with_front", "true")
+                            }
                             notifyValidationSuccess(slot, base64, responseData, callback)
                             isBackProcessing.set(false)
                         }
                         .addOnFailureListener {
-                            if (isNidBack(backText)) {
-                                cachedBackBase64 = base64
-                                notifyValidationSuccess(slot, base64, mapOf("raw_text" to backText), callback)
-                            } else {
-                                notifyValidationFailed(slot, "পেছনের অংশ পড়া সম্ভব হয়নি।", callback)
-                                cachedBackBase64 = ""
-                            }
+                            notifyValidationFailed(slot, "ব্যাক পার্টের বারকোড/কোড স্ক্যান করা যায়নি।", callback)
+                            cachedBackBase64 = ""
                             isBackProcessing.set(false)
                         }
                 }.addOnFailureListener {
-                    notifyValidationFailed(slot, "কার্ডের টেক্সট পড়া যায়নি", callback)
+                    notifyValidationFailed(slot, "কার্ডের টেক্সট পড়া যায়নি", callback)
                     isBackProcessing.set(false)
                 }
             } catch (e: Exception) {
                 notifyValidationFailed(slot, "প্রসেসিং ত্রুটি: ${e.localizedMessage}", callback)
                 isBackProcessing.set(false)
-            }
-        }
-    }
-
-    private fun processFaceSelfie(file: File, slot: String, callback: String?) {
-        bgExecutor.execute {
-            try {
-                val (bitmap, base64) = optimizeAndCompressToBase64(file)
-                if (bitmap == null) {
-                    notifyValidationFailed(slot, "মুখমণ্ডলের ছবি লোড করা যায়নি", callback)
-                    return@execute
-                }
-                val extractedFace = extractFaceFromBitmap(bitmap)
-                val finalFace = if (extractedFace.isNotBlank()) extractedFace else base64
-                cachedFaceBase64 = finalFace
-                notifyValidationSuccess(slot, finalFace, mapOf("faceImage" to finalFace), callback)
-            } catch (e: Exception) {
-                notifyValidationFailed(slot, "ফেস প্রসেসিং ব্যর্থ: ${e.localizedMessage}", callback)
             }
         }
     }
@@ -246,9 +271,9 @@ class NidProcessorFeature(
                 waitCycles++
             }
 
-            if (cachedFrontBase64.isEmpty() || cachedBackBase64.isEmpty()) {
+            if (cachedFrontBase64.isEmpty() || cachedBackBase64.isEmpty() || cachedRawBackCode.isBlank()) {
                 activity.runOnUiThread {
-                    notifyValidationFailed("nid_front", "এনআইডি কার্ডের উভয় পাশের ছবি দিন", callback)
+                    notifyValidationFailed("nid_front", "বৈধ ফ্রন্ট পার্ট এবং ব্যাক পার্টের কোডসহ উভয় পাশ দিন।", callback)
                 }
                 return@execute
             }
@@ -269,6 +294,7 @@ class NidProcessorFeature(
                     put("doc_type", "NID")
                     put("front_image", cachedFrontBase64)
                     put("back_image", cachedBackBase64)
+                    put("back_code", cachedRawBackCode)
                     put("face_image", cachedFaceBase64)
                 }
 
@@ -322,6 +348,7 @@ class NidProcessorFeature(
             put("bloodGroup", ocrData.optString("bloodGroup", "").trim())
             put("birthPlace", ocrData.optString("birthPlace", "").trim())
             put("issueDate", ocrData.optString("issueDate", "").trim())
+            put("backCode", cachedRawBackCode)
         }
 
         val fullAddress = if (rawBackText.isNotBlank()) rawBackText else {
@@ -348,6 +375,7 @@ class NidProcessorFeature(
             put("mother", barcodeMap["mother"] ?: "")
             put("address", fullAddress)
             put("faceBase64", faceBase64)
+            put("backCode", cachedRawBackCode)
             put("addressDetails", backObj)
         }
 
@@ -377,15 +405,16 @@ class NidProcessorFeature(
                 bitmap = rotated
             }
 
-            val cropW = (bitmap.width * 0.90f).toInt()
-            val cropH = (cropW / 1.58f).toInt().coerceAtMost(bitmap.height)
+            // নিচের বারকোড/MRZ যেন না কাটে সেজন্য একটু বড় মার্জিন রাখা হয়েছে
+            val cropW = (bitmap.width * 0.94f).toInt()
+            val cropH = (cropW / 1.48f).toInt().coerceAtMost(bitmap.height)
             val x = ((bitmap.width - cropW) / 2).coerceAtLeast(0)
             val y = ((bitmap.height - cropH) / 2).coerceAtLeast(0)
             val croppedBitmap = Bitmap.createBitmap(bitmap, x, y, cropW.coerceAtMost(bitmap.width - x), cropH.coerceAtMost(bitmap.height - y))
             bitmap.recycle()
 
             FileOutputStream(file).use {
-                croppedBitmap.compress(Bitmap.CompressFormat.JPEG, 90, it)
+                croppedBitmap.compress(Bitmap.CompressFormat.JPEG, 92, it)
             }
             croppedBitmap.recycle()
         } catch (_: Exception) {}
@@ -403,7 +432,7 @@ class NidProcessorFeature(
                 ?: return Pair(null, "")
 
             val stream = ByteArrayOutputStream()
-            bitmap.compress(Bitmap.CompressFormat.JPEG, 85, stream)
+            bitmap.compress(Bitmap.CompressFormat.JPEG, 88, stream)
             val base64 = "data:image/jpeg;base64," + Base64.encodeToString(stream.toByteArray(), Base64.NO_WRAP)
             Pair(bitmap, base64)
         } catch (_: Exception) {
@@ -425,7 +454,7 @@ class NidProcessorFeature(
                 if (w > 30 && h > 30) {
                     val stream = ByteArrayOutputStream()
                     val faceBmp = Bitmap.createBitmap(bitmap, x, y, w, h)
-                    faceBmp.compress(Bitmap.CompressFormat.JPEG, 90, stream)
+                    faceBmp.compress(Bitmap.CompressFormat.JPEG, 92, stream)
                     faceBmp.recycle()
                     return "data:image/jpeg;base64," + Base64.encodeToString(stream.toByteArray(), Base64.NO_WRAP)
                 }
@@ -480,14 +509,13 @@ class NidProcessorFeature(
         return result
     }
 
-    private fun parseNidBarcodeData(barcodeData: String): Map<String, String> {
+    private fun parseNidBarcodeData(barcodeData: String, fallbackBackText: String): Map<String, String> {
         val result = mutableMapOf<String, String>()
-        if (barcodeData.isBlank()) return result
-        val normalized = convertBanglaToEnglishDigits(barcodeData)
+        val combined = convertBanglaToEnglishDigits("$barcodeData\n$fallbackBackText")
 
-        Regex("<pin>\\s*([0-9]{10,17})\\s*</pin>", RegexOption.IGNORE_CASE).find(normalized)
+        Regex("<pin>\\s*([0-9]{10,17})\\s*</pin>", RegexOption.IGNORE_CASE).find(combined)
             ?.groupValues?.getOrNull(1)?.let { result["nid"] = it }
-            ?: Regex("([0-9]{10}|[0-9]{13}|[0-9]{17})").find(normalized)?.groupValues?.getOrNull(1)?.let { result["nid"] = it }
+            ?: Regex("([0-9]{17}|[0-9]{13}|[0-9]{10})").find(combined)?.groupValues?.getOrNull(1)?.let { result["nid"] = it }
 
         Regex("<name>\\s*([^<]+)\\s*</name>", RegexOption.IGNORE_CASE).find(barcodeData)?.groupValues?.getOrNull(1)?.let { result["name"] = it.trim() }
         Regex("<(nameBn|name_bn)>\\s*([^<]+)\\s*<", RegexOption.IGNORE_CASE).find(barcodeData)?.groupValues?.getOrNull(2)?.let { result["name_bn"] = it.trim() }
@@ -537,8 +565,10 @@ class NidProcessorFeature(
         cachedFrontBase64 = ""
         cachedBackBase64 = ""
         cachedFaceBase64 = ""
+        cachedRawBackCode = ""
         cachedBarcodeMap = emptyMap()
         cachedFrontData = emptyMap()
+        faceVerificationFeature?.setReferenceDocumentFace("")
     }
 
     fun destroy() {
@@ -547,7 +577,7 @@ class NidProcessorFeature(
             textRecognizer.close()
             faceDetector.close()
             barcodeScanner.close()
-            bgExecutor.shutdown()
+            bgExecutor.shutdownNow()
         } catch (_: Exception) {}
     }
 }
