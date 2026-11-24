@@ -371,10 +371,11 @@ class MainActivity : AppCompatActivity(), AndroidBridge.BridgeActionHandler {
         contactPickerFeature = ContactPickerFeature(this, androidBridge)
         qrScannerFeature = QrScannerFeature(this, mainLayout, androidBridge)
 
-        // ১. ৩ডি ফেস লাইভনেস ও ম্যাচিং ইঞ্জিন (সকল ডকুমেন্ট প্রসেসরের সাথে যুক্ত)
         faceVerificationFeature = FaceVerificationFeature(this, androidBridge, webView, mainLayout)
+        passportProcessorFeature = PassportProcessorFeature(this, androidBridge, webView)
+        nidProcessorFeature = NidProcessorFeature(this, androidBridge, webView)
+        genericOcrFeature = GenericOcrFeature(this, androidBridge, webView)
 
-        // ২. কাস্টম CameraX ডকুমেন্ট স্ক্যানার
         documentScannerFeature = DocumentScannerFeature(this, mainLayout, androidBridge) { capturedFile, scanMode, policy, callback ->
             when (scanMode) {
                 "passport" -> passportProcessorFeature.processPassportFile(capturedFile, policy, callback)
@@ -383,23 +384,6 @@ class MainActivity : AppCompatActivity(), AndroidBridge.BridgeActionHandler {
                 else -> genericOcrFeature.processWithPolicy(capturedFile, policy, callback)
             }
         }
-
-        // ৩. ডেডিকেটেড ডকুমেন্ট প্রসেসরসমূহ (FaceVerificationFeature ও DocumentScannerFeature ইনজেক্টেড)
-        passportProcessorFeature = PassportProcessorFeature(
-            activity = this,
-            bridge = androidBridge,
-            webView = webView,
-            faceVerificationFeature = faceVerificationFeature,
-            documentScannerFeature = documentScannerFeature
-        )
-        nidProcessorFeature = NidProcessorFeature(
-            activity = this,
-            bridge = androidBridge,
-            webView = webView,
-            faceVerificationFeature = faceVerificationFeature,
-            documentScannerFeature = documentScannerFeature
-        )
-        genericOcrFeature = GenericOcrFeature(this, androidBridge, webView)
 
         webViewClient = NativeWebViewClient(
             activity = this,
@@ -528,25 +512,36 @@ class MainActivity : AppCompatActivity(), AndroidBridge.BridgeActionHandler {
                 if (source == "gallery") {
                     passportProcessorFeature.openGalleryPicker(payload, callback)
                 } else {
-                    passportProcessorFeature.openPassportCameraScanner(payload, callback)
+                    val passPayload = JSONObject(payload.toString()).apply {
+                        put("mode", "passport")
+                        put("scanMode", "passport")
+                    }
+                    documentScannerFeature.startScanner(passPayload, callback)
                 }
             }
             rawDocType.contains("back") -> {
                 if (source == "gallery") {
                     nidProcessorFeature.openGalleryPicker("nid_back", callback)
                 } else {
-                    nidProcessorFeature.openNidCameraScanner("nid_back", callback)
+                    val nidBackPayload = JSONObject(payload.toString()).apply {
+                        put("mode", "nid_back")
+                        put("scanMode", "nid_back")
+                    }
+                    documentScannerFeature.startScanner(nidBackPayload, callback)
                 }
             }
             rawDocType.contains("nid") || rawDocType.contains("front") -> {
                 if (source == "gallery") {
                     nidProcessorFeature.openGalleryPicker("nid_front", callback)
                 } else {
-                    nidProcessorFeature.openNidCameraScanner("nid_front", callback)
+                    val nidFrontPayload = JSONObject(payload.toString()).apply {
+                        put("mode", "nid_front")
+                        put("scanMode", "nid_front")
+                    }
+                    documentScannerFeature.startScanner(nidFrontPayload, callback)
                 }
             }
             else -> {
-                // বিদ্যুৎ বিল, ব্যাংক স্টেটমেন্ট, TIN বা ভ্যাট সার্টিফিকেট স্ক্যানিং
                 val normalizedPayload = JSONObject(payload.toString()).apply {
                     put("mode", "generic")
                     put("scanMode", "generic")
@@ -684,18 +679,17 @@ class MainActivity : AppCompatActivity(), AndroidBridge.BridgeActionHandler {
             }
             "SCAN_DOCUMENT_WITH_POLICY" -> {
                 val mode = payload.optString("mode", payload.optString("docCategory", "")).lowercase(Locale.ROOT)
-                when {
-                    mode.contains("pass") -> passportProcessorFeature.openPassportCameraScanner(payload, callback)
-                    mode.contains("back") -> nidProcessorFeature.openNidCameraScanner("nid_back", callback)
-                    mode.contains("nid") || mode.contains("front") -> nidProcessorFeature.openNidCameraScanner("nid_front", callback)
-                    else -> {
-                        val genericPayload = JSONObject(payload.toString()).apply {
-                            put("mode", "generic")
-                            put("scanMode", "generic")
-                        }
-                        documentScannerFeature.startScanner(genericPayload, callback)
+                val normalized = JSONObject(payload.toString()).apply {
+                    val resolvedMode = when {
+                        mode.contains("pass") -> "passport"
+                        mode.contains("back") -> "nid_back"
+                        mode.contains("nid") || mode.contains("front") -> "nid_front"
+                        else -> "generic"
                     }
+                    put("mode", resolvedMode)
+                    put("scanMode", resolvedMode)
                 }
+                documentScannerFeature.startScanner(normalized, callback)
             }
             "PICK_NID_GALLERY" -> {
                 val slot = payload.optString("slot", payload.optString("mode", "nid_front"))
