@@ -67,6 +67,7 @@ import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
+import kotlin.math.abs
 import kotlin.math.cos
 import kotlin.math.max
 import kotlin.math.min
@@ -145,9 +146,6 @@ class FaceVerificationFeature(
         referenceDocFaceBase64 = docFaceBase64.trim()
     }
 
-    /**
-     * কাস্টম 3D অ্যানিমেশনসহ ফ্রন্ট ক্যামেরা চালু করে লাইভনেস ও ফেস ভেরিফিকেশন শুরু করে।
-     */
     fun startFaceVerificationScanner(docFaceBase64Override: String? = null, callback: String? = null) {
         if (destroyed) return
         val docFace = (docFaceBase64Override ?: referenceDocFaceBase64).trim()
@@ -336,9 +334,8 @@ class FaceVerificationFeature(
         val leftEye = face.leftEyeOpenProbability ?: 1f
         val rightEye = face.rightEyeOpenProbability ?: 1f
 
-        // ধাপ ১: সোজা মুখ
         if (currentPose == LivenessPose.ALIGN_CENTER) {
-            if (kotlin.math.abs(yaw) <= 10f && kotlin.math.abs(pitch) <= 10f) {
+            if (abs(yaw) <= 10f && abs(pitch) <= 10f) {
                 centerHoldFrames++
                 hud3dView?.updateState(LivenessPose.ALIGN_CENTER, Color.parseColor("#00E676"), 0.2f)
                 if (centerHoldFrames >= 4) {
@@ -352,7 +349,6 @@ class FaceVerificationFeature(
             return
         }
 
-        // ধাপ ২: বামে ঘোরানো
         if (currentPose == LivenessPose.TURN_LEFT) {
             if (yaw <= -13f) {
                 sawLeftTurn = true
@@ -364,7 +360,6 @@ class FaceVerificationFeature(
             return
         }
 
-        // ধাপ ৩: ডানে ঘোরানো
         if (currentPose == LivenessPose.TURN_RIGHT) {
             if (yaw >= 13f) {
                 sawRightTurn = true
@@ -376,7 +371,6 @@ class FaceVerificationFeature(
             return
         }
 
-        // ধাপ ৪: উপর-নিচে ঘোরানো
         if (currentPose == LivenessPose.TILT_UP_DOWN) {
             if (pitch <= -10f || pitch >= 11f) {
                 sawVerticalTilt = true
@@ -388,7 +382,6 @@ class FaceVerificationFeature(
             return
         }
 
-        // ধাপ ৫: চোখ মিটমিট করা ও ফাইনাল ক্যাপচার
         if (currentPose == LivenessPose.BLINK_EYES) {
             if (leftEye < 0.35f || rightEye < 0.35f) {
                 sawEyeClosed = true
@@ -552,7 +545,6 @@ class FaceVerificationFeature(
                     return@execute
                 }
 
-                // হাই-রেজুলেশন (720x860) ক্লিয়ার ফেস ইমেজ তৈরি
                 croppedLiveBitmap = Bitmap.createBitmap(fullBitmap, x, y, w, h)
                 hdLiveBitmap = Bitmap.createScaledBitmap(croppedLiveBitmap, HD_FACE_WIDTH, HD_FACE_HEIGHT, true)
                 val liveFaceBase64 = bitmapToBase64(hdLiveBitmap, 95)
@@ -605,7 +597,6 @@ class FaceVerificationFeature(
                     ExifInterface.ORIENTATION_ROTATE_180 -> postRotate(180f)
                     ExifInterface.ORIENTATION_ROTATE_270 -> postRotate(270f)
                 }
-                // ফ্রন্ট ক্যামেরার মিরর স্বাভাবিক করা
                 preScale(-1f, 1f)
             }
 
@@ -760,9 +751,6 @@ class FaceVerificationFeature(
         } catch (_: Exception) {}
     }
 
-    /**
-     * কাস্টম 3D ওয়্যারফ্রেম ও গাইড HUD ভিউ।
-     */
     private inner class Face3dLivenessHudView(context: Context) : View(context) {
         private val clearPaint = Paint().apply {
             xfermode = PorterDuffXfermode(PorterDuff.Mode.CLEAR)
@@ -838,7 +826,6 @@ class FaceVerificationFeature(
             canvas.drawOval(ovalBounds, clearPaint)
             canvas.drawOval(ovalBounds, ovalRingPaint)
 
-            // 3D Wireframe Sphere/Head Mesh অ্যানিমেশন
             val cx = ovalBounds.centerX()
             val cy = ovalBounds.centerY()
             val rx = ovalBounds.width() * 0.28f
@@ -857,7 +844,6 @@ class FaceVerificationFeature(
             val headCenterX = cx + yawOffset
             val headCenterY = cy + pitchOffset
 
-            // 3D ল্যাটিটিউড ও লঙ্গিটিউড লাইন
             canvas.drawOval(
                 RectF(headCenterX - rx, headCenterY - ry, headCenterX + rx, headCenterY + ry),
                 meshPaint
