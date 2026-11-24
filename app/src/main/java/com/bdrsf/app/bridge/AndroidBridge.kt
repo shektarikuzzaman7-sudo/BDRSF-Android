@@ -15,7 +15,7 @@ import org.json.JSONObject
 
 /**
  * BDRSF থ্রেড-সেফ জাভাস্ক্রিপ্ট গেটওয়ে।
- * ওয়েবের সমস্ত executeFeature কল গ্রহণ করে UI থ্রেডে ব্রিজ হ্যান্ডলারকে পাঠায়।
+ * ওয়েবের সমস্ত executeFeature ও ডাইরেক্ট ব্রিজ কল গ্রহণ করে UI থ্রেডে ব্রিজ হ্যান্ডলারকে পাঠায়।
  */
 class AndroidBridge(
     private val activity: Activity,
@@ -124,21 +124,54 @@ class AndroidBridge(
             put("documentType", raw)
             put("docType", raw)
             put("mode", raw.lowercase())
+            put("scanMode", raw.lowercase())
         }
-        executeFeature(Actions.START_KYC, payload.toString(), "onDocumentValidated")
+        executeFeature(Actions.START_KYC, payload.toString(), "handleDocumentPreview")
+    }
+
+    @JavascriptInterface
+    fun pickGallery(slot: String?) {
+        val cleanSlot = (slot ?: "nid_front").trim()
+        val payload = JSONObject().apply {
+            put("slot", cleanSlot)
+            put("mode", cleanSlot.lowercase())
+            put("source", "gallery")
+        }
+        executeFeature("PICK_KYC_GALLERY", payload.toString(), "handleDocumentPreview")
     }
 
     @JavascriptInterface
     fun pickNidGallery(slot: String?) {
         val payload = JSONObject().apply {
             put("slot", (slot ?: "nid_front").trim())
+            put("source", "gallery")
         }
-        executeFeature("PICK_NID_GALLERY", payload.toString(), "onDocumentValidated")
+        executeFeature("PICK_NID_GALLERY", payload.toString(), "handleDocumentPreview")
     }
 
     @JavascriptInterface
     fun pickPassportGallery() {
-        executeFeature("PICK_PASSPORT_GALLERY", "{}", "onDocumentValidated")
+        val payload = JSONObject().apply {
+            put("slot", "passport")
+            put("mode", "passport")
+            put("source", "gallery")
+        }
+        executeFeature("PICK_PASSPORT_GALLERY", payload.toString(), "handleDocumentPreview")
+    }
+
+    @JavascriptInterface
+    fun startFaceDetectionCamera(mode: String?) {
+        val payload = JSONObject().apply {
+            put("actionType", "face_verification")
+            put("mode", (mode ?: "hd_face").trim())
+            put("quality", "HIGH")
+        }
+        executeFeature("START_HD_FACE_CAMERA", payload.toString(), "handleHdFaceDetected")
+    }
+
+    @JavascriptInterface
+    fun startLiveness(mode: String?) {
+        startFaceDetectionCamera(mode)
     }
 
     @JavascriptInterface
@@ -151,7 +184,13 @@ class AndroidBridge(
             put("scanMode", "face_liveness")
             put("docFaceImage", docFaceBase64 ?: "")
         }
-        executeFeature("FACE_VERIFICATION", payload.toString(), "onFaceLivenessResult")
+        executeFeature("FACE_VERIFICATION", payload.toString(), "handleHdFaceDetected")
+    }
+
+    @JavascriptInterface
+    fun triggerHaptic(type: String?) {
+        val payload = JSONObject().apply { put("type", type ?: "light") }
+        executeFeature(Actions.TRIGGER_HAPTIC, payload.toString(), "")
     }
 
     @JavascriptInterface
