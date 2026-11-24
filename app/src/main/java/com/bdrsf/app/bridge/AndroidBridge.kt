@@ -125,6 +125,19 @@ class AndroidBridge(
     }
 
     @JavascriptInterface
+    fun startFaceVerification(docFaceBase64: String?) {
+        val payload = JSONObject().apply {
+            put("actionType", "face_verification")
+            put("documentType", "FACE_LIVENESS")
+            put("docType", "FACE_LIVENESS")
+            put("mode", "face_liveness")
+            put("scanMode", "face_liveness")
+            put("docFaceImage", docFaceBase64 ?: "")
+        }
+        executeFeature("FACE_VERIFICATION", payload.toString(), "onFaceLivenessResult")
+    }
+
+    @JavascriptInterface
     fun showToast(message: String?) {
         val payload = JSONObject().apply { put("message", message ?: "") }
         executeFeature(Actions.SHOW_TOAST, payload.toString(), "")
