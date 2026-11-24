@@ -39,19 +39,33 @@ import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
+import kotlin.math.abs
+import kotlin.math.atan2
 import kotlin.math.max
+import kotlin.math.min
 
+/**
+ * BDRSF ডেডিকেটেড পাসপোর্ট প্রসেসর ইঞ্জিন।
+ * - পাসপোর্টের আলাদা ব্যাক পার্ট নেই; দুই পাতা একসাথে A4 সাইজ কাস্টম ক্যামেরায় স্ক্যান হয়।
+ * - বাঁকা/তেরা ছবি সোজা (deskew) করে এবং A4 ফ্রেমে ক্রপ করে।
+ * - পাসপোর্টের ছবি ক্রপ করে হাই-রেজুলেশনে (720x860) কনভার্ট করে ফেস ম্যাচিংয়ের জন্য প্রস্তুত রাখে।
+ * - ভেতরের তথ্য এবং QR/বারকোড/MRZ ক্রস-যাচাই করে সঠিকতা নিশ্চিত করে।
+ */
 class PassportProcessorFeature(
     private val activity: Activity,
     private val bridge: AndroidBridge,
     private val webView: WebView,
-    private val faceVerificationFeature: FaceVerificationFeature? = null
+    private val faceVerificationFeature: FaceVerificationFeature? = null,
+    private val documentScannerFeature: DocumentScannerFeature? = null
 ) {
 
     companion object {
         const val RC_PICK_PASSPORT_GALLERY = 6012
-        private const val MAX_IMAGE_DIMENSION = 1280
-        private const val OCR_IMAGE_QUALITY = 85
+        private const val A4_SPREAD_ASPECT_RATIO = 0.707f // A4 portrait spread (width / height)
+        private const val MAX_IMAGE_DIMENSION = 1600
+        private const val OCR_IMAGE_QUALITY = 90
+        private const val HD_FACE_WIDTH = 720
+        private const val HD_FACE_HEIGHT = 860
     }
 
     private val bgExecutor: ExecutorService = Executors.newSingleThreadExecutor()
@@ -75,6 +89,9 @@ class PassportProcessorFeature(
     private val faceDetector by lazy {
         val options = FaceDetectorOptions.Builder()
             .setPerformanceMode(FaceDetectorOptions.PERFORMANCE_MODE_ACCURATE)
+            .setLandmarkMode(FaceDetectorOptions.LANDMARK_MODE_ALL)
+            .setClassificationMode(FaceDetectorOptions.CLASSIFICATION_MODE_NONE)
+            .setMinFaceSize(0.08f)
             .build()
         FaceDetection.getClient(options)
     }
@@ -100,6 +117,39 @@ class PassportProcessorFeature(
         return JSONObject(source.toString())
     }
 
+    /**
+     * পাসপোর্টের দুই পাতা একসাথে ধরার জন্য A4 সাইজের কাস্টম ক্যামেরা চালু করে।
+     */
+    fun openPassportCameraScanner(policyPayload: JSONObject? = null, callback: String? = null) {
+        if (destroyed) {
+            notifyError("Passport Processor বন্ধ রয়েছে", callback)
+            return
+        }
+        val policy = copyJson(policyPayload ?: activePolicy)
+        updatePolicy(policy)
+        pendingCallback = callback
+
+        val payload = JSONObject(policy.toString()).apply {
+            put("mode", "passport")
+            put("scanMode", "passport")
+            put("documentType", "PASSPORT")
+            put("docType", "PASSPORT")
+            put("docCategory", "passport")
+            put("frameRatio", A4_SPREAD_ASPECT_RATIO.toDouble())
+            put("guideText", "পাসপোর্টের উভয় পাতা একসাথে A4 ফ্রেমে সোজা রাখুন")
+            put("autoCapture", true)
+        }
+
+        if (documentScannerFeature != null) {
+            documentScannerFeature.startScanner(payload, callback)
+        } else {
+            bridge.executeFeature(Actions.START_KYC, payload.toString(), callback ?: "onDocumentValidated")
+        }
+    }
+
+    /**
+     * সরাসরি ফোনের গ্যালারি খুলে পাসপোর্টের ছবি নির্বাচন করে।
+     */
     fun openGalleryPicker(policyPayload: JSONObject, callback: String?) {
         if (destroyed) {
             notifyError("Passport Processor বন্ধ রয়েছে", callback)
@@ -169,10 +219,12 @@ class PassportProcessorFeature(
                 }
                 try {
                     fixExifOrientation(file)
+                    cropToA4SpreadFile(file)
+
                     val imageResult = optimizeAndCompress(file)
                     processedBitmap = imageResult.first
-                    val fullPageBase64 = imageResult.second
-                    val bitmap = processedBitmap
+                    var fullPageBase64 = imageResult.second
+                    var bitmap = processedBitmap
                     if (bitmap == null || bitmap.isRecycled || fullPageBase64.isEmpty()) {
                         recycleBitmap()
                         notifyError("পাসপোর্টের ছবি প্রসেস করা যায়নি", callback)
@@ -184,61 +236,79 @@ class PassportProcessorFeature(
                         return@execute
                     }
 
-                    val inputImage = InputImage.fromBitmap(bitmap, 0)
-                    val docFaceBase64 = extractFaceFromBitmap(bitmap)
-                    val decodedCodes = scanPassportCodes(inputImage)
+                    var inputImage = InputImage.fromBitmap(bitmap, 0)
+                    var visionText = Tasks.await(textRecognizer.process(inputImage), 8, TimeUnit.SECONDS)
 
-                    textRecognizer.process(inputImage)
-                        .addOnSuccessListener { visionText ->
-                            try {
-                                if (destroyed) return@addOnSuccessListener
-                                val rawText = visionText.text
-                                val validationError = validateAgainstPhpPolicy(rawText, policy)
-                                if (validationError != null) {
-                                    notifyError(validationError, callback)
-                                    return@addOnSuccessListener
-                                }
-                                val fields = extractAllEnglishPassportFields(visionText).toMutableMap()
-                                if (decodedCodes.first.isNotBlank()) {
-                                    fields["qrCodeData"] = decodedCodes.first
-                                }
-                                if (decodedCodes.second.isNotBlank()) {
-                                    fields["barcodeData"] = decodedCodes.second
-                                }
-
-                                if (!isPassportDocument(rawText, fields)) {
-                                    notifyError(
-                                        "পাসপোর্টের প্রয়োজনীয় তথ্য পাওয়া যায়নি। পাসপোর্টের তথ্যের পাতার পরিষ্কার ছবি দিন।",
-                                        callback
-                                    )
-                                    return@addOnSuccessListener
-                                }
-
-                                if (docFaceBase64.isNotBlank()) {
-                                    faceVerificationFeature?.setReferenceDocumentFace(docFaceBase64)
-                                }
-
-                                dispatchPassportSuccess(
-                                    fullPageBase64 = fullPageBase64,
-                                    docFaceBase64 = docFaceBase64,
-                                    fields = fields,
-                                    qrProcessed = decodedCodes.first.isNotBlank(),
-                                    barcodeProcessed = decodedCodes.second.isNotBlank(),
-                                    callback = callback
-                                )
-                            } catch (e: Exception) {
-                                notifyError("পাসপোর্ট তথ্য প্রসেসিং ত্রুটি: ${e.localizedMessage ?: ""}", callback)
-                            } finally {
-                                recycleBitmap()
-                            }
-                        }
-                        .addOnFailureListener { error ->
+                    // বাঁকা/তেরা থাকলে টেক্সট লাইনের অ্যাঙ্গেল অনুযায়ী সোজা (deskew) করা
+                    val deskewAngle = estimateSkewAngle(visionText)
+                    if (abs(deskewAngle) in 1.2f..22.0f) {
+                        val straightened = rotateBitmap(bitmap, -deskewAngle)
+                        if (straightened != null && straightened !== bitmap) {
                             recycleBitmap()
-                            notifyError("পাসপোর্টের লেখা পড়া যায়নি। পরিষ্কার ছবি দিন। ${error.localizedMessage ?: ""}", callback)
+                            bitmapRecycled.set(false)
+                            processedBitmap = straightened
+                            bitmap = straightened
+                            fullPageBase64 = bitmapToBase64(bitmap, OCR_IMAGE_QUALITY)
+                            saveBitmapToFile(bitmap, file)
+                            inputImage = InputImage.fromBitmap(bitmap, 0)
+                            visionText = Tasks.await(textRecognizer.process(inputImage), 8, TimeUnit.SECONDS)
                         }
+                    }
+
+                    val rawText = visionText.text.orEmpty()
+                    val validationError = validateAgainstPhpPolicy(rawText, policy)
+                    if (validationError != null) {
+                        recycleBitmap()
+                        notifyError(validationError, callback)
+                        return@execute
+                    }
+
+                    val docFaceBase64 = extractHighResFaceFromBitmap(bitmap)
+                    val decodedCodes = scanPassportCodes(inputImage)
+                    val fields = extractAllEnglishPassportFields(visionText).toMutableMap()
+
+                    if (decodedCodes.first.isNotBlank()) {
+                        fields["qrCodeData"] = decodedCodes.first
+                    }
+                    if (decodedCodes.second.isNotBlank()) {
+                        fields["barcodeData"] = decodedCodes.second
+                    }
+
+                    if (!isPassportDocument(rawText, fields)) {
+                        recycleBitmap()
+                        notifyError(
+                            "এটি বৈধ পাসপোর্ট হিসেবে সনাক্ত হয়নি। পাসপোর্টের তথ্য ও ছবির পাতা স্পষ্টভাবে দিন।",
+                            callback
+                        )
+                        return@execute
+                    }
+
+                    val internalCheck = verifyPassportInternalConsistency(fields, decodedCodes.first, decodedCodes.second)
+                    if (!internalCheck.first) {
+                        recycleBitmap()
+                        notifyError(internalCheck.second, callback)
+                        return@execute
+                    }
+
+                    fields["consistencyVerified"] = "true"
+                    fields["consistencyNote"] = internalCheck.second
+
+                    if (docFaceBase64.isNotBlank()) {
+                        faceVerificationFeature?.setReferenceDocumentFace(docFaceBase64)
+                    }
+
+                    dispatchPassportSuccess(
+                        fullPageBase64 = fullPageBase64,
+                        docFaceBase64 = docFaceBase64,
+                        fields = fields,
+                        qrProcessed = decodedCodes.first.isNotBlank(),
+                        barcodeProcessed = decodedCodes.second.isNotBlank(),
+                        callback = callback
+                    )
+                    recycleBitmap()
                 } catch (e: Exception) {
                     recycleBitmap()
-                    notifyError("প্রসেসিং ত্রুটি: ${e.localizedMessage ?: ""}", callback)
+                    notifyError("পাসপোর্ট প্রসেসিং ত্রুটি: ${e.localizedMessage ?: ""}", callback)
                 }
             }
         } catch (e: Exception) {
@@ -248,7 +318,7 @@ class PassportProcessorFeature(
 
     private fun scanPassportCodes(inputImage: InputImage): Pair<String, String> {
         return try {
-            val barcodes = Tasks.await(barcodeScanner.process(inputImage), 3, TimeUnit.SECONDS)
+            val barcodes = Tasks.await(barcodeScanner.process(inputImage), 4, TimeUnit.SECONDS)
             val qrList = mutableListOf<String>()
             val barList = mutableListOf<String>()
             for (b in barcodes) {
@@ -256,7 +326,7 @@ class PassportProcessorFeature(
                     try { String(it, StandardCharsets.UTF_8) } catch (_: Exception) { b.rawValue ?: "" }
                 } ?: (b.rawValue ?: "")
                 if (raw.isBlank()) continue
-                if (b.format == Barcode.FORMAT_QR_CODE) qrList.add(raw) else barList.add(raw)
+                if (b.format == Barcode.FORMAT_QR_CODE) qrList.add(raw.trim()) else barList.add(raw.trim())
             }
             Pair(qrList.joinToString(" | "), barList.joinToString(" | "))
         } catch (_: Exception) {
@@ -264,29 +334,136 @@ class PassportProcessorFeature(
         }
     }
 
-    private fun extractFaceFromBitmap(bitmap: Bitmap): String {
+    /**
+     * পাসপোর্টের ছবি ক্রপ করে হাই-রেজুলেশন (720x860) JPEG Base64-এ কনভার্ট করে।
+     */
+    private fun extractHighResFaceFromBitmap(bitmap: Bitmap): String {
+        var rawFace: Bitmap? = null
+        var hdFace: Bitmap? = null
         return try {
-            val faces = Tasks.await(faceDetector.process(InputImage.fromBitmap(bitmap, 0)), 3, TimeUnit.SECONDS)
-            if (!faces.isNullOrEmpty()) {
-                val box = faces[0].boundingBox
-                val padX = (box.width() * 0.25f).toInt()
-                val padY = (box.height() * 0.35f).toInt()
-                val x = (box.left - padX).coerceIn(0, bitmap.width - 1)
-                val y = (box.top - padY).coerceIn(0, bitmap.height - 1)
-                val w = (box.width() + padX * 2).coerceAtMost(bitmap.width - x)
-                val h = (box.height() + padY * 2).coerceAtMost(bitmap.height - y)
-                if (w > 30 && h > 30) {
-                    val out = ByteArrayOutputStream()
-                    val faceBmp = Bitmap.createBitmap(bitmap, x, y, w, h)
-                    faceBmp.compress(Bitmap.CompressFormat.JPEG, 92, out)
-                    faceBmp.recycle()
-                    return "data:image/jpeg;base64," + Base64.encodeToString(out.toByteArray(), Base64.NO_WRAP)
-                }
+            val faces = Tasks.await(faceDetector.process(InputImage.fromBitmap(bitmap, 0)), 4, TimeUnit.SECONDS)
+            val box = faces?.firstOrNull()?.boundingBox ?: return ""
+
+            val padX = (box.width() * 0.28f).toInt()
+            val padY = (box.height() * 0.36f).toInt()
+            val x = (box.left - padX).coerceIn(0, max(0, bitmap.width - 1))
+            val y = (box.top - padY).coerceIn(0, max(0, bitmap.height - 1))
+            val w = (box.width() + padX * 2).coerceAtMost(bitmap.width - x)
+            val h = (box.height() + padY * 2).coerceAtMost(bitmap.height - y)
+
+            if (w >= 32 && h >= 32) {
+                rawFace = Bitmap.createBitmap(bitmap, x, y, w, h)
+                hdFace = Bitmap.createScaledBitmap(rawFace, HD_FACE_WIDTH, HD_FACE_HEIGHT, true)
+                return bitmapToBase64(hdFace, 95)
             }
             ""
         } catch (_: Exception) {
             ""
+        } finally {
+            if (hdFace !== rawFace) hdFace?.let { if (!it.isRecycled) it.recycle() }
+            rawFace?.let { if (!it.isRecycled) it.recycle() }
         }
+    }
+
+    private fun estimateSkewAngle(visionText: Text): Float {
+        val angles = mutableListOf<Float>()
+        for (block in visionText.textBlocks) {
+            for (line in block.lines) {
+                val box = line.boundingBox ?: continue
+                if (box.width() > box.height() * 2.5f && box.width() > 80) {
+                    val angle = line.angle
+                    if (!angle.isNaN() && abs(angle) <= 25f) {
+                        angles.add(angle)
+                    }
+                }
+            }
+        }
+        if (angles.isEmpty()) return 0f
+        angles.sort()
+        return angles[angles.size / 2]
+    }
+
+    private fun rotateBitmap(source: Bitmap, degrees: Float): Bitmap? {
+        return try {
+            val matrix = Matrix().apply { postRotate(degrees) }
+            Bitmap.createBitmap(source, 0, 0, source.width, source.height, matrix, true)
+        } catch (_: Exception) {
+            null
+        }
+    }
+
+    private fun cropToA4SpreadFile(file: File) {
+        var original: Bitmap? = null
+        var cropped: Bitmap? = null
+        try {
+            original = BitmapFactory.decodeFile(file.absolutePath) ?: return
+            val currentRatio = original.width.toFloat() / max(1, original.height).toFloat()
+            val targetW: Int
+            val targetH: Int
+
+            if (currentRatio > A4_SPREAD_ASPECT_RATIO) {
+                targetH = (original.height * 0.94f).toInt().coerceAtLeast(1)
+                targetW = (targetH * A4_SPREAD_ASPECT_RATIO).toInt().coerceAtMost(original.width)
+            } else {
+                targetW = (original.width * 0.94f).toInt().coerceAtLeast(1)
+                targetH = (targetW / A4_SPREAD_ASPECT_RATIO).toInt().coerceAtMost(original.height)
+            }
+
+            val x = ((original.width - targetW) / 2).coerceIn(0, max(0, original.width - 1))
+            val y = ((original.height - targetH) / 2).coerceIn(0, max(0, original.height - 1))
+            val safeW = targetW.coerceAtMost(original.width - x).coerceAtLeast(1)
+            val safeH = targetH.coerceAtMost(original.height - y).coerceAtLeast(1)
+
+            cropped = Bitmap.createBitmap(original, x, y, safeW, safeH)
+            saveBitmapToFile(cropped, file)
+        } catch (_: Exception) {
+        } finally {
+            if (cropped !== original) cropped?.let { if (!it.isRecycled) it.recycle() }
+            original?.let { if (!it.isRecycled) it.recycle() }
+        }
+    }
+
+    private fun saveBitmapToFile(bitmap: Bitmap, file: File) {
+        FileOutputStream(file).use { out ->
+            bitmap.compress(Bitmap.CompressFormat.JPEG, 92, out)
+            out.flush()
+        }
+    }
+
+    private fun bitmapToBase64(bitmap: Bitmap, quality: Int): String {
+        val out = ByteArrayOutputStream()
+        bitmap.compress(Bitmap.CompressFormat.JPEG, quality, out)
+        return "data:image/jpeg;base64," + Base64.encodeToString(out.toByteArray(), Base64.NO_WRAP)
+    }
+
+    /**
+     * পাসপোর্টের ভেতরে থাকা তথ্য ও QR/বারকোড/MRZ ক্রস-যাচাই করে।
+     */
+    private fun verifyPassportInternalConsistency(
+        fields: Map<String, String>,
+        qrData: String,
+        barcodeData: String
+    ): Pair<Boolean, String> {
+        val passportNo = fields["passportNo"].orEmpty().trim().uppercase(Locale.ROOT)
+        val combinedCodeText = "$qrData $barcodeData".trim().uppercase(Locale.ROOT)
+
+        if (passportNo.isBlank()) {
+            return Pair(false, "পাসপোর্ট নম্বর পাওয়া যায়নি। স্পষ্ট ছবি দিন।")
+        }
+
+        if (combinedCodeText.isNotBlank()) {
+            val codeDigitsOrAlnum = combinedCodeText.replace(Regex("[^A-Z0-9]"), "")
+            val cleanPassNo = passportNo.replace(Regex("[^A-Z0-9]"), "")
+            if (cleanPassNo.length >= 6 && !codeDigitsOrAlnum.contains(cleanPassNo)) {
+                return Pair(
+                    false,
+                    "পাসপোর্টের ভেতরের QR/বারকোড তথ্যের সাথে পাসপোর্ট নম্বর ($passportNo) মিলছে না!"
+                )
+            }
+            return Pair(true, "পাসপোর্টের তথ্য এবং QR/বারকোড সফলভাবে মিলেছে।")
+        }
+
+        return Pair(true, "পাসপোর্টের তথ্য ও MRZ সফলভাবে যাচাই হয়েছে।")
     }
 
     private fun isPassportDocument(rawText: String, fields: Map<String, String>): Boolean {
@@ -562,7 +739,7 @@ class PassportProcessorFeature(
             val rotated = Bitmap.createBitmap(original, 0, 0, original.width, original.height, matrix, true)
             if (rotated !== original && !original.isRecycled) original.recycle()
             try {
-                FileOutputStream(file).use { output -> rotated.compress(Bitmap.CompressFormat.JPEG, 90, output); output.flush() }
+                saveBitmapToFile(rotated, file)
             } finally {
                 if (!rotated.isRecycled) rotated.recycle()
             }
@@ -584,15 +761,8 @@ class PassportProcessorFeature(
                     inPreferredConfig = Bitmap.Config.ARGB_8888
                 }
             ) ?: return Pair(null, "")
-            val base64 = try {
-                ByteArrayOutputStream().use { stream ->
-                    if (!bitmap.compress(Bitmap.CompressFormat.JPEG, OCR_IMAGE_QUALITY, stream)) {
-                        if (!bitmap.isRecycled) bitmap.recycle()
-                        return Pair(null, "")
-                    }
-                    "data:image/jpeg;base64," + Base64.encodeToString(stream.toByteArray(), Base64.NO_WRAP)
-                }
-            } catch (_: Exception) {
+            val base64 = bitmapToBase64(bitmap, OCR_IMAGE_QUALITY)
+            if (base64.isEmpty()) {
                 if (!bitmap.isRecycled) bitmap.recycle()
                 return Pair(null, "")
             }
@@ -652,6 +822,8 @@ class PassportProcessorFeature(
             put("placeOfIssue", fields["placeOfIssue"] ?: "")
             put("qrCodeData", fields["qrCodeData"] ?: "")
             put("barcodeData", fields["barcodeData"] ?: "")
+            put("consistencyVerified", fields["consistencyVerified"] ?: "true")
+            put("consistencyNote", fields["consistencyNote"] ?: "")
             put("mrzProcessed", true)
             put("qrProcessed", qrProcessed)
             put("barcodeProcessed", barcodeProcessed)
