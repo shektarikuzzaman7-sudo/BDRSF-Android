@@ -488,6 +488,12 @@ class MainActivity : AppCompatActivity(), AndroidBridge.BridgeActionHandler {
 
         if (actionType == "process_hybrid" || actionType == "submit") {
             nidProcessorFeature.submitNidHybrid(callback)
+        } else if (actionType == "face_verification" || actionType == "face_liveness" || docType.equals("face_liveness", ignoreCase = true) || docType.equals("face_verification", ignoreCase = true)) {
+            val facePayload = JSONObject(payload.toString()).apply {
+                put("mode", "face_liveness")
+                put("scanMode", "face_liveness")
+            }
+            documentScannerFeature.startScanner(facePayload, callback)
         } else {
             val normalizedPayload = JSONObject(payload.toString()).apply {
                 if (!has("mode") || optString("mode").isBlank()) {
@@ -619,6 +625,13 @@ class MainActivity : AppCompatActivity(), AndroidBridge.BridgeActionHandler {
         when (action) {
             "PICK_CONTACT" -> contactPickerFeature.pickContact(callback)
             "FORCE_REFRESH" -> WebAppConfig.forceRefreshWithCacheBypass(webView)
+            "FACE_VERIFICATION", "START_FACE_LIVENESS" -> {
+                val facePayload = JSONObject(payload.toString()).apply {
+                    put("mode", "face_liveness")
+                    put("scanMode", "face_liveness")
+                }
+                documentScannerFeature.startScanner(facePayload, callback)
+            }
             "SCAN_DOCUMENT_WITH_POLICY" -> {
                 documentScannerFeature.startScanner(payload, callback)
             }
