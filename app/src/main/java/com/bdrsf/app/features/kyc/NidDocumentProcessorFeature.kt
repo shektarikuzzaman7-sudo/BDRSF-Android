@@ -21,11 +21,10 @@ import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
 
 /**
- * BDRSF NID ফ্রন্ট ও ব্যাক প্রসেসর:
- * - NID Front: মূল ছবি অক্ষত রেখে ML Kit দিয়ে মুখের ছবি আলাদা কপি করে কাটে,
- *   এবং ইংরেজি নাম, জন্ম তারিখ ও ১০/১৩/১৭ ডিজিটের NID নম্বর বের করে।
- * - NID Back: NidBarcodeAndQrDecoder ব্যবহার করে PDF417, MicroPDF417, Digital NID QR
- *   এবং ব্যাক পার্টের FZ নম্বর ও সকল ইংরেজি তথ্য বের করে ফ্রন্ট NID নম্বরের সাথে ক্রস-চেক করে।
+ * BDRSF Strict NID ফ্রন্ট ও ব্যাক প্রসেসর:
+ * - NID Front: আসল ১০/১৩/১৭ ডিজিট NID নম্বর + নাম + পোর্ট্রেট কপি নিশ্চিত করে।
+ * - NID Back: PDF417 / MicroPDF417 / Digital NID QR ডিকোড করে ফ্রন্ট পার্টের NID নম্বর,
+ *   নাম ও জন্মতারিখের সাথে ১০০% ক্রস-ভেরিফিকেশন করে। অন্য কারো কার্ড বা ভুয়া ব্যাক পার্ট দিলে রিজেক্ট করে।
  */
 class NidDocumentProcessorFeature(
     private val activity: Activity,
@@ -140,14 +139,13 @@ class NidDocumentProcessorFeature(
             var bitmap: Bitmap? = null
             try {
                 KycImageUtils.fixExifOrientationInPlace(file)
-                bitmap = KycImageUtils.decodeSampledBitmap(file, 1600)
+                bitmap = KycImageUtils.decodeSampledBitmap(file, 1800)
                 if (bitmap == null || bitmap.isRecycled) {
                     notifyError(slot, "এনআইডি ছবি প্রসেস করা যায়নি। পরিষ্কার ছবি দিন।", callback)
                     return@execute
                 }
 
-                // মূল ডকুমেন্টের অক্ষত Full Base64
-                val fullDocBase64 = KycImageUtils.encodeBitmapToDataUri(bitmap, 88)
+                val fullDocBase64 = KycImageUtils.encodeBitmapToDataUri(bitmap, 90)
 
                 if (slot == "nid_front") {
                     processFrontBitmap(bitmap, fullDocBase64, callback)
@@ -187,33 +185,57 @@ class NidDocumentProcessorFeature(
             return
         }
 
-        val isNidFront = upper.contains("NATIONAL ID") ||
-            upper.contains("NID") ||
-            upper.contains("GOVERNMENT OF THE PEOPLE") ||
-            upper.contains("DATE OF BIRTH") ||
-            Regex("\\b[0-9]{3}\\s*[0-9]{3}\\s*[0-9]{4}\\b").containsMatchIn(rawText) ||
-            Regex("\\b([0-9]{10}|[0-9]{13}|[0-9]{17})\\b").containsMatchIn(rawText)
-
-        if (!isNidFront) {
-            notifyError("nid_front", "সঠিক এনআইডি কার্ডের ফ্রন্ট পার্ট শনাক্ত করা যায়নি। স্পষ্ট ছবি দিন।", callback)
+        // ব্যাক পার্ট ভুল করে ফ্রন্টে দিলে আটকে দেওয়া
+        if (upper.contains("BLOOD GROUP") && !upper.contains("DATE OF BIRTH")) {
+            notifyError("nid_front", "এটি এনআইডি কার্ডের ব্যাক পার্ট! প্রথমে ফ্রন্ট পার্ট দিন।", callback)
             return
         }
 
-        // ১. মূল কার্ড পরিবর্তন না করে ML Kit দিয়ে কার্ডের ছবিটির আলাদা কপি কেটে নেওয়া
-        val croppedFaceCopy = KycImageUtils.cropStandalonePortraitCopy(bitmap)
-        if (croppedFaceCopy.isNotBlank()) {
-            cachedCroppedFaceBase64 = croppedFaceCopy
-        }
-
-        // ২. ইংরেজি নাম, জন্ম তারিখ ও ১০/১৩/১৭ ডিজিটের NID নম্বর এক্সট্রাক্ট করা
         val extracted = parseFrontEnglishFields(rawText)
         val nidNumber = extracted["nid"].orEmpty()
         val nameEn = extracted["nameEn"].orEmpty()
         val dob = extracted["dob"].orEmpty()
 
+        // কঠোর চেক: ফ্রন্ট পার্টে অবশ্যই ১০, ১৩ বা ১৭ ডিজিটের বৈধ NID নম্বর থাকতে হবে
+        if (nidNumber.length !in listOf(10, 13, 17)) {
+            notifyError(
+                "nid_front",
+                "এনআইডি কার্ডের ১০/১৩/১৭ ডিজিটের নম্বর স্পষ্ট পড়া যায়নি! পরিষ্কার ফ্রন্ট পার্ট দিন।",
+                callback
+            )
+            return
+        }
+
+        val hasNidHeader = upper.contains("NATIONAL ID") ||
+            upper.contains("NID") ||
+            upper.contains("GOVERNMENT OF THE PEOPLE") ||
+            upper.contains("DATE OF BIRTH") ||
+            upper.contains("NAME")
+
+        if (!hasNidHeader || nameEn.length < 3) {
+            notifyError(
+                "nid_front",
+                "ভুয়া বা অস্পষ্ট এনআইডি ফ্রন্ট পার্ট! নাম ও সকল তথ্য স্পষ্ট দেখা যায় এমন আসল কার্ড দিন।",
+                callback
+            )
+            return
+        }
+
+        // মূল কার্ড অপরিবর্তিত রেখে ML Kit দিয়ে কার্ডের ছবিটির আলাদা কপি কাটা
+        val croppedFaceCopy = KycImageUtils.cropStandalonePortraitCopy(bitmap)
+        if (croppedFaceCopy.isBlank()) {
+            notifyError(
+                "nid_front",
+                "এনআইডি কার্ডে আবেদনকারীর মুখের ছবি স্পষ্ট শনাক্ত হয়নি। পরিষ্কার ছবি দিন।",
+                callback
+            )
+            return
+        }
+
         cachedFrontNidNumber = nidNumber
         cachedFrontNameEn = nameEn
         cachedFrontDob = dob
+        cachedCroppedFaceBase64 = croppedFaceCopy
 
         val metaJson = JSONObject().apply {
             put("nid", nidNumber)
@@ -226,7 +248,7 @@ class NidDocumentProcessorFeature(
 
         activity.runOnUiThread {
             if (destroyed) return@runOnUiThread
-            Toast.makeText(activity, "✔ এনআইডি ফ্রন্ট পার্ট যাচাই সম্পন্ন", Toast.LENGTH_SHORT).show()
+            Toast.makeText(activity, "✔ এনআইডি ফ্রন্ট পার্ট যাচাই সম্পন্ন ($nidNumber)", Toast.LENGTH_SHORT).show()
 
             webView.evaluateJavascript(
                 "if(window.handleDocumentPreview) { window.handleDocumentPreview('nid_front', true, ${JSONObject.quote(fullDocBase64)}, ${metaJson}); }",
@@ -249,22 +271,54 @@ class NidDocumentProcessorFeature(
     }
 
     private fun processBackBitmap(bitmap: Bitmap, fullDocBase64: String, callback: String?) {
-        val backRes = barcodeDecoder.decodeFullNidBack(bitmap)
-        if (!backRes.success) {
-            notifyError("nid_back", "এনআইডি ব্যাক পার্টের PDF417/QR বারকোড বা তথ্য পড়া যায়নি। পরিষ্কার ছবি দিন।", callback)
+        val frontDigits = cachedFrontNidNumber.replace(Regex("\\D"), "")
+        if (frontDigits.length !in listOf(10, 13, 17)) {
+            notifyError("nid_back", "প্রথমে এনআইডি ফ্রন্ট পার্ট সঠিকভাবে যাচাই করুন।", callback)
             return
         }
 
-        // ফ্রন্ট পার্টের NID নম্বরের সাথে ব্যাক পার্টের PDF417/QR NID নম্বর ক্রস-ভেরিফিকেশন
-        val frontDigits = cachedFrontNidNumber.replace(Regex("\\D"), "")
+        val backRes = barcodeDecoder.decodeFullNidBack(bitmap)
+        if (!backRes.success) {
+            notifyError(
+                "nid_back",
+                backRes.errorReason.ifBlank { "এনআইডি ব্যাক পার্টের PDF417/QR কোড পড়া যায়নি।" },
+                callback
+            )
+            return
+        }
+
         val backDigits = backRes.nidNumber.replace(Regex("\\D"), "")
-        if (frontDigits.length >= 10 && backDigits.length >= 10) {
-            val matched = backDigits.endsWith(frontDigits.takeLast(10)) ||
-                frontDigits.endsWith(backDigits.takeLast(10))
-            if (!matched) {
+
+        // কঠোর চেক ১: ব্যাক পার্টের বারকোড/QR থেকে অবশ্যই NID নম্বর বের হতে হবে (খালি থাকলে পাস হবে না)
+        if (backDigits.length !in listOf(10, 13, 17)) {
+            notifyError(
+                "nid_back",
+                "ব্যাক পার্টের PDF417/QR কোডে বৈধ NID নম্বর পাওয়া যায়নি! ভুয়া বা অস্পষ্ট ব্যাক পার্ট গ্রহণযোগ্য নয়।",
+                callback
+            )
+            return
+        }
+
+        // কঠোর চেক ২: ফ্রন্ট পার্টের NID নম্বর ও ব্যাক পার্টের বারকোড NID নম্বর ১০০% মিলতে হবে
+        val isNidMatched = (frontDigits == backDigits) ||
+            (frontDigits.length == 10 && backDigits.length == 17 && backDigits.endsWith(frontDigits)) ||
+            (backDigits.length == 10 && frontDigits.length == 17 && frontDigits.endsWith(backDigits))
+
+        if (!isNidMatched) {
+            notifyError(
+                "nid_back",
+                "সতর্কতা! ফ্রন্ট পার্টের NID ($frontDigits) ও ব্যাক পার্টের NID ($backDigits) ভিন্ন ব্যক্তির। একই কার্ডের ব্যাক পার্ট দিন!",
+                callback
+            )
+            return
+        }
+
+        // কঠোর চেক ৩: বারকোড/QR-এ নাম থাকলে ফ্রন্ট পার্টের নামের সাথে ক্রস-চেক
+        if (backRes.holderNameEn.length >= 3 && cachedFrontNameEn.length >= 3) {
+            if (!areNamesCompatible(cachedFrontNameEn, backRes.holderNameEn)) {
                 notifyError(
                     "nid_back",
-                    "ফ্রন্ট পার্টের NID নম্বর ($frontDigits) ও ব্যাক পার্টের বারকোড NID নম্বর ($backDigits) মিলছে না!",
+                    "ফ্রন্ট পার্টের নাম (${cachedFrontNameEn}) ও ব্যাক পার্টের কোডের নাম (${backRes.holderNameEn}) মিলছে না!",
                     callback
                 )
                 return
@@ -272,24 +326,24 @@ class NidDocumentProcessorFeature(
         }
 
         cachedBackObj = backRes.fullBackJson
-        val effectiveNid = frontDigits.ifBlank { backDigits }
         val effectiveName = cachedFrontNameEn.ifBlank { backRes.holderNameEn }
         val effectiveDob = cachedFrontDob.ifBlank { backRes.dob }
 
         val metaJson = JSONObject().apply {
-            put("back_code", backRes.rawBarcodeValue.ifBlank { backRes.fzNumber.ifBlank { effectiveNid } })
+            put("back_code", backRes.rawBarcodeValue)
             put("codeType", backRes.codeType)
             put("qrCodeData", backRes.qrEnglishData)
             put("fzNumber", backRes.fzNumber)
+            put("issueDate", backRes.issueDate)
             put("englishText", backRes.backEnglishText)
-            put("nid", effectiveNid)
+            put("nid", frontDigits)
             put("nameEn", effectiveName)
             put("dob", effectiveDob)
         }
 
         activity.runOnUiThread {
             if (destroyed) return@runOnUiThread
-            Toast.makeText(activity, "✔ এনআইডি ব্যাক পার্ট (${backRes.codeType}) যাচাই সম্পন্ন", Toast.LENGTH_SHORT).show()
+            Toast.makeText(activity, "✔ ব্যাক পার্ট (${backRes.codeType}) ও NID নম্বর মিলেছে!", Toast.LENGTH_SHORT).show()
 
             webView.evaluateJavascript(
                 "if(window.handleDocumentPreview) { window.handleDocumentPreview('nid_back', true, ${JSONObject.quote(fullDocBase64)}, ${metaJson}); }",
@@ -300,15 +354,24 @@ class NidDocumentProcessorFeature(
                 null
             )
             webView.evaluateJavascript(
-                "if(window.handleParsedNID) { window.handleParsedNID(${JSONObject.quote(effectiveName)}, '', '', ${JSONObject.quote(effectiveDob)}, ${JSONObject.quote(effectiveNid)}, '', ${JSONObject.quote(cachedCroppedFaceBase64)}, ${cachedBackObj}); }",
+                "if(window.handleParsedNID) { window.handleParsedNID(${JSONObject.quote(effectiveName)}, '', '', ${JSONObject.quote(effectiveDob)}, ${JSONObject.quote(frontDigits)}, '', ${JSONObject.quote(cachedCroppedFaceBase64)}, ${cachedBackObj}); }",
                 null
             )
 
             bridge.sendResponseToWeb(
-                BridgeResponse(Actions.START_KYC, Status.SUCCESS, data = metaJson, message = "NID Back Verified"),
+                BridgeResponse(Actions.START_KYC, Status.SUCCESS, data = metaJson, message = "NID Back Verified & Matched"),
                 callback
             )
         }
+    }
+
+    private fun areNamesCompatible(frontName: String, backName: String): Boolean {
+        val fTokens = frontName.uppercase(Locale.ROOT).replace(Regex("[^A-Z ]"), " ")
+            .split(Regex("\\s+")).filter { it.length >= 3 }.toSet()
+        val bTokens = backName.uppercase(Locale.ROOT).replace(Regex("[^A-Z ]"), " ")
+            .split(Regex("\\s+")).filter { it.length >= 3 }.toSet()
+        if (fTokens.isEmpty() || bTokens.isEmpty()) return true
+        return fTokens.intersect(bTokens).isNotEmpty()
     }
 
     private fun parseFrontEnglishFields(rawText: String): Map<String, String> {
