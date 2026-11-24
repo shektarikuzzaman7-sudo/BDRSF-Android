@@ -1,4 +1,3 @@
-// File: app/src/main/java/com/bdrsf/app/features/document/GenericOcrFeature.kt
 package com.bdrsf.app.features.document
 
 import android.app.Activity
@@ -41,6 +40,7 @@ class GenericOcrFeature(
         if (!file.exists() || file.length() == 0L) return
 
         bgExecutor.execute {
+            var bitmap: Bitmap? = null
             try {
                 val options = BitmapFactory.Options().apply { inJustDecodeBounds = true }
                 BitmapFactory.decodeFile(file.absolutePath, options)
@@ -48,7 +48,7 @@ class GenericOcrFeature(
                 var sampleSize = 1
                 while (maxDim / sampleSize > 1600) sampleSize *= 2
 
-                val bitmap = BitmapFactory.decodeFile(file.absolutePath, BitmapFactory.Options().apply { inSampleSize = sampleSize })
+                bitmap = BitmapFactory.decodeFile(file.absolutePath, BitmapFactory.Options().apply { inSampleSize = sampleSize })
                     ?: return@execute
 
                 val stream = ByteArrayOutputStream()
@@ -65,12 +65,14 @@ class GenericOcrFeature(
                         for (bad in rejectIf) {
                             if (upper.contains(bad.uppercase(Locale.ROOT))) {
                                 sendError(policy.optString("rejectMessage", "অনুমোদিত ডকুমেন্ট নয়"), callback)
+                                recycleQuietly(bitmap)
                                 return@addOnSuccessListener
                             }
                         }
 
                         if (mustContain.isNotEmpty() && mustContain.none { upper.contains(it.uppercase(Locale.ROOT)) }) {
                             sendError(policy.optString("invalidMessage", "ডকুমেন্টের প্রয়োজনীয় তথ্য পাওয়া যায়নি"), callback)
+                            recycleQuietly(bitmap)
                             return@addOnSuccessListener
                         }
 
@@ -90,14 +92,23 @@ class GenericOcrFeature(
                                 callback
                             )
                         }
+                        recycleQuietly(bitmap)
                     }
                     .addOnFailureListener {
+                        recycleQuietly(bitmap)
                         sendError("ডকুমেন্টের লেখা পড়া যায়নি", callback)
                     }
             } catch (e: Exception) {
+                recycleQuietly(bitmap)
                 sendError(e.localizedMessage ?: "OCR ত্রুটি", callback)
             }
         }
+    }
+
+    private fun recycleQuietly(bmp: Bitmap?) {
+        try {
+            if (bmp != null && !bmp.isRecycled) bmp.recycle()
+        } catch (_: Exception) {}
     }
 
     private fun jsonArrayToList(arr: JSONArray?): List<String> {
@@ -115,7 +126,7 @@ class GenericOcrFeature(
     fun destroy() {
         try {
             textRecognizer.close()
-            bgExecutor.shutdown()
+            bgExecutor.shutdownNow()
         } catch (_: Exception) {}
     }
 }
