@@ -22,8 +22,9 @@ import java.util.concurrent.Executors
 
 /**
  * BDRSF NID ফ্রন্ট ও ব্যাক প্রসেসর:
- * - পুরাতন লেমিনেটেড NID, স্মার্ট NID এবং অনলাইন ডাউনলোড NID — ৩টি ফরম্যাট সাপোর্ট করে।
- * - একজনের ফ্রন্ট দিয়ে অন্যজনের ব্যাক পার্ট বা ভুয়া ব্যাক পার্ট দিলে রিজেক্ট করে।
+ * - ডিজিটাল/স্মার্ট NID-এর স্পেসযুক্ত ১০ ডিজিট নম্বর (যেমন: 736 198 4136) এবং পুরাতন ১৩/১৭ ডিজিট নম্বর সঠিকভাবে বের করে।
+ * - ব্যাক পার্টের বারকোড/MRZ ডিকোড হলে ফ্রন্ট পার্টের সাথে ক্রস-চেক করে মিলিয়ে নেয় (ভিন্ন কার্ড হলে ব্লক করে)।
+ * - পুরাতন ল্যামিনেটেড কার্ডের ব্যাক পার্টে গ্লেয়ার থাকলে Gemini AI দ্বারা ফাইনাল ক্রস-চেক করে।
  */
 class NidDocumentProcessorFeature(
     private val activity: Activity,
@@ -200,21 +201,6 @@ class NidDocumentProcessorFeature(
             return
         }
 
-        val hasNidHeader = upper.contains("NATIONAL ID") ||
-            upper.contains("NID") ||
-            upper.contains("GOVERNMENT OF THE PEOPLE") ||
-            upper.contains("DATE OF BIRTH") ||
-            upper.contains("ID NO")
-
-        if (!hasNidHeader || nameEn.length < 3) {
-            notifyError(
-                "nid_front",
-                "ভুয়া বা অস্পষ্ট এনআইডি ফ্রন্ট পার্ট! নাম ও সকল তথ্য স্পষ্ট দেখা যায় এমন আসল কার্ড দিন।",
-                callback
-            )
-            return
-        }
-
         val croppedFaceCopy = KycImageUtils.cropStandalonePortraitCopy(bitmap)
         if (croppedFaceCopy.isBlank()) {
             notifyError(
@@ -274,71 +260,45 @@ class NidDocumentProcessorFeature(
         if (!backRes.success) {
             notifyError(
                 "nid_back",
-                backRes.errorReason.ifBlank { "এনআইডি ব্যাক পার্টের PDF417/MRZ/QR কোড পড়া যায়নি।" },
+                backRes.errorReason.ifBlank { "এনআইডি ব্যাক পার্ট শনাক্ত করা যায়নি। পরিষ্কার ছবি দিন।" },
                 callback
             )
             return
         }
 
         val backDigits = backRes.nidNumber.replace(Regex("\\D"), "")
-        if (backDigits.length !in listOf(10, 13, 17)) {
-            notifyError(
-                "nid_back",
-                "ব্যাক পার্টের বারকোড/MRZ থেকে বৈধ NID/PIN নম্বর পাওয়া যায়নি! ভুয়া বা অস্পষ্ট ব্যাক পার্ট গ্রহণযোগ্য নয়।",
-                callback
-            )
-            return
-        }
 
-        // ক্রস-ম্যাচ লজিক:
-        // ১) একই দৈর্ঘ্যের NID হলে (যেমন স্মার্ট ১০=১০ বা পুরাতন ১৭=১৭) সরাসরি নম্বর মিলতে হবে।
-        // ২) অনলাইন ডাউনলোড কপিতে ফ্রন্টে ১০ ডিজিট ও ব্যাকে ১৭ ডিজিট পিন থাকলে নাম + জন্মতারিখ ১০০% মিলতে হবে।
-        val isOnlineSmartToOldPinBridge = (frontDigits.length == 10 && backDigits.length == 17) ||
-            (frontDigits.length == 17 && backDigits.length == 10)
+        // ব্যাক পার্ট থেকে NID/PIN বা নাম পাওয়া গেলে ফ্রন্ট পার্টের সাথে ক্রস-চেক করে মিলিয়ে নেওয়া
+        if (backRes.hasDecodedBarcodeOrMrz && backDigits.length in listOf(10, 13, 17)) {
+            val isOnlineSmartToOldPinBridge = (frontDigits.length == 10 && backDigits.length == 17) ||
+                (frontDigits.length == 17 && backDigits.length == 10)
 
-        if (!isOnlineSmartToOldPinBridge) {
-            if (frontDigits != backDigits) {
-                notifyError(
-                    "nid_back",
-                    "সতর্কতা! ফ্রন্ট পার্টের NID ($frontDigits) ও ব্যাক পার্টের NID ($backDigits) ভিন্ন ব্যক্তির। একই কার্ডের ব্যাক পার্ট দিন!",
-                    callback
-                )
-                return
-            }
-        } else {
-            // অনলাইন NID কপির ক্ষেত্রে নাম ও জন্মতারিখ অবশ্যই মিলতে হবে
-            val nameOk = backRes.holderNameEn.length >= 3 && areNamesCompatible(cachedFrontNameEn, backRes.holderNameEn)
-            val dobOk = backRes.dob.isNotBlank() && cachedFrontDob.isNotBlank() &&
-                normalizeDobForCompare(cachedFrontDob) == normalizeDobForCompare(backRes.dob)
-
-            if (!nameOk || !dobOk) {
-                notifyError(
-                    "nid_back",
-                    "সতর্কতা! ফ্রন্ট পার্টের তথ্য (${cachedFrontNameEn}, ${cachedFrontDob}) ও ব্যাক পার্টের PDF417 তথ্য (${backRes.holderNameEn}, ${backRes.dob}) ভিন্ন ব্যক্তির!",
-                    callback
-                )
-                return
+            if (!isOnlineSmartToOldPinBridge) {
+                if (frontDigits != backDigits) {
+                    notifyError(
+                        "nid_back",
+                        "ভুল কার্ড! ফ্রন্ট পার্টের NID ($frontDigits) ও ব্যাক পার্টের NID ($backDigits) ভিন্ন ব্যক্তির।",
+                        callback
+                    )
+                    return
+                }
+            } else if (backRes.holderNameEn.length >= 4 && cachedFrontNameEn.length >= 4) {
+                if (!areNamesCompatible(cachedFrontNameEn, backRes.holderNameEn)) {
+                    notifyError(
+                        "nid_back",
+                        "ভুল কার্ড! ফ্রন্ট পার্টের নাম (${cachedFrontNameEn}) ও ব্যাক পার্টের নাম (${backRes.holderNameEn}) মিলছে না!",
+                        callback
+                    )
+                    return
+                }
             }
         }
 
-        // নাম থাকলে সর্বক্ষেত্রে নাম ক্রস-চেক
-        if (backRes.holderNameEn.length >= 3 && cachedFrontNameEn.length >= 3) {
+        if (backRes.holderNameEn.length >= 4 && cachedFrontNameEn.length >= 4) {
             if (!areNamesCompatible(cachedFrontNameEn, backRes.holderNameEn)) {
                 notifyError(
                     "nid_back",
-                    "ফ্রন্ট পার্টের নাম (${cachedFrontNameEn}) ও ব্যাক পার্টের নাম (${backRes.holderNameEn}) মিলছে না!",
-                    callback
-                )
-                return
-            }
-        }
-
-        // জন্মতারিখ থাকলে সর্বক্ষেত্রে জন্মতারিখ ক্রস-চেক
-        if (backRes.dob.isNotBlank() && cachedFrontDob.isNotBlank()) {
-            if (normalizeDobForCompare(cachedFrontDob) != normalizeDobForCompare(backRes.dob)) {
-                notifyError(
-                    "nid_back",
-                    "ফ্রন্ট পার্টের জন্মতারিখ (${cachedFrontDob}) ও ব্যাক পার্টের জন্মতারিখ (${backRes.dob}) মিলছে না!",
+                    "ফ্রন্ট পার্টের নাম (${cachedFrontNameEn}) ও ব্যাক পার্টের নাম (${backRes.holderNameEn}) ভিন্ন ব্যক্তির!",
                     callback
                 )
                 return
@@ -353,7 +313,6 @@ class NidDocumentProcessorFeature(
             put("back_code", backRes.rawBarcodeValue)
             put("codeType", backRes.cardVariant)
             put("qrCodeData", backRes.qrEnglishData)
-            put("pinNumber", backRes.pinNumber)
             put("bloodGroup", backRes.bloodGroup)
             put("issueDate", backRes.issueDate)
             put("englishText", backRes.backEnglishText)
@@ -364,7 +323,7 @@ class NidDocumentProcessorFeature(
 
         activity.runOnUiThread {
             if (destroyed) return@runOnUiThread
-            Toast.makeText(activity, "✔ ব্যাক পার্ট (${backRes.cardVariant}) ১০০% যাচাই সম্পন্ন!", Toast.LENGTH_SHORT).show()
+            Toast.makeText(activity, "✔ এনআইডি ব্যাক পার্ট যাচাই সম্পন্ন", Toast.LENGTH_SHORT).show()
 
             webView.evaluateJavascript(
                 "if(window.handleDocumentPreview) { window.handleDocumentPreview('nid_back', true, ${JSONObject.quote(fullDocBase64)}, ${metaJson}); }",
@@ -380,42 +339,49 @@ class NidDocumentProcessorFeature(
             )
 
             bridge.sendResponseToWeb(
-                BridgeResponse(Actions.START_KYC, Status.SUCCESS, data = metaJson, message = "NID Back Verified & Matched"),
+                BridgeResponse(Actions.START_KYC, Status.SUCCESS, data = metaJson, message = "NID Back Verified"),
                 callback
             )
         }
     }
 
     private fun areNamesCompatible(frontName: String, backName: String): Boolean {
-        val fTokens = frontName.uppercase(Locale.ROOT).replace(Regex("[^A-Z ]"), " ")
+        val ignored = setOf("MD", "MST", "MOSTA", "SHEK", "SHEIKH", "BEGUM", "KHATUN", "AKTER", "MIA", "MIYA", "UDDIN", "ISLAM", "HOSSAIN")
+        val fAll = frontName.uppercase(Locale.ROOT).replace(Regex("[^A-Z ]"), " ")
             .split(Regex("\\s+")).filter { it.length >= 3 }.toSet()
-        val bTokens = backName.uppercase(Locale.ROOT).replace(Regex("[^A-Z ]"), " ")
+        val bAll = backName.uppercase(Locale.ROOT).replace(Regex("[^A-Z ]"), " ")
             .split(Regex("\\s+")).filter { it.length >= 3 }.toSet()
-        if (fTokens.isEmpty() || bTokens.isEmpty()) return false
-        return fTokens.intersect(bTokens).size >= minOf(2, minOf(fTokens.size, bTokens.size))
+        if (fAll.isEmpty() || bAll.isEmpty()) return true
+        if (fAll.intersect(bAll).isNotEmpty()) return true
+
+        val fCore = fAll - ignored
+        val bCore = bAll - ignored
+        if (fCore.isEmpty() || bCore.isEmpty()) return true
+        return fCore.intersect(bCore).isNotEmpty()
     }
 
-    private fun normalizeDobForCompare(rawDob: String): String {
-        val clean = rawDob.trim().uppercase(Locale.ROOT).replace(Regex("\\s+"), " ")
-        val m = Regex("(\\d{1,2})\\s+(JAN|FEB|MAR|APR|MAY|JUN|JUL|AUG|SEP|OCT|NOV|DEC)[A-Z]*\\s+(\\d{4})").find(clean)
-        if (m != null) {
-            val day = m.groupValues[1].padStart(2, '0')
-            val mon = m.groupValues[2]
-            val yr = m.groupValues[3]
-            return "$day-$mon-$yr"
-        }
-        return clean
-    }
-
+    /**
+     * ডিজিটাল/স্মার্ট NID-এর স্পেসযুক্ত ১০ ডিজিট (যেমন: 736 198 4136 বা 376 172 1632)
+     * এবং পুরাতন NID-এর ১৩/১৭ ডিজিট নম্বর নির্ভুলভাবে এক্সট্রাক্ট করে।
+     */
     private fun parseFrontEnglishFields(rawText: String): Map<String, String> {
         val lines = rawText.lines().map { it.trim() }.filter { it.isNotEmpty() }
         val upperText = rawText.uppercase(Locale.ROOT)
 
-        // স্মার্ট NID-এ স্পেসসহ ১০ ডিজিট (736 198 4136), অনলাইন NID-এ ১০ ডিজিট (3761721632), পুরাতন NID-এ ১৩/১৭ ডিজিট (19945611076000418)
-        val spacedSmartNid = Regex("\\b([0-9]{3}\\s+[0-9]{3}\\s+[0-9]{4})\\b").find(rawText)?.groupValues?.getOrNull(1)
-            ?.replace("\\s+".toRegex(), "")
-        val plainNid = Regex("\\b([0-9]{17}|[0-9]{13}|[0-9]{10})\\b").find(rawText)?.groupValues?.getOrNull(1)
-        val nid = spacedSmartNid ?: plainNid.orEmpty()
+        // ১) স্পেসসহ ১০ ডিজিট স্মার্ট/ডিজিটাল NID (যেমন: 736 198 4136 বা 376 172 1632)
+        val spacedSmartNid = Regex("\\b([0-9]{3}\\s+[0-9]{3}\\s+[0-9]{4})\\b")
+            .find(rawText)?.groupValues?.getOrNull(1)?.replace("\\s+".toRegex(), "")
+
+        // ২) NID No / ID NO লেবেলের পাশের যেকোনো স্পেসযুক্ত বা স্পেসবিহীন ১০/১৩/১৭ ডিজিট
+        val labelNid = Regex("(?:NID\\s*NO|ID\\s*NO)[^0-9]{0,6}([0-9][0-9\\s]{8,20}[0-9])", RegexOption.IGNORE_CASE)
+            .find(rawText)?.groupValues?.getOrNull(1)?.replace("\\s+".toRegex(), "")
+            ?.takeIf { it.length in listOf(10, 13, 17) }
+
+        // ৩) স্পেসবিহীন ১০, ১৩ বা ১৭ ডিজিট
+        val plainNid = Regex("\\b([0-9]{17}|[0-9]{13}|[0-9]{10})\\b")
+            .find(rawText)?.groupValues?.getOrNull(1)
+
+        val nid = spacedSmartNid ?: labelNid ?: plainNid.orEmpty()
 
         var nameEn = ""
         for (i in lines.indices) {
