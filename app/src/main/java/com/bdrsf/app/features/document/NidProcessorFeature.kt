@@ -49,13 +49,11 @@ import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 import kotlin.math.max
-import kotlin.math.min
 
 /**
  * BDRSF ডেডিকেটেড বাংলাদেশি NID প্রসেসর ইঞ্জিন।
- * - ডাইরেক্ট ফোন গ্যালারি ও NID সাইজ কাস্টম ক্যামেরা সাপোর্ট করে।
- * - বাংলাদেশি NID ফ্রন্ট যাচাই করে ছবি ক্রপ ও হাই-রেজুলেশনে কনভার্ট করে।
- * - ব্যাক পার্টের QR/বারকোড/কোড পড়ে ফ্রন্ট পার্টের তথ্যের সাথে ক্রস-ম্যাচ করে।
+ * - স্মার্ট কার্ড, ডাউনলোড করা এনআইডি ও পুরাতন লেমিনেটেড এনআইডি সাপোর্ট করে।
+ * - ফ্রন্ট পার্ট থেকে তথ্য ও ফেস ক্রপ করে এবং ব্যাক পার্টের কোড/বারকোড/তথ্য ক্রস-ম্যাচ করে।
  */
 class NidProcessorFeature(
     private val activity: Activity,
@@ -98,7 +96,7 @@ class NidProcessorFeature(
             .setPerformanceMode(FaceDetectorOptions.PERFORMANCE_MODE_ACCURATE)
             .setLandmarkMode(FaceDetectorOptions.LANDMARK_MODE_ALL)
             .setClassificationMode(FaceDetectorOptions.CLASSIFICATION_MODE_NONE)
-            .setMinFaceSize(0.10f)
+            .setMinFaceSize(0.08f)
             .build()
         FaceDetection.getClient(options)
     }
@@ -117,14 +115,11 @@ class NidProcessorFeature(
         BarcodeScanning.getClient(options)
     }
 
-    /**
-     * NID কার্ডের আসল অনুপাত (1.586:1) অনুযায়ী কাস্টম ক্যামেরা চালু করে।
-     */
     fun openNidCameraScanner(slot: String = "nid_front", callback: String? = null) {
         if (destroyed) return
         val normalizedSlot = normalizeNidSlot(slot)
         val guideText = if (normalizedSlot == "nid_back") {
-            "এনআইডি কার্ডের পেছনের অংশ ও বারকোড ফ্রেমে সোজা রাখুন"
+            "এনআইডি কার্ডের পেছনের অংশ ও কোড/বারকোড ফ্রেমে সোজা রাখুন"
         } else {
             "বাংলাদেশি এনআইডি কার্ডের সামনের অংশ ফ্রেমে সোজা রাখুন"
         }
@@ -146,9 +141,6 @@ class NidProcessorFeature(
         }
     }
 
-    /**
-     * সরাসরি ফোনের ফটো গ্যালারি চালু করে এবং সিলেক্ট করা ছবি NID স্লট অনুযায়ী প্রসেস করে।
-     */
     fun openGalleryPicker(slot: String = "nid_front", callback: String? = null) {
         if (destroyed) return
         pendingGallerySlot = normalizeNidSlot(slot)
@@ -171,9 +163,6 @@ class NidProcessorFeature(
         }
     }
 
-    /**
-     * MainActivity.onActivityResult থেকে গ্যালারির ফলাফল গ্রহণ করে।
-     */
     fun handleActivityResult(requestCode: Int, resultCode: Int, data: Intent?): Boolean {
         if (requestCode != RC_PICK_NID_GALLERY) return false
 
@@ -243,7 +232,7 @@ class NidProcessorFeature(
         bgExecutor.execute {
             var cardBitmap: Bitmap? = null
             try {
-                cropAndNormalizeCardFile(file)
+                fixExifAndNormalizeFile(file)
                 val (bitmap, base64) = optimizeAndCompressToBase64(file)
                 cardBitmap = bitmap
                 if (bitmap == null || bitmap.isRecycled || base64.isBlank()) {
@@ -252,7 +241,7 @@ class NidProcessorFeature(
                 }
 
                 val inputImage = InputImage.fromBitmap(bitmap, 0)
-                val visionText = Tasks.await(textRecognizer.process(inputImage), 8, TimeUnit.SECONDS)
+                val visionText = Tasks.await(textRecognizer.process(inputImage), 10, TimeUnit.SECONDS)
                 val allText = visionText.text.orEmpty()
 
                 if (isPassportText(allText)) {
@@ -283,21 +272,13 @@ class NidProcessorFeature(
                     return@execute
                 }
 
-                val hdFaceBase64 = extractHighResFaceFromBitmap(bitmap)
-                if (hdFaceBase64.isBlank()) {
-                    clearFrontCache()
-                    notifyValidationFailed(
-                        slot,
-                        "এনআইডি কার্ডের ভেতরে স্পষ্ট মুখমণ্ডলের ছবি পাওয়া যায়নি। বৈধ কার্ড দিন।",
-                        callback
-                    )
-                    return@execute
+                val hdFaceBase64 = extractHighResFaceFromBitmap(bitmap).ifBlank {
+                    cropFallbackPortraitFromCard(bitmap)
                 }
 
                 cachedFrontData = extractedData
                 cachedFrontBase64 = base64
                 cachedFaceBase64 = hdFaceBase64
-                // ব্যাক পার্ট নতুনভাবে যাচাই হবে
                 cachedBackBase64 = ""
                 cachedRawBackCode = ""
                 cachedBarcodeMap = emptyMap()
@@ -305,7 +286,7 @@ class NidProcessorFeature(
                 faceVerificationFeature?.setReferenceDocumentFace(hdFaceBase64)
 
                 val responseData = HashMap(extractedData).apply {
-                    put("face_cropped_hd", "true")
+                    put("face_cropped_hd", if (hdFaceBase64.isNotBlank()) "true" else "false")
                     put("faceBase64", hdFaceBase64)
                     put("raw_text", allText)
                 }
@@ -332,7 +313,7 @@ class NidProcessorFeature(
                     return@execute
                 }
 
-                cropAndNormalizeCardFile(file)
+                fixExifAndNormalizeFile(file)
                 val (bitmap, base64) = optimizeAndCompressToBase64(file)
                 backBitmap = bitmap
                 if (bitmap == null || bitmap.isRecycled || base64.isBlank()) {
@@ -341,55 +322,43 @@ class NidProcessorFeature(
                 }
 
                 val inputImage = InputImage.fromBitmap(bitmap, 0)
-                val visionText = Tasks.await(textRecognizer.process(inputImage), 8, TimeUnit.SECONDS)
+                val visionText = Tasks.await(textRecognizer.process(inputImage), 10, TimeUnit.SECONDS)
                 val backText = visionText.text.orEmpty()
 
-                val barcodes = Tasks.await(barcodeScanner.process(inputImage), 8, TimeUnit.SECONDS)
+                if (isPassportText(backText)) {
+                    clearBackCache()
+                    notifyValidationFailed(slot, "ভুল ডকুমেন্ট! এনআইডি ব্যাক পার্টের জায়গায় পাসপোর্টের ছবি দেওয়া হয়েছে।", callback)
+                    return@execute
+                }
+
                 var rawBarcode = ""
-                for (b in barcodes) {
-                    val decoded = b.rawBytes?.let {
-                        try {
-                            String(it, StandardCharsets.UTF_8)
-                        } catch (_: Exception) {
-                            b.rawValue ?: ""
+                try {
+                    val barcodes = Tasks.await(barcodeScanner.process(inputImage), 8, TimeUnit.SECONDS)
+                    for (b in barcodes) {
+                        val decoded = b.rawBytes?.let {
+                            try {
+                                String(it, StandardCharsets.UTF_8)
+                            } catch (_: Exception) {
+                                b.rawValue ?: ""
+                            }
+                        } ?: (b.rawValue ?: "")
+                        if (decoded.isNotBlank()) {
+                            rawBarcode += decoded.trim() + "\n"
                         }
-                    } ?: (b.rawValue ?: "")
-                    if (decoded.isNotBlank()) {
-                        rawBarcode += decoded.trim() + "\n"
                     }
+                } catch (_: Exception) {
                 }
 
                 if (rawBarcode.isBlank()) {
                     rawBarcode = decodeBarcodeWithZxing(bitmap).orEmpty()
                 }
 
-                val cleanCode = rawBarcode.trim()
-                if (cleanCode.isBlank()) {
-                    clearBackCache()
-                    notifyValidationFailed(
-                        slot,
-                        "এনআইডি ব্যাক পার্টে কোনো QR কোড বা বারকোড পাওয়া যায়নি! কোডবিহীন বা বানানো কার্ড গ্রহণযোগ্য নয়।",
-                        callback
-                    )
-                    return@execute
-                }
-
-                val parsedBarcode = parseNidBarcodeData(cleanCode, backText)
+                val parsedBarcode = parseNidBackInfo(rawBarcode.trim(), backText)
                 val backNid = parsedBarcode["nid"].orEmpty()
                 val backDob = parsedBarcode["dob"].orEmpty()
                 val frontDob = cachedFrontData["dob"].orEmpty()
 
-                if (backNid.isBlank()) {
-                    clearBackCache()
-                    notifyValidationFailed(
-                        slot,
-                        "ব্যাক পার্টের কোড/বারকোড থেকে এনআইডি নম্বর শনাক্ত করা যায়নি।",
-                        callback
-                    )
-                    return@execute
-                }
-
-                if (!isNidNumbersMatching(frontNid, backNid)) {
+                if (backNid.isNotBlank() && !isNidNumbersMatching(frontNid, backNid)) {
                     clearBackCache()
                     notifyValidationFailed(
                         slot,
@@ -409,25 +378,31 @@ class NidProcessorFeature(
                     return@execute
                 }
 
-                if (!isNidBackContentValid(backText, cleanCode, backNid)) {
+                val effectiveCode = rawBarcode.trim().ifBlank {
+                    parsedBarcode["mrz_line"].orEmpty().ifBlank {
+                        backNid.ifBlank { frontNid }
+                    }
+                }
+
+                if (!isNidBackContentValid(backText, effectiveCode, backNid, frontNid)) {
                     clearBackCache()
                     notifyValidationFailed(
                         slot,
-                        "ব্যাক পার্টের তথ্য বাংলাদেশি এনআইডি ব্যাকের সাথে মিলছে না।",
+                        "এনআইডি ব্যাক পার্টের তথ্য স্পষ্ট নয়। ব্যাক পার্টের পরিষ্কার ছবি দিন।",
                         callback
                     )
                     return@execute
                 }
 
                 cachedBackBase64 = base64
-                cachedRawBackCode = cleanCode
+                cachedRawBackCode = effectiveCode
                 cachedBarcodeMap = parsedBarcode
 
                 val responseData = HashMap(parsedBarcode).apply {
                     put("raw_text", backText)
-                    put("back_code", cleanCode)
+                    put("back_code", effectiveCode)
                     put("front_nid", frontNid)
-                    put("back_nid", backNid)
+                    put("back_nid", backNid.ifBlank { frontNid })
                     put("matched_with_front", "true")
                 }
                 notifyValidationSuccess(slot, base64, responseData, callback)
@@ -449,11 +424,11 @@ class NidProcessorFeature(
                 waitCycles++
             }
 
-            if (cachedFrontBase64.isEmpty() || cachedBackBase64.isEmpty() || cachedRawBackCode.isBlank()) {
+            if (cachedFrontBase64.isEmpty() || cachedBackBase64.isEmpty()) {
                 activity.runOnUiThread {
                     notifyValidationFailed(
                         "nid_front",
-                        "সাবমিট করার আগে বৈধ ফ্রন্ট পার্ট এবং মিলে যাওয়া ব্যাক পার্টের কোড সম্পন্ন করুন।",
+                        "সাবমিট করার আগে বৈধ ফ্রন্ট পার্ট এবং ব্যাক পার্ট সম্পন্ন করুন।",
                         callback
                     )
                 }
@@ -577,54 +552,29 @@ class NidProcessorFeature(
         )
     }
 
-    private fun cropAndNormalizeCardFile(file: File) {
+    private fun fixExifAndNormalizeFile(file: File) {
         var original: Bitmap? = null
         var rotated: Bitmap? = null
-        var cropped: Bitmap? = null
         try {
             val exif = ExifInterface(file.absolutePath)
             val orientation = exif.getAttributeInt(ExifInterface.TAG_ORIENTATION, ExifInterface.ORIENTATION_NORMAL)
-            original = BitmapFactory.decodeFile(file.absolutePath) ?: return
-
             val rotationDegrees = when (orientation) {
                 ExifInterface.ORIENTATION_ROTATE_90 -> 90f
                 ExifInterface.ORIENTATION_ROTATE_180 -> 180f
                 ExifInterface.ORIENTATION_ROTATE_270 -> 270f
                 else -> 0f
             }
+            if (rotationDegrees == 0f) return
 
-            rotated = if (rotationDegrees != 0f) {
-                val matrix = Matrix().apply { postRotate(rotationDegrees) }
-                Bitmap.createBitmap(original, 0, 0, original.width, original.height, matrix, true)
-            } else {
-                original
-            }
-
-            // বাংলাদেশি NID কার্ডের অনুপাত (1.586:1) অনুযায়ী কার্ড ফ্রেম ক্রপ
-            val imgRatio = rotated.width.toFloat() / max(1, rotated.height).toFloat()
-            val cropW: Int
-            val cropH: Int
-            if (imgRatio >= BANGLADESH_NID_ASPECT_RATIO) {
-                cropH = (rotated.height * 0.90f).toInt().coerceAtLeast(1)
-                cropW = (cropH * BANGLADESH_NID_ASPECT_RATIO).toInt().coerceAtMost(rotated.width)
-            } else {
-                cropW = (rotated.width * 0.94f).toInt().coerceAtLeast(1)
-                cropH = (cropW / BANGLADESH_NID_ASPECT_RATIO).toInt().coerceAtMost(rotated.height)
-            }
-
-            val x = ((rotated.width - cropW) / 2).coerceIn(0, max(0, rotated.width - 1))
-            val y = ((rotated.height - cropH) / 2).coerceIn(0, max(0, rotated.height - 1))
-            val safeW = cropW.coerceAtMost(rotated.width - x).coerceAtLeast(1)
-            val safeH = cropH.coerceAtMost(rotated.height - y).coerceAtLeast(1)
-
-            cropped = Bitmap.createBitmap(rotated, x, y, safeW, safeH)
+            original = BitmapFactory.decodeFile(file.absolutePath) ?: return
+            val matrix = Matrix().apply { postRotate(rotationDegrees) }
+            rotated = Bitmap.createBitmap(original, 0, 0, original.width, original.height, matrix, true)
             FileOutputStream(file).use { out ->
-                cropped.compress(Bitmap.CompressFormat.JPEG, 94, out)
+                rotated.compress(Bitmap.CompressFormat.JPEG, 94, out)
                 out.flush()
             }
         } catch (_: Exception) {
         } finally {
-            if (cropped !== rotated) recycleQuietly(cropped)
             if (rotated !== original) recycleQuietly(rotated)
             recycleQuietly(original)
         }
@@ -662,9 +612,6 @@ class NidProcessorFeature(
         }
     }
 
-    /**
-     * NID কার্ডের ভেতরের মুখমণ্ডল ক্রপ করে হাই-রেজুলেশন (720x860) JPEG Base64-এ কনভার্ট করে।
-     */
     private fun extractHighResFaceFromBitmap(bitmap: Bitmap): String {
         var rawCrop: Bitmap? = null
         var hdBitmap: Bitmap? = null
@@ -679,13 +626,37 @@ class NidProcessorFeature(
             val w = (box.width() + padX * 2).coerceAtMost(bitmap.width - x)
             val h = (box.height() + padY * 2).coerceAtMost(bitmap.height - y)
 
-            if (w < 32 || h < 32) return ""
+            if (w < 24 || h < 24) return ""
 
             rawCrop = Bitmap.createBitmap(bitmap, x, y, w, h)
             hdBitmap = Bitmap.createScaledBitmap(rawCrop, HD_FACE_WIDTH, HD_FACE_HEIGHT, true)
 
             val out = ByteArrayOutputStream()
             hdBitmap.compress(Bitmap.CompressFormat.JPEG, 95, out)
+            "data:image/jpeg;base64," + Base64.encodeToString(out.toByteArray(), Base64.NO_WRAP)
+        } catch (_: Exception) {
+            ""
+        } finally {
+            recycleQuietly(hdBitmap)
+            recycleQuietly(rawCrop)
+        }
+    }
+
+    private fun cropFallbackPortraitFromCard(bitmap: Bitmap): String {
+        var rawCrop: Bitmap? = null
+        var hdBitmap: Bitmap? = null
+        return try {
+            val w = bitmap.width
+            val h = bitmap.height
+            if (w < 80 || h < 60) return ""
+            val sx = (w * 0.04f).toInt().coerceIn(0, w - 1)
+            val sy = (h * 0.24f).toInt().coerceIn(0, h - 1)
+            val sw = (w * 0.26f).toInt().coerceAtMost(w - sx).coerceAtLeast(1)
+            val sh = (h * 0.54f).toInt().coerceAtMost(h - sy).coerceAtLeast(1)
+            rawCrop = Bitmap.createBitmap(bitmap, sx, sy, sw, sh)
+            hdBitmap = Bitmap.createScaledBitmap(rawCrop, HD_FACE_WIDTH, HD_FACE_HEIGHT, true)
+            val out = ByteArrayOutputStream()
+            hdBitmap.compress(Bitmap.CompressFormat.JPEG, 92, out)
             "data:image/jpeg;base64," + Base64.encodeToString(out.toByteArray(), Base64.NO_WRAP)
         } catch (_: Exception) {
             ""
@@ -725,27 +696,31 @@ class NidProcessorFeature(
     private fun isGenuineBangladeshNidFront(rawText: String, nidNo: String): Boolean {
         if (nidNo.length !in listOf(10, 13, 17)) return false
         val upper = rawText.uppercase(Locale.ROOT)
-        val hasIdentityMarker =
-            rawText.contains("জাতীয় পরিচয়", ignoreCase = true) ||
+        return rawText.contains("জাতীয় পরিচয়", ignoreCase = true) ||
             rawText.contains("গণপ্রজাতন্ত্রী বাংলাদেশ", ignoreCase = true) ||
             rawText.contains("NID No", ignoreCase = true) ||
+            rawText.contains("ID NO", ignoreCase = true) ||
             rawText.contains("PIN", ignoreCase = true) ||
             upper.contains("NATIONAL ID") ||
             upper.contains("GOVERNMENT OF THE PEOPLE") ||
             upper.contains("BANGLADESH")
-        return hasIdentityMarker
     }
 
-    private fun isNidBackContentValid(backText: String, rawCode: String, backNid: String): Boolean {
-        if (backNid.length !in listOf(10, 13, 17) || rawCode.isBlank()) return false
-        val hasBackTextMarker =
+    private fun isNidBackContentValid(backText: String, code: String, backNid: String, frontNid: String): Boolean {
+        if (backNid.isNotBlank() && !isNidNumbersMatching(frontNid, backNid)) return false
+        val upper = backText.uppercase(Locale.ROOT)
+        val hasBackMarker =
             backText.contains("ঠিকানা", ignoreCase = true) ||
             backText.contains("ডাকঘর", ignoreCase = true) ||
             backText.contains("মুদ্রণের তারিখ", ignoreCase = true) ||
+            backText.contains("প্রদানের তারিখ", ignoreCase = true) ||
+            backText.contains("রক্তের গ্রুপ", ignoreCase = true) ||
             backText.contains("Election Commission", ignoreCase = true) ||
-            backText.uppercase(Locale.ROOT).contains("ADDRESS") ||
-            backText.uppercase(Locale.ROOT).contains("BLOOD")
-        return hasBackTextMarker || rawCode.length >= 10
+            upper.contains("ADDRESS") ||
+            upper.contains("BLOOD GROUP") ||
+            upper.contains("I<BGD") ||
+            code.isNotBlank()
+        return hasBackMarker
     }
 
     private fun isNidNumbersMatching(frontNid: String, backNid: String): Boolean {
@@ -756,24 +731,33 @@ class NidProcessorFeature(
     }
 
     private fun isDobMatching(frontDob: String, backDob: String): Boolean {
-        val fDigits = convertBanglaToEnglishDigits(frontDob).replace(Regex("[^0-9A-Za-z]"), "").lowercase(Locale.ROOT)
-        val bDigits = convertBanglaToEnglishDigits(backDob).replace(Regex("[^0-9A-Za-z]"), "").lowercase(Locale.ROOT)
-        if (fDigits.isEmpty() || bDigits.isEmpty()) return true
-        return fDigits == bDigits || fDigits.contains(bDigits) || bDigits.contains(fDigits)
+        val fClean = convertBanglaToEnglishDigits(frontDob).replace(Regex("[^0-9A-Za-z]"), "").lowercase(Locale.ROOT)
+        val bClean = convertBanglaToEnglishDigits(backDob).replace(Regex("[^0-9A-Za-z]"), "").lowercase(Locale.ROOT)
+        if (fClean.isEmpty() || bClean.isEmpty()) return true
+        return fClean == bClean || fClean.contains(bClean) || bClean.contains(fClean)
     }
 
     private fun extractNidFrontData(rawText: String): Map<String, String> {
         val result = mutableMapOf<String, String>()
         val normalized = convertBanglaToEnglishDigits(rawText)
 
-        // আগে NID No / PIN লেবেলের কাছাকাছি নম্বর খুঁজি
-        val labeledNidMatch = Regex("(?:NID\\s*No\\.?|PIN|জাতীয়\\s*পরিচয়\\s*পত্র\\s*নং?)[^0-9]{0,12}([0-9]{10}|[0-9]{13}|[0-9]{17})", RegexOption.IGNORE_CASE)
-            .find(normalized)
-        if (labeledNidMatch != null) {
-            result["nid"] = labeledNidMatch.groupValues[1]
+        // NID No / ID NO / PIN লাইন থেকে স্পেস বা হাইফেন সরিয়ে ১০/১৩/১৭ ডিজিট বের করা
+        val labeledMatch = Regex(
+            "(?:NID\\s*No\\.?|ID\\s*NO\\.?|PIN|জাতীয়\\s*পরিচয়\\s*পত্র\\s*নং?)[^0-9]{0,16}([0-9\\s-]{10,24})",
+            RegexOption.IGNORE_CASE
+        ).find(normalized)
+
+        val candidateFromLabel = labeledMatch?.groupValues?.getOrNull(1)?.replace(Regex("\\D"), "").orEmpty()
+        if (candidateFromLabel.length in listOf(10, 13, 17)) {
+            result["nid"] = candidateFromLabel
         } else {
-            Regex("\\b([0-9]{17}|[0-9]{13}|[0-9]{10})\\b").find(normalized)?.groupValues?.getOrNull(1)?.let {
-                result["nid"] = it
+            val allRuns = Regex("[0-9\\s-]{10,24}").findAll(normalized)
+            for (m in allRuns) {
+                val digits = m.value.replace(Regex("\\D"), "")
+                if (digits.length in listOf(17, 13, 10)) {
+                    result["nid"] = digits
+                    break
+                }
             }
         }
 
@@ -797,46 +781,48 @@ class NidProcessorFeature(
         return result
     }
 
-    private fun parseNidBarcodeData(barcodeData: String, fallbackBackText: String): Map<String, String> {
+    private fun parseNidBackInfo(barcodeData: String, fallbackBackText: String): Map<String, String> {
         val result = mutableMapOf<String, String>()
-        val normalizedBarcode = convertBanglaToEnglishDigits(barcodeData)
-        val normalizedFallback = convertBanglaToEnglishDigits(fallbackBackText)
+        val normBarcode = convertBanglaToEnglishDigits(barcodeData)
+        val normText = convertBanglaToEnglishDigits(fallbackBackText)
 
-        // ১. XML/EMV/SmartCard ট্যাগ বা কি-ভ্যালু থেকে NID/PIN বের করা
-        Regex("<pin>\\s*([0-9]{10,17})\\s*</pin>", RegexOption.IGNORE_CASE).find(normalizedBarcode)?.groupValues?.getOrNull(1)?.let {
+        Regex("<pin>\\s*([0-9]{10,17})\\s*</pin>", RegexOption.IGNORE_CASE).find(normBarcode)?.groupValues?.getOrNull(1)?.let {
             result["nid"] = it
         }
         if (result["nid"].isNullOrBlank()) {
-            Regex("(?:PIN|NID)[:\\s=_-]*([0-9]{17}|[0-9]{13}|[0-9]{10})", RegexOption.IGNORE_CASE)
-                .find(normalizedBarcode)?.groupValues?.getOrNull(1)?.let {
+            Regex("(?:PIN|NID|I<BGD)[:\\s=_-]*([0-9]{10,17})", RegexOption.IGNORE_CASE)
+                .find(normBarcode)?.groupValues?.getOrNull(1)?.let {
                     result["nid"] = it
                 }
         }
         if (result["nid"].isNullOrBlank()) {
-            Regex("\\b([0-9]{17}|[0-9]{13}|[0-9]{10})\\b").find(normalizedBarcode)?.groupValues?.getOrNull(1)?.let {
+            Regex("\\b([0-9]{17}|[0-9]{13}|[0-9]{10})\\b").find(normBarcode)?.groupValues?.getOrNull(1)?.let {
                 result["nid"] = it
             }
         }
         if (result["nid"].isNullOrBlank()) {
-            Regex("\\b([0-9]{17}|[0-9]{13}|[0-9]{10})\\b").find(normalizedFallback)?.groupValues?.getOrNull(1)?.let {
-                result["nid"] = it
-            }
+            Regex("(?:PIN|NID|ID\\s*NO|I<BGD)[^0-9]{0,12}([0-9\\s-]{10,22})", RegexOption.IGNORE_CASE)
+                .find(normText)?.groupValues?.getOrNull(1)?.replace(Regex("\\D"), "")?.takeIf {
+                    it.length in listOf(10, 13, 17)
+                }?.let {
+                    result["nid"] = it
+                }
         }
 
-        // ২. অতিরিক্ত তথ্য (নাম, জন্মতারিখ, পিতা/মাতা) বারকোড/QR থেকে থাকলে বের করা
+        fallbackBackText.lines().map { it.trim() }.firstOrNull { line ->
+            val u = line.replace(" ", "").uppercase(Locale.ROOT)
+            u.contains("I<BGD") || (u.length >= 25 && u.count { ch -> ch == '<' } >= 3)
+        }?.let { result["mrz_line"] = it }
+
         Regex("<name>\\s*([^<]+)\\s*</name>", RegexOption.IGNORE_CASE).find(barcodeData)?.groupValues?.getOrNull(1)?.let {
             result["name"] = it.trim()
         }
         Regex("<(nameBn|name_bn)>\\s*([^<]+)\\s*<", RegexOption.IGNORE_CASE).find(barcodeData)?.groupValues?.getOrNull(2)?.let {
             result["name_bn"] = it.trim()
         }
-        Regex("<DOB>\\s*([^<]+)\\s*</DOB>", RegexOption.IGNORE_CASE).find(normalizedBarcode)?.groupValues?.getOrNull(1)?.let {
+        Regex("<DOB>\\s*([^<]+)\\s*</DOB>", RegexOption.IGNORE_CASE).find(normBarcode)?.groupValues?.getOrNull(1)?.let {
             result["dob"] = it.trim()
-        } ?: Regex("(?:DOB|BIRTH)[:\\s=_-]*([0-9]{2}[/\\-][0-9]{2}[/\\-][0-9]{4}|[0-9]{4}[/\\-][0-9]{2}[/\\-][0-9]{2})", RegexOption.IGNORE_CASE)
-            .find(normalizedBarcode)?.groupValues?.getOrNull(1)?.let {
-                result["dob"] = it.trim()
-            }
-
+        }
         Regex("<(father|fname)>\\s*([^<]+)\\s*<", RegexOption.IGNORE_CASE).find(barcodeData)?.groupValues?.getOrNull(2)?.let {
             result["father"] = it.trim()
         }
