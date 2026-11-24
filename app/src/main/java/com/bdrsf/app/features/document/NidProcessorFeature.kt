@@ -1168,7 +1168,7 @@ class NidProcessorFeature(
         faceVerificationFeature?.setReferenceDocumentFace("")
     }
 
-    private fun clearCache() {
+    fun clearCache() {
         clearFrontCache()
     }
 
