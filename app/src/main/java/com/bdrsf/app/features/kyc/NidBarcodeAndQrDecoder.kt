@@ -10,6 +10,8 @@ import com.google.mlkit.vision.barcode.BarcodeScannerOptions
 import com.google.mlkit.vision.barcode.BarcodeScanning
 import com.google.mlkit.vision.barcode.common.Barcode
 import com.google.mlkit.vision.common.InputImage
+import com.google.mlkit.vision.face.FaceDetection
+import com.google.mlkit.vision.face.FaceDetectorOptions
 import com.google.mlkit.vision.text.TextRecognition
 import com.google.mlkit.vision.text.latin.TextRecognizerOptions
 import com.google.zxing.BarcodeFormat
@@ -24,26 +26,24 @@ import java.util.EnumMap
 import java.util.Locale
 
 /**
- * BDRSF দ্বৈত-ইঞ্জিন NID ব্যাক পার্ট ডিকোডার:
- * ১) Legacy & Online NID PDF417 Feature:
- *    <pin>...</pin><name>...</name><DOB>...</DOB>...<ds>...</ds> XML ডিকোড করে।
- * ২) Smart / Digital NID MRZ + PDF417/QR Feature:
- *    স্মার্ট কার্ডের ৩-লাইনের ICAO TD1 MRZ (I<BGD...) এবং উপরের PDF417/QR ডিকোড করে।
+ * BDRSF NID ব্যাক পার্ট ডিকোডার (পুরাতন ল্যামিনেটেড, স্মার্ট NID ও ডিজিটাল/অনলাইন NID):
+ * - PDF417 XML (<pin>, <name>, <DOB>, <ds>), স্মার্ট কার্ডের 3-লাইন MRZ (I<BGD...) এবং QR কোড ডিকোড করে।
+ * - ল্যামিনেশন গ্লেয়ারের কারণে বারকোড আংশিক অস্পষ্ট হলে বাংলা-যুক্ত পুরাতন ব্যাক পার্টকে ব্লক না করে
+ *   চূড়ান্ত ফরেনসিক ক্রস-চেকের জন্য Gemini AI (OcrForensicEngine)-এ পাঠায়।
  */
 class NidBarcodeAndQrDecoder {
 
     data class NidBackDecodedResult(
         val success: Boolean,
         val errorReason: String,
-        val cardVariant: String,        // LEGACY_PDF417_XML | SMART_NID_MRZ_PDF417 | DIGITAL_QR
+        val cardVariant: String,          // LEGACY_PDF417_XML | SMART_NID_MRZ_PDF417 | DIGITAL_NID_QR | LAMINATED_BACK_OCR
+        val hasDecodedBarcodeOrMrz: Boolean,
         val rawBarcodeValue: String,
         val nidNumber: String,
-        val pinNumber: String,
         val holderNameEn: String,
         val dob: String,
         val bloodGroup: String,
         val issueDate: String,
-        val hasDigitalSignature: Boolean,
         val qrEnglishData: String,
         val backEnglishText: String,
         val fullBackJson: JSONObject
@@ -54,19 +54,17 @@ class NidBarcodeAndQrDecoder {
             Barcode.FORMAT_PDF417,
             Barcode.FORMAT_QR_CODE,
             Barcode.FORMAT_AZTEC,
-            Barcode.FORMAT_DATA_MATRIX
+            Barcode.FORMAT_DATA_MATRIX,
+            Barcode.FORMAT_CODE_128
         )
         .enableAllPotentialBarcodes()
         .build()
 
-    /**
-     * রিয়েল-টাইম ক্যামেরা ফ্রেমে PDF417 বা স্মার্ট NID MRZ আছে কি না যাচাই করে
-     */
     fun detectBarcodeFastInFrame(inputImage: InputImage, onResult: (hasSignal: Boolean, rawValue: String) -> Unit) {
         val scanner = BarcodeScanning.getClient(mlKitOptions)
         scanner.process(inputImage)
             .addOnSuccessListener { barcodes ->
-                val valid = barcodes.firstOrNull { !it.rawValue.isNullOrBlank() && it.rawValue!!.trim().length >= 8 }
+                val valid = barcodes.firstOrNull { !it.rawValue.isNullOrBlank() && it.rawValue!!.trim().length >= 6 }
                 onResult(valid != null, valid?.rawValue.orEmpty())
             }
             .addOnFailureListener {
@@ -80,13 +78,9 @@ class NidBarcodeAndQrDecoder {
             }
     }
 
-    /**
-     * মূল ডিকোডার এন্ট্রি পয়েন্ট — পুরনো NID (PDF417 XML) এবং নতুন স্মার্ট NID (MRZ + PDF417/QR)
-     * উভয় ফরম্যাট যাচাই করে।
-     */
     fun decodeFullNidBack(bitmap: Bitmap): NidBackDecodedResult {
         val textRecognizer = TextRecognition.getClient(TextRecognizerOptions.DEFAULT_OPTIONS)
-        val backRawEnglishText = try {
+        val backRawText = try {
             Tasks.await(textRecognizer.process(InputImage.fromBitmap(bitmap, 0))).text.orEmpty().trim()
         } catch (_: Exception) {
             ""
@@ -97,90 +91,162 @@ class NidBarcodeAndQrDecoder {
             }
         }
 
-        // ধাপ ১: ব্যাক পার্টের উপরে ও নিচে উভয় জোনে ML Kit + ZXing চালিয়ে PDF417 / QR বের করা
+        val upperText = backRawText.uppercase(Locale.ROOT)
+
+        // ১. ভুল করে ফ্রন্ট পার্ট বা পাসপোর্ট দিলে আটকে দেওয়া
+        val looksLikeFrontCard = (upperText.contains("FATHER") || upperText.contains("MOTHER") ||
+            upperText.contains("NID NO") || upperText.contains("ID NO")) &&
+            !upperText.contains("BLOOD GROUP") && !upperText.contains("ISSUE DATE") && !upperText.contains("BGD")
+
+        if (looksLikeFrontCard) {
+            return NidBackDecodedResult(
+                success = false,
+                errorReason = "এটি এনআইডি কার্ডের সামনের অংশ! অনুগ্রহ করে পেছনের অংশ (Back Part) দিন।",
+                cardVariant = "WRONG_SIDE",
+                hasDecodedBarcodeOrMrz = false,
+                rawBarcodeValue = "",
+                nidNumber = "",
+                holderNameEn = "",
+                dob = "",
+                bloodGroup = "",
+                issueDate = "",
+                qrEnglishData = "",
+                backEnglishText = backRawText,
+                fullBackJson = JSONObject()
+            )
+        }
+
+        if (upperText.contains("PASSPORT") && upperText.contains("P<")) {
+            return NidBackDecodedResult(
+                success = false,
+                errorReason = "ভুল ডকুমেন্ট! পাসপোর্টের জায়গায় এনআইডি কার্ডের ব্যাক পার্ট দিন।",
+                cardVariant = "WRONG_DOC",
+                hasDecodedBarcodeOrMrz = false,
+                rawBarcodeValue = "",
+                nidNumber = "",
+                holderNameEn = "",
+                dob = "",
+                bloodGroup = "",
+                issueDate = "",
+                qrEnglishData = "",
+                backEnglishText = backRawText,
+                fullBackJson = JSONObject()
+            )
+        }
+
+        // ২. যদি কোনো সেলফি বা মানুষের বড় মুখমণ্ডল দেওয়া হয় তবে আটকে দেওয়া
+        if (containsLargeSelfieFace(bitmap)) {
+            return NidBackDecodedResult(
+                success = false,
+                errorReason = "এটি এনআইডি কার্ডের ব্যাক পার্ট নয়! সঠিক ব্যাক পার্ট দিন।",
+                cardVariant = "INVALID_IMAGE",
+                hasDecodedBarcodeOrMrz = false,
+                rawBarcodeValue = "",
+                nidNumber = "",
+                holderNameEn = "",
+                dob = "",
+                bloodGroup = "",
+                issueDate = "",
+                qrEnglishData = "",
+                backEnglishText = backRawText,
+                fullBackJson = JSONObject()
+            )
+        }
+
+        // ৩. PDF417 / QR কোড স্ক্যান (পুরাতন ল্যামিনেটেড ও স্মার্ট কার্ড উভয় জোনে)
         val rawBarcode = scanPdf417AndQrAcrossZones(bitmap)
 
-        // ধাপ ২: যদি XML ট্যাগ (<pin>, <name>, <DOB>, <ds>) থাকে -> পুরাতন NID / অনলাইন NID ফিচার
+        // ৪. পুরাতন ল্যামিনেটেড NID ও অনলাইন e-NID XML (<pin>...</pin><name>...</name><DOB>...</DOB>)
         if (rawBarcode.contains("<pin>", ignoreCase = true) || rawBarcode.contains("<name>", ignoreCase = true)) {
-            return decodeLegacyPdf417Feature(rawBarcode, backRawEnglishText)
+            return parseLegacyXmlPdf417(rawBarcode, backRawText)
         }
 
-        // ধাপ ৩: স্মার্ট NID কার্ডের MRZ (I<BGD...) অথবা QR/PDF417 ফিচার
-        val smartResult = decodeSmartMrzAndQrFeature(rawBarcode, backRawEnglishText)
-        if (smartResult.success) {
-            return smartResult
+        // ৫. স্মার্ট NID / ডিজিটাল NID-এর MRZ (I<BGD...) ও PDF417/QR
+        val smartMrz = parseSmartOrDigitalMrz(rawBarcode, backRawText)
+        if (smartMrz != null) {
+            return smartMrz
         }
 
-        // ধাপ ৪: সাধারণ Key-Value QR / PDF417 (NW=..., PIN=...) থাকলে সেটি প্রসেস করা
+        // ৬. অন্যান্য QR / Key-Value বারকোড
         if (rawBarcode.isNotBlank()) {
-            val kvRes = decodeKeyValueQrFeature(rawBarcode, backRawEnglishText)
-            if (kvRes.success) return kvRes
+            return parseGenericBarcodePayload(rawBarcode, backRawText)
+        }
+
+        // ৭. পুরাতন ল্যামিনেটেড কার্ডের ব্যাক পার্টে সব লেখা বাংলায় থাকে এবং প্লাস্টিক গ্লেয়ারে
+        // বারকোড আংশিক অস্পষ্ট হতে পারে — তাই আসল ব্যাক পার্ট হিসেবে গ্রহণ করে Step 3-এ Gemini AI দ্বারা ভেরিফাই করা হবে
+        val blood = extractBloodGroup(backRawText)
+        val issue = extractIssueDate(backRawText)
+        val fallbackCode = "NID-BACK-LAMINATED-" + (issue.ifBlank { blood.ifBlank { "OK" } })
+
+        val json = JSONObject().apply {
+            put("codeType", "LAMINATED_BACK_OCR")
+            put("backCode", fallbackCode)
+            put("nidNumber", "")
+            put("nameEn", "")
+            put("dob", "")
+            put("bloodGroup", blood)
+            put("issueDate", issue)
+            put("qrEnglish", "")
+            put("englishText", backRawText)
         }
 
         return NidBackDecodedResult(
-            success = false,
-            errorReason = "এনআইডি ব্যাক পার্টের PDF417 বারকোড অথবা স্মার্ট কার্ডের MRZ/QR কোড শনাক্ত করা যায়নি! পরিষ্কার ব্যাক পার্ট দিন।",
-            cardVariant = "NONE",
-            rawBarcodeValue = rawBarcode,
+            success = true,
+            errorReason = "",
+            cardVariant = "LAMINATED_BACK_OCR",
+            hasDecodedBarcodeOrMrz = false,
+            rawBarcodeValue = fallbackCode,
             nidNumber = "",
-            pinNumber = "",
             holderNameEn = "",
             dob = "",
-            bloodGroup = "",
-            issueDate = "",
-            hasDigitalSignature = false,
+            bloodGroup = blood,
+            issueDate = issue,
             qrEnglishData = "",
-            backEnglishText = backRawEnglishText,
-            fullBackJson = JSONObject()
+            backEnglishText = backRawText,
+            fullBackJson = json
         )
     }
 
-    /**
-     * ফিচার ১: পুরাতন লেমিনেটেড NID ও অনলাইন ডাউনলোড NID-এর PDF417 XML ডিকোডার
-     * ফরম্যাট: <pin>19945611076000418</pin><name>SHEK TARIKUZZAMAN UZZAL</name><DOB>02 Feb 1994</DOB>...<ds>...</ds>
-     */
-    private fun decodeLegacyPdf417Feature(rawXml: String, backText: String): NidBackDecodedResult {
-        val pin = Regex("<pin>\\s*([0-9]{10,17})\\s*</pin>", RegexOption.IGNORE_CASE)
-            .find(rawXml)?.groupValues?.getOrNull(1).orEmpty()
+    private fun containsLargeSelfieFace(bitmap: Bitmap): Boolean {
+        val detector = FaceDetection.getClient(
+            FaceDetectorOptions.Builder()
+                .setPerformanceMode(FaceDetectorOptions.PERFORMANCE_MODE_FAST)
+                .setMinFaceSize(0.25f)
+                .build()
+        )
+        return try {
+            val faces = Tasks.await(detector.process(InputImage.fromBitmap(bitmap, 0)))
+            val imgArea = (bitmap.width * bitmap.height).coerceAtLeast(1).toFloat()
+            faces.any { (it.boundingBox.width() * it.boundingBox.height()) / imgArea > 0.14f }
+        } catch (_: Exception) {
+            false
+        } finally {
+            try {
+                detector.close()
+            } catch (_: Exception) {
+            }
+        }
+    }
+
+    private fun parseLegacyXmlPdf417(rawXml: String, backText: String): NidBackDecodedResult {
+        val pin = Regex("<pin>\\s*([0-9\\s]{10,22})\\s*</pin>", RegexOption.IGNORE_CASE)
+            .find(rawXml)?.groupValues?.getOrNull(1)?.replace("\\s+".toRegex(), "").orEmpty()
         val name = Regex("<name>\\s*([^<]+?)\\s*</name>", RegexOption.IGNORE_CASE)
             .find(rawXml)?.groupValues?.getOrNull(1)?.trim().orEmpty()
         val dob = Regex("<dob>\\s*([^<]+?)\\s*</dob>", RegexOption.IGNORE_CASE)
             .find(rawXml)?.groupValues?.getOrNull(1)?.trim().orEmpty()
-        val ds = Regex("<ds>\\s*([0-9a-fA-F]{20,})\\s*</ds>", RegexOption.IGNORE_CASE)
-            .find(rawXml)?.groupValues?.getOrNull(1).orEmpty()
 
-        val issueDate = extractIssueDateFromBackText(backText)
-        val bloodGroup = extractBloodGroupFromBackText(backText)
-
-        if (pin.length !in listOf(10, 13, 17) || name.length < 3) {
-            return NidBackDecodedResult(
-                success = false,
-                errorReason = "পুরাতন/অনলাইন NID-এর PDF417 ডেটা অসম্পূর্ণ বা বিকৃত। পরিষ্কার ছবি দিন।",
-                cardVariant = "LEGACY_PDF417_XML",
-                rawBarcodeValue = rawXml,
-                nidNumber = pin,
-                pinNumber = pin,
-                holderNameEn = name,
-                dob = dob,
-                bloodGroup = bloodGroup,
-                issueDate = issueDate,
-                hasDigitalSignature = ds.isNotBlank(),
-                qrEnglishData = rawXml,
-                backEnglishText = backText,
-                fullBackJson = JSONObject()
-            )
-        }
+        val blood = extractBloodGroup(backText)
+        val issue = extractIssueDate(backText)
 
         val json = JSONObject().apply {
             put("codeType", "LEGACY_PDF417_XML")
             put("backCode", rawXml)
             put("nidNumber", pin)
-            put("pinNumber", pin)
             put("nameEn", name)
             put("dob", dob)
-            put("bloodGroup", bloodGroup)
-            put("issueDate", issueDate)
-            put("hasDigitalSignature", ds.isNotBlank())
+            put("bloodGroup", blood)
+            put("issueDate", issue)
             put("qrEnglish", rawXml)
             put("englishText", backText)
         }
@@ -189,150 +255,124 @@ class NidBarcodeAndQrDecoder {
             success = true,
             errorReason = "",
             cardVariant = "LEGACY_PDF417_XML",
+            hasDecodedBarcodeOrMrz = pin.length in listOf(10, 13, 17),
             rawBarcodeValue = rawXml,
             nidNumber = pin,
-            pinNumber = pin,
             holderNameEn = name,
             dob = dob,
-            bloodGroup = bloodGroup,
-            issueDate = issueDate,
-            hasDigitalSignature = ds.isNotBlank(),
+            bloodGroup = blood,
+            issueDate = issue,
             qrEnglishData = rawXml,
             backEnglishText = backText,
             fullBackJson = json
         )
     }
 
-    /**
-     * ফিচার ২: স্মার্ট NID কার্ডের ৩-লাইনের ICAO TD1 MRZ + PDF417/QR ডিকোডার
-     * উদাহরণ:
-     * I<BGD736198413<62<<<<<<<<<<<<<
-     * 0101217F3506086BGD<<<<<<<<<<<8
-     * MEEM<<MST<KHADIJA<BEGUM<<<<<<<
-     */
-    private fun decodeSmartMrzAndQrFeature(rawBarcode: String, backText: String): NidBackDecodedResult {
-        val compactLines = backText.lines()
-            .map { it.uppercase(Locale.ROOT).replace(" ", "").trim() }
-            .filter { it.length >= 20 && (it.contains("<") || it.startsWith("I<BGD") || it.startsWith("1<BGD")) }
+    private fun parseSmartOrDigitalMrz(rawBarcode: String, backText: String): NidBackDecodedResult? {
+        val normalizedUpper = backText.uppercase(Locale.ROOT)
+        val compactAll = normalizedUpper.replace(" ", "")
 
-        val line1 = compactLines.firstOrNull {
-            it.startsWith("I<BGD") || it.startsWith("1<BGD") || it.startsWith("I<8GD")
-        }
+        val mrzLine1Regex = Regex("[I1L|!]<[B8][G6][D0]([0-9O]{9})[<C(]?([0-9O])")
+        val m1 = mrzLine1Regex.find(compactAll)
 
         var mrzNid10 = ""
+        if (m1 != null) {
+            val part9 = m1.groupValues[1].replace('O', '0')
+            val part1 = m1.groupValues[2].replace('O', '0')
+            if (part9.all { it.isDigit() } && part1.all { it.isDigit() }) {
+                mrzNid10 = part9 + part1
+            }
+        }
+
+        if (mrzNid10.length != 10) {
+            val alt = Regex("(?:BGD|8GD|B6D)([0-9<]{10,13})").find(compactAll)?.groupValues?.getOrNull(1)
+            val digits = alt?.filter { it.isDigit() }.orEmpty()
+            if (digits.length >= 10) {
+                mrzNid10 = digits.substring(0, 10)
+            }
+        }
+
         var mrzDob = ""
+        val mrzDobMatch = Regex("\\b([0-9]{6})[0-9][MF<][0-9]{6,7}(?:BGD|8GD|B6D)").find(compactAll)
+        if (mrzDobMatch != null) {
+            mrzDob = formatMrzDob(mrzDobMatch.groupValues[1])
+        }
+
         var mrzName = ""
-
-        if (line1 != null && line1.length >= 16) {
-            // I<BGD এর পরের অংশ থেকে প্রথম ১০টি ডিজিট নেওয়া (যেমন 736198413<62 -> 7361984136)
-            val afterCountry = line1.substring(5)
-            val digitsOnly = afterCountry.filter { it.isDigit() }
-            if (digitsOnly.length >= 10) {
-                mrzNid10 = digitsOnly.substring(0, 10)
-            }
-
-            val line1Idx = compactLines.indexOf(line1)
-            val line2 = compactLines.getOrNull(line1Idx + 1).orEmpty()
-            val line3 = compactLines.getOrNull(line1Idx + 2).orEmpty()
-
-            // লাইন ২ থেকে জন্মতারিখ YYMMDD -> dd MMM yyyy (যেমন 010121 -> 21 Jan 2001)
-            if (line2.length >= 6 && line2.substring(0, 6).all { it.isDigit() }) {
-                mrzDob = formatMrzDob(line2.substring(0, 6))
-            }
-
-            // লাইন ৩ থেকে নাম (MEEM<<MST<KHADIJA<BEGUM<<<<<<< -> MST KHADIJA BEGUM MEEM)
-            if (line3.contains("<<")) {
-                val parts = line3.split("<<")
-                val surname = parts.getOrNull(0)?.replace("<", " ")?.trim().orEmpty()
-                val given = parts.getOrNull(1)?.replace("<", " ")?.trim().orEmpty()
-                mrzName = listOf(given, surname).filter { it.isNotBlank() }.joinToString(" ").trim()
-            }
+        val nameLine = normalizedUpper.lines()
+            .map { it.replace(" ", "").trim() }
+            .firstOrNull { it.contains("<<") && !it.contains("BGD") && it.count { ch -> ch.isLetter() } >= 5 }
+        if (nameLine != null) {
+            val parts = nameLine.split("<<")
+            val surname = parts.getOrNull(0)?.replace("<", " ")?.trim().orEmpty()
+            val given = parts.getOrNull(1)?.replace("<", " ")?.trim().orEmpty()
+            mrzName = listOf(given, surname).filter { it.isNotBlank() }.joinToString(" ").trim()
         }
 
-        // যদি স্মার্ট কার্ডের MRZ থেকে ১০ ডিজিট NID পাওয়া যায় (অথবা উপরে PDF417 ও ডিটেক্ট হয়)
-        if (mrzNid10.length == 10) {
-            val bloodGroup = extractBloodGroupFromBackText(backText)
-            val issueDate = extractIssueDateFromBackText(backText)
-            val combinedCode = buildString {
-                if (rawBarcode.isNotBlank()) append(rawBarcode).append(" | ")
-                append("MRZ_NID:").append(mrzNid10)
-                if (mrzName.isNotBlank()) append(" | NAME:").append(mrzName)
-                if (mrzDob.isNotBlank()) append(" | DOB:").append(mrzDob)
-            }
-
-            val json = JSONObject().apply {
-                put("codeType", "SMART_NID_MRZ_PDF417")
-                put("backCode", combinedCode)
-                put("nidNumber", mrzNid10)
-                put("pinNumber", mrzNid10)
-                put("nameEn", mrzName)
-                put("dob", mrzDob)
-                put("bloodGroup", bloodGroup)
-                put("issueDate", issueDate)
-                put("hasDigitalSignature", rawBarcode.isNotBlank())
-                put("qrEnglish", combinedCode)
-                put("englishText", backText)
-            }
-
-            return NidBackDecodedResult(
-                success = true,
-                errorReason = "",
-                cardVariant = "SMART_NID_MRZ_PDF417",
-                rawBarcodeValue = combinedCode,
-                nidNumber = mrzNid10,
-                pinNumber = mrzNid10,
-                holderNameEn = mrzName,
-                dob = mrzDob,
-                bloodGroup = bloodGroup,
-                issueDate = issueDate,
-                hasDigitalSignature = rawBarcode.isNotBlank(),
-                qrEnglishData = combinedCode,
-                backEnglishText = backText,
-                fullBackJson = json
-            )
+        if (mrzNid10.length != 10 && !compactAll.contains("I<BGD") && !compactAll.contains("1<BGD")) {
+            return null
         }
 
-        return NidBackDecodedResult(
-            success = false,
-            errorReason = "",
-            cardVariant = "NONE",
-            rawBarcodeValue = rawBarcode,
-            nidNumber = "",
-            pinNumber = "",
-            holderNameEn = "",
-            dob = "",
-            bloodGroup = "",
-            issueDate = "",
-            hasDigitalSignature = false,
-            qrEnglishData = "",
-            backEnglishText = backText,
-            fullBackJson = JSONObject()
-        )
-    }
-
-    private fun decodeKeyValueQrFeature(rawCode: String, backText: String): NidBackDecodedResult {
-        val nid = Regex("(?:NW|PIN|NID|ID|RN)[=:\\s]+([0-9]{10}|[0-9]{13}|[0-9]{17})", RegexOption.IGNORE_CASE)
-            .find(rawCode)?.groupValues?.getOrNull(1)
-            ?: Regex("\\b([0-9]{17}|[0-9]{13}|[0-9]{10})\\b").find(rawCode)?.groupValues?.getOrNull(1).orEmpty()
-
-        val name = Regex("(?:NM|NAME)[=:\\s]+([A-Z .'-]{3,60})", RegexOption.IGNORE_CASE)
-            .find(rawCode)?.groupValues?.getOrNull(1)?.trim().orEmpty()
-        val dob = Regex("(?:DB|DOB)[=:\\s]+([0-9]{2}[/-][0-9]{2}[/-][0-9]{4}|[0-9]{4}-[0-9]{2}-[0-9]{2}|[0-9]{2}\\s+[A-Z]{3}\\s+[0-9]{4})", RegexOption.IGNORE_CASE)
-            .find(rawCode)?.groupValues?.getOrNull(1)?.trim().orEmpty()
-
-        if (nid.length !in listOf(10, 13, 17)) {
-            return NidBackDecodedResult(false, "", "NONE", rawCode, "", "", "", "", "", "", false, "", backText, JSONObject())
+        val blood = extractBloodGroup(backText)
+        val issue = extractIssueDate(backText)
+        val combinedCode = buildString {
+            if (rawBarcode.isNotBlank()) append(rawBarcode).append(" | ")
+            if (mrzNid10.isNotBlank()) append("MRZ_NID:").append(mrzNid10)
+            else append("SMART_NID_MRZ")
         }
 
         val json = JSONObject().apply {
-            put("codeType", "DIGITAL_QR")
+            put("codeType", "SMART_NID_MRZ_PDF417")
+            put("backCode", combinedCode)
+            put("nidNumber", mrzNid10)
+            put("nameEn", mrzName)
+            put("dob", mrzDob)
+            put("bloodGroup", blood)
+            put("issueDate", issue)
+            put("qrEnglish", combinedCode)
+            put("englishText", backText)
+        }
+
+        return NidBackDecodedResult(
+            success = true,
+            errorReason = "",
+            cardVariant = "SMART_NID_MRZ_PDF417",
+            hasDecodedBarcodeOrMrz = (mrzNid10.length == 10),
+            rawBarcodeValue = combinedCode,
+            nidNumber = mrzNid10,
+            holderNameEn = mrzName,
+            dob = mrzDob,
+            bloodGroup = blood,
+            issueDate = issue,
+            qrEnglishData = combinedCode,
+            backEnglishText = backText,
+            fullBackJson = json
+        )
+    }
+
+    private fun parseGenericBarcodePayload(rawCode: String, backText: String): NidBackDecodedResult {
+        val compactCode = rawCode.replace("\\s+".toRegex(), " ")
+        val nid = Regex("(?:NW|PIN|NID|ID|RN)[=:\\s]+([0-9\\s]{10,22})", RegexOption.IGNORE_CASE)
+            .find(compactCode)?.groupValues?.getOrNull(1)?.replace("\\s+".toRegex(), "")
+            ?: Regex("\\b([0-9]{17}|[0-9]{13}|[0-9]{10}|[0-9]{3}\\s+[0-9]{3}\\s+[0-9]{4})\\b")
+                .find(compactCode)?.groupValues?.getOrNull(1)?.replace("\\s+".toRegex(), "").orEmpty()
+
+        val name = Regex("(?:NM|NAME)[=:\\s]+([A-Z .'-]{3,60})", RegexOption.IGNORE_CASE)
+            .find(compactCode)?.groupValues?.getOrNull(1)?.trim().orEmpty()
+        val dob = Regex("(?:DB|DOB)[=:\\s]+([0-9]{2}[/-][0-9]{2}[/-][0-9]{4}|[0-9]{4}-[0-9]{2}-[0-9]{2}|[0-9]{2}\\s+[A-Z]{3}\\s+[0-9]{4})", RegexOption.IGNORE_CASE)
+            .find(compactCode)?.groupValues?.getOrNull(1)?.trim().orEmpty()
+
+        val blood = extractBloodGroup(backText)
+        val issue = extractIssueDate(backText)
+
+        val json = JSONObject().apply {
+            put("codeType", "DIGITAL_NID_QR")
             put("backCode", rawCode)
             put("nidNumber", nid)
-            put("pinNumber", nid)
             put("nameEn", name)
             put("dob", dob)
-            put("bloodGroup", extractBloodGroupFromBackText(backText))
-            put("issueDate", extractIssueDateFromBackText(backText))
+            put("bloodGroup", blood)
+            put("issueDate", issue)
             put("qrEnglish", rawCode)
             put("englishText", backText)
         }
@@ -340,39 +380,32 @@ class NidBarcodeAndQrDecoder {
         return NidBackDecodedResult(
             success = true,
             errorReason = "",
-            cardVariant = "DIGITAL_QR",
+            cardVariant = "DIGITAL_NID_QR",
+            hasDecodedBarcodeOrMrz = nid.length in listOf(10, 13, 17),
             rawBarcodeValue = rawCode,
             nidNumber = nid,
-            pinNumber = nid,
             holderNameEn = name,
             dob = dob,
-            bloodGroup = extractBloodGroupFromBackText(backText),
-            issueDate = extractIssueDateFromBackText(backText),
-            hasDigitalSignature = true,
+            bloodGroup = blood,
+            issueDate = issue,
             qrEnglishData = rawCode,
             backEnglishText = backText,
             fullBackJson = json
         )
     }
 
-    /**
-     * স্মার্ট কার্ডের উপরের অংশ (Top 45%) এবং পুরাতন/অনলাইন কার্ডের নিচের অংশ (Bottom 50%)
-     * উভয় জায়গায় ML Kit + ZXing হাই-কনট্রাস্ট স্ক্যান চালায়।
-     */
     private fun scanPdf417AndQrAcrossZones(bitmap: Bitmap): String {
         val scanner = BarcodeScanning.getClient(mlKitOptions)
         val zones = buildTopAndBottomZones(bitmap)
         try {
-            // ১. ML Kit পাস
             for (zone in zones) {
                 try {
                     val found = Tasks.await(scanner.process(InputImage.fromBitmap(zone, 0)))
-                    val hit = found.firstOrNull { !it.rawValue.isNullOrBlank() && it.rawValue!!.trim().length >= 8 }
+                    val hit = found.firstOrNull { !it.rawValue.isNullOrBlank() && it.rawValue!!.trim().length >= 6 }
                     if (hit != null) return hit.rawValue!!.trim()
                 } catch (_: Exception) {
                 }
             }
-            // ২. ZXing হাই-কনট্রাস্ট পাস (PDF417 & QR)
             for (zone in zones) {
                 val enhanced = toHighContrastGrayscale(zone)
                 try {
@@ -398,20 +431,18 @@ class NidBarcodeAndQrDecoder {
         val list = mutableListOf<Bitmap>()
         list.add(original)
 
-        if (original.height > 200 && original.width > 200) {
-            // স্মার্ট কার্ডের উপরের PDF417 জোন (Top 42%)
-            val topH = (original.height * 0.42f).toInt()
-            if (topH > 70) {
+        if (original.height > 160 && original.width > 160) {
+            val topH = (original.height * 0.45f).toInt()
+            if (topH > 50) {
                 val topCrop = Bitmap.createBitmap(original, 0, 0, original.width, topH)
-                val topScaled = Bitmap.createScaledBitmap(topCrop, (topCrop.width * 1.7f).toInt(), (topCrop.height * 1.7f).toInt(), true)
+                val topScaled = Bitmap.createScaledBitmap(topCrop, (topCrop.width * 1.8f).toInt(), (topCrop.height * 1.8f).toInt(), true)
                 if (topCrop !== topScaled && !topCrop.isRecycled) topCrop.recycle()
                 list.add(topScaled)
             }
 
-            // পুরাতন ও অনলাইন কার্ডের নিচের PDF417 জোন (Bottom 45%)
-            val botTop = (original.height * 0.52f).toInt()
+            val botTop = (original.height * 0.48f).toInt()
             val botH = original.height - botTop
-            if (botH > 70) {
+            if (botH > 50) {
                 val botCrop = Bitmap.createBitmap(original, 0, botTop, original.width, botH)
                 val botScaled = Bitmap.createScaledBitmap(botCrop, (botCrop.width * 1.8f).toInt(), (botCrop.height * 1.8f).toInt(), true)
                 if (botCrop !== botScaled && !botCrop.isRecycled) botCrop.recycle()
@@ -442,7 +473,7 @@ class NidBarcodeAndQrDecoder {
             } catch (_: Exception) {
                 reader.decode(BinaryBitmap(GlobalHistogramBinarizer(source)), hints)
             }
-            res?.text?.trim()?.takeIf { it.length >= 8 }
+            res?.text?.trim()?.takeIf { it.length >= 6 }
         } catch (_: Exception) {
             null
         }
@@ -454,7 +485,7 @@ class NidBarcodeAndQrDecoder {
             val canvas = Canvas(out)
             val cm = ColorMatrix().apply {
                 setSaturation(0f)
-                val c = 1.5f
+                val c = 1.45f
                 val t = (-0.5f * c + 0.5f) * 255f
                 postConcat(ColorMatrix(floatArrayOf(c, 0f, 0f, 0f, t, 0f, c, 0f, 0f, t, 0f, 0f, c, 0f, t, 0f, 0f, 0f, 1f, 0f)))
             }
@@ -476,12 +507,12 @@ class NidBarcodeAndQrDecoder {
         return "$dd $monthStr $year"
     }
 
-    private fun extractBloodGroupFromBackText(text: String): String {
+    private fun extractBloodGroup(text: String): String {
         return Regex("\\b(A\\+|A-|B\\+|B-|AB\\+|AB-|O\\+|O-)\\b")
             .find(text.uppercase(Locale.ROOT))?.groupValues?.getOrNull(1).orEmpty()
     }
 
-    private fun extractIssueDateFromBackText(text: String): String {
+    private fun extractIssueDate(text: String): String {
         return Regex("(?:ISSUE\\s*DATE|প্রদানের\\s*তারিখ)[^0-9A-Za-z০-৯]{0,8}([0-9]{1,2}\\s+[A-Za-z]{3,9}\\s+[0-9]{4}|[0-9০-৯]{2}[/-][0-9০-৯]{2}[/-][0-9০-৯]{4})", RegexOption.IGNORE_CASE)
             .find(text)?.groupValues?.getOrNull(1).orEmpty()
     }
