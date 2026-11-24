@@ -7,6 +7,7 @@ import android.graphics.BitmapFactory
 import android.graphics.Canvas
 import android.graphics.Color
 import android.graphics.Matrix
+import android.graphics.Rect
 import android.provider.MediaStore
 import android.util.Base64
 import android.webkit.WebView
@@ -51,19 +52,15 @@ import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 import kotlin.math.abs
 import kotlin.math.max
-import kotlin.math.min
 
 /**
- * Bangladesh NID (Smart Card & Laminated/Printed NID) Detector & Front/Back Cross-Matcher.
+ * Bangladesh NID (Smart Card & Printed/Laminated NID) Detector & Front/Back Cross-Matcher.
  *
- * Ultra-Resilient Automatic Multi-Stage PDF417 + 2D Barcode + MRZ Pipeline:
- * 1. Auto-deskews tilted NID cards using OCR line geometry.
- * 2. Preserves binary-mixed Bangladesh NID PDF417 payloads (e.g., <pin>, <name>, <DOB> + <FP>).
- * 3. Runs sequential automatic fallback stages across full card, Smart NID top zone,
- *    Printed NID bottom zone, and right-half combined sheet zone with white Quiet-Zone padding,
- *    sharp nearest-neighbor upscaling, Bradley-Roth adaptive thresholding, ML Kit 2D Scanner,
- *    dedicated ZXing PDF417Reader (Hybrid + GlobalHistogram), tilt angles, and Smart NID MRZ.
- * 4. Fails strictly if no valid code or matching identifier is extracted.
+ * - Extracts spaced or compact NID numbers (e.g., "736 198 4136" or "19945611076000418").
+ * - Runs automatic sequential multi-stage PDF417 & 2D barcode scanning:
+ *   Full image -> PDF417 crops (bottom/top/right with Quiet Zone) -> Upscaled ->
+ *   ML Kit + ZXing PDF417Reader (Hybrid + GlobalHistogram) + Inverted & Rotated passes.
+ * - Also parses Smart NID MRZ (I<BGD...) and matches Front & Back by NID, DOB, or English Name.
  */
 class NidProcessorFeature(
     private val activity: Activity,
@@ -439,7 +436,6 @@ class NidProcessorFeature(
                     null
                 }
 
-                // ছবি সামান্য বাঁকা থাকলে সোজা (Deskew) করলে PDF417 সারিবদ্ধ হয়
                 val skew = visionText?.let { estimateTextSkewAngle(it) } ?: 0f
                 if (abs(skew) in 1.0f..20.0f) {
                     val deskewed = rotateBitmapClean(decoded, -skew)
@@ -460,7 +456,7 @@ class NidProcessorFeature(
                 bitmap = decoded
                 val backText = visionText?.text.orEmpty()
 
-                // ধাপ ১: অটোমেটিক মাল্টি-স্টেজ PDF417 + 2D Barcode স্ক্যানার (একটির পর একটি পদ্ধতি চালাবে)
+                // ধাপ ১: স্বয়ংক্রিয়ভাবে একের পর এক সব PDF417 ও 2D বারকোড স্ক্যানার চালানো
                 val barcode = decodePdf417And2dExhaustively(bitmap)
                 // ধাপ ২: স্মার্ট কার্ড ব্যাক MRZ (I<BGD...) পার্সিং
                 val mrzData = parseSmartCardMrz(backText)
@@ -627,94 +623,83 @@ class NidProcessorFeature(
     }
 
     /**
-     * অটোমেটিক ৭-ধাপের PDF417 ও 2D Barcode রিডার:
-     * একটি ধাপ ব্যর্থ হলে স্বয়ংক্রিয়ভাবে পরের ধাপে যাবে এবং বারকোড বের করে আনবে।
+     * অটোমেটিক ক্রমানুসারে বিভিন্ন পদ্ধতিতে PDF417 ও 2D Barcode স্ক্যান করে:
+     * একটি পদ্ধতি ব্যর্থ হলে সাথে সাথে পরবর্তী পদ্ধতি চালায়।
      */
     private fun decodePdf417And2dExhaustively(fullBitmap: Bitmap): BarcodeOrMrzData {
-        // ধাপ ১: মূল ছবিতে সাদা Quiet-Zone বর্ডার যোগ করে ML Kit 2D স্ক্যান
-        addQuietZoneBorder(fullBitmap, 48)?.let { paddedFull ->
+        // পদ্ধতি ১: মূল ইমেজ + Quiet Zone বর্ডারে ML Kit ও ZXing PDF417
+        addQuietZoneBorder(fullBitmap, 56)?.let { paddedFull ->
             try {
                 scanWithMlKit2d(InputImage.fromBitmap(paddedFull, 0))?.let { return it }
+                decodeWithZxingAllModes(paddedFull, "ZXING_FULL_PADDED")?.let { return it }
             } finally {
                 recycleQuietly(paddedFull)
             }
         }
 
-        // ধাপ ২: বারকোড জোনগুলো আলাদাভাবে ক্রপ + সাদা Quiet-Zone বর্ডার + শার্প আপস্কেল (filter = false)
-        // - স্মার্ট কার্ডের PDF417 থাকে ওপরের অংশে (0%..44%)
-        // - পুরোনো/অনলাইন NID কার্ডের PDF417 থাকে নিচের অংশে (54%..100%)
-        // - কম্বাইন্ড শিট হলে ডান অর্ধেকে (45%..100%) থাকে
-        val candidateRois = listOf(
-            cropRoiWithQuietZone(fullBitmap, 0.0f, 0.0f, 1.0f, 0.44f, 60),
-            cropRoiWithQuietZone(fullBitmap, 0.0f, 0.54f, 1.0f, 1.0f, 60),
-            cropRoiWithQuietZone(fullBitmap, 0.44f, 0.0f, 1.0f, 1.0f, 50)
+        // পদ্ধতি ২: PDF417 বারকোডের সম্ভাব্য জোনগুলো ক্রপ করে স্ক্যান
+        // - পুরোনো/প্রিন্টেড NID কার্ডের PDF417 নিচের অংশে থাকে (55%..100% এবং 65%..100%)
+        // - স্মার্ট কার্ডের বারকোড ওপরের অংশে থাকে (0%..45%)
+        // - ডাবল-কার্ড শিট হলে ডান অর্ধেকে (45%..100%) থাকে
+        val candidateRois = listOfNotNull(
+            cropRoiWithQuietZone(fullBitmap, 0.0f, 0.55f, 1.0f, 1.0f, 70),
+            cropRoiWithQuietZone(fullBitmap, 0.0f, 0.65f, 1.0f, 1.0f, 70),
+            cropRoiWithQuietZone(fullBitmap, 0.0f, 0.0f, 1.0f, 0.45f, 70),
+            cropRoiWithQuietZone(fullBitmap, 0.45f, 0.0f, 1.0f, 1.0f, 60)
         )
 
         for (roi in candidateRois) {
-            if (roi == null) continue
-            var sharpUpscaled: Bitmap? = null
-            var adaptiveBmp: Bitmap? = null
+            var upscaled: Bitmap? = null
+            var inverted: Bitmap? = null
             try {
-                // ২ক: Nearest-neighbor (filter=false) শার্প আপস্কেল যাতে PDF417-এর খাড়া দাগ ব্লার না হয়
-                val scale = if (roi.width < 1200) 2 else 1
-                sharpUpscaled = if (scale > 1) {
+                // ২ক: ২x শার্প আপস্কেল (filter = false) যাতে PDF417-এর পাতলা মডিউল স্পষ্ট থাকে
+                val scale = if (roi.width < 1400) 2 else 1
+                upscaled = if (scale > 1) {
                     Bitmap.createScaledBitmap(roi, roi.width * scale, roi.height * scale, false)
                 } else {
                     roi
                 }
 
-                // ML Kit 2D চেষ্টা
-                scanWithMlKit2d(InputImage.fromBitmap(sharpUpscaled, 0))?.let { return it }
+                // ML Kit 2D
+                scanWithMlKit2d(InputImage.fromBitmap(upscaled, 0))?.let { return it }
 
-                // Dedicated ZXing PDF417Reader + MultiFormatReader চেষ্টা
-                decodePdf417And2dWithZxing(sharpUpscaled)?.let { raw ->
-                    return BarcodeOrMrzData(raw = raw, format = "PDF417_SHARP_ROI", is2dBarcode = true)
+                // ZXing Dedicated PDF417Reader + MultiFormatReader
+                decodeWithZxingAllModes(upscaled, "ZXING_ROI_HD")?.let { return it }
+
+                // ২খ: ইনভার্টেড (নেগেটিভ) ইমেজ স্ক্যান (কালো-সাদা উল্টানো থাকলে)
+                inverted = invertBitmapColors(upscaled)
+                if (inverted != null) {
+                    scanWithMlKit2d(InputImage.fromBitmap(inverted, 0))?.let { return it }
+                    decodeWithZxingAllModes(inverted, "ZXING_ROI_INVERTED")?.let { return it }
                 }
 
-                // ২খ: Bradley-Roth Adaptive Thresholding (ছায়া ও লো-কনট্রাস্ট দূর করে)
-                adaptiveBmp = applyAdaptiveThreshold(sharpUpscaled)
-                if (adaptiveBmp != null) {
-                    scanWithMlKit2d(InputImage.fromBitmap(adaptiveBmp, 0))?.let { return it }
-                    decodePdf417And2dWithZxing(adaptiveBmp)?.let { raw ->
-                        return BarcodeOrMrzData(raw = raw, format = "PDF417_ADAPTIVE", is2dBarcode = true)
-                    }
-                }
-
-                // ২গ: সামান্য কাত হয়ে থাকা (-4°, +4°, 180°) বারকোডের জন্য রোটেশন স্ক্যান
+                // ২গ: সামান্য কাত হয়ে থাকা (-4°, +4°, 180°) কোডের জন্য রোটেশন স্ক্যান
                 for (angle in floatArrayOf(-4f, 4f, 180f)) {
-                    val tilted = rotateBitmapClean(sharpUpscaled, angle) ?: continue
+                    val rotated = rotateBitmapClean(upscaled, angle) ?: continue
                     try {
-                        scanWithMlKit2d(InputImage.fromBitmap(tilted, 0))?.let { return it }
-                        decodePdf417And2dWithZxing(tilted)?.let { raw ->
-                            return BarcodeOrMrzData(raw = raw, format = "PDF417_ROTATED", is2dBarcode = true)
-                        }
+                        scanWithMlKit2d(InputImage.fromBitmap(rotated, 0))?.let { return it }
+                        decodeWithZxingAllModes(rotated, "ZXING_ROI_ROT_${angle.toInt()}")?.let { return it }
                     } finally {
-                        recycleQuietly(tilted)
+                        recycleQuietly(rotated)
                     }
                 }
             } catch (_: Exception) {
             } finally {
-                if (adaptiveBmp !== sharpUpscaled) recycleQuietly(adaptiveBmp)
-                if (sharpUpscaled !== roi) recycleQuietly(sharpUpscaled)
+                recycleQuietly(inverted)
+                if (upscaled !== roi) recycleQuietly(upscaled)
                 recycleQuietly(roi)
             }
         }
 
-        // ধাপ ৩: ফুল ইমেজে Adaptive Threshold + ZXing Dedicated PDF417Reader
-        val fullAdaptive = applyAdaptiveThreshold(fullBitmap)
-        if (fullAdaptive != null) {
+        // পদ্ধতি ৩: পুরো কার্ড ইনভার্ট করে সর্বশেষ চেষ্টা
+        val fullInverted = invertBitmapColors(fullBitmap)
+        if (fullInverted != null) {
             try {
-                scanWithMlKit2d(InputImage.fromBitmap(fullAdaptive, 0))?.let { return it }
-                decodePdf417And2dWithZxing(fullAdaptive)?.let { raw ->
-                    return BarcodeOrMrzData(raw = raw, format = "PDF417_FULL_ADAPTIVE", is2dBarcode = true)
-                }
+                scanWithMlKit2d(InputImage.fromBitmap(fullInverted, 0))?.let { return it }
+                decodeWithZxingAllModes(fullInverted, "ZXING_FULL_INVERTED")?.let { return it }
             } finally {
-                recycleQuietly(fullAdaptive)
+                recycleQuietly(fullInverted)
             }
-        }
-
-        decodePdf417And2dWithZxing(fullBitmap)?.let { raw ->
-            return BarcodeOrMrzData(raw = raw, format = "PDF417_FULL_ZXING", is2dBarcode = true)
         }
 
         return BarcodeOrMrzData()
@@ -754,7 +739,8 @@ class NidProcessorFeature(
     }
 
     /**
-     * বাংলাদেশ এনআইডি PDF417 বারকোডে থাকা টেক্সট/ট্যাগ অংশ অক্ষুণ্ণ রেখে বাইনারি ফিঙ্গারপ্রিন্ট নয়েজ স্যানিটাইজ করে।
+     * বাংলাদেশ NID PDF417-এ থাকা <pin>, <name>, <DOB>, <FP>, <F>, <TYPE>, <V>, <ds> ট্যাগসহ
+     * ডিকোড হওয়া পে-লোড থেকে বাইনারি নয়েজ স্যানিটাইজ করে পাঠযোগ্য টেক্সট বের করে।
      */
     private fun extractSanitizedBarcodePayload(barcode: Barcode): String {
         val candidates = mutableListOf<String>()
@@ -770,31 +756,36 @@ class NidProcessorFeature(
 
         for (raw in candidates) {
             val cleaned = sanitizeDecodedString(raw)
-            if (cleaned.length >= 6) return cleaned
+            if (cleaned.isNotBlank()) return cleaned
         }
         return ""
     }
 
     private fun sanitizeDecodedString(raw: String): String {
         if (raw.isBlank()) return ""
-        // কন্ট্রোল ক্যারেক্টার (বাইনারি ফিঙ্গারপ্রিন্ট ডেটা) সরিয়ে পাঠযোগ্য অংশ রাখা
+        // XML/NID ট্যাগ থাকলে (যেমন <pin>...</pin>) সরাসরি গ্রহণ করা
+        val hasNidXmlTags = raw.contains("<pin>", ignoreCase = true) ||
+            raw.contains("<name>", ignoreCase = true) ||
+            raw.contains("<dob>", ignoreCase = true)
+
         val sb = StringBuilder(raw.length)
         for (ch in raw) {
             if (ch == '\n' || ch == '\r' || ch == '\t' || ch.code in 32..126 || ch.code >= 0x0980) {
                 sb.append(ch)
-            } else {
+            } else if (!hasNidXmlTags) {
                 sb.append(' ')
             }
         }
         val normalized = sb.toString().replace(Regex(" {2,}"), " ").trim()
+        if (hasNidXmlTags && normalized.isNotBlank()) return normalized
         val alphaNumCount = normalized.count { it.isLetterOrDigit() }
         return if (alphaNumCount >= 6) normalized else ""
     }
 
     /**
-     * Dedicated ZXing PDF417Reader (HybridBinarizer + GlobalHistogramBinarizer) ও MultiFormatReader।
+     * Dedicated ZXing PDF417Reader (Hybrid + GlobalHistogram) এবং MultiFormatReader দিয়ে 2D ডিকোডিং।
      */
-    private fun decodePdf417And2dWithZxing(bitmap: Bitmap): String? {
+    private fun decodeWithZxingAllModes(bitmap: Bitmap, tagPrefix: String): BarcodeOrMrzData? {
         val w = bitmap.width
         val h = bitmap.height
         if (w < 40 || h < 20) return null
@@ -809,27 +800,36 @@ class NidProcessorFeature(
         )
 
         val pdfReader = PDF417Reader()
-        // ১. HybridBinarizer দিয়ে PDF417Reader
         try {
             val res = pdfReader.decode(BinaryBitmap(HybridBinarizer(source)), pdfHints)
             val cleaned = sanitizeDecodedString(res.text.orEmpty())
-            if (cleaned.isNotBlank()) return cleaned
+            if (cleaned.isNotBlank()) {
+                return BarcodeOrMrzData(
+                    raw = cleaned,
+                    format = "${tagPrefix}_PDF417_HYBRID",
+                    is2dBarcode = true
+                )
+            }
         } catch (_: Exception) {
         } finally {
             pdfReader.reset()
         }
 
-        // ২. GlobalHistogramBinarizer দিয়ে PDF417Reader (পাতলা বা অস্পষ্ট দাগের জন্য)
         try {
             val res = pdfReader.decode(BinaryBitmap(GlobalHistogramBinarizer(source)), pdfHints)
             val cleaned = sanitizeDecodedString(res.text.orEmpty())
-            if (cleaned.isNotBlank()) return cleaned
+            if (cleaned.isNotBlank()) {
+                return BarcodeOrMrzData(
+                    raw = cleaned,
+                    format = "${tagPrefix}_PDF417_HIST",
+                    is2dBarcode = true
+                )
+            }
         } catch (_: Exception) {
         } finally {
             pdfReader.reset()
         }
 
-        // ৩. QR Code / Aztec / Data Matrix ফলব্যাক
         val multiHints = mapOf(
             DecodeHintType.TRY_HARDER to true,
             DecodeHintType.CHARACTER_SET to "UTF-8",
@@ -842,7 +842,37 @@ class NidProcessorFeature(
         )
         return try {
             val res = MultiFormatReader().decode(BinaryBitmap(HybridBinarizer(source)), multiHints)
-            sanitizeDecodedString(res.text.orEmpty()).takeIf { it.isNotBlank() }
+            val cleaned = sanitizeDecodedString(res.text.orEmpty())
+            if (cleaned.isNotBlank()) {
+                BarcodeOrMrzData(
+                    raw = cleaned,
+                    format = "${tagPrefix}_${res.barcodeFormat.name}",
+                    is2dBarcode = true
+                )
+            } else {
+                null
+            }
+        } catch (_: Exception) {
+            null
+        }
+    }
+
+    private fun invertBitmapColors(source: Bitmap): Bitmap? {
+        return try {
+            val w = source.width
+            val h = source.height
+            if (w <= 0 || h <= 0) return null
+            val pixels = IntArray(w * h)
+            source.getPixels(pixels, 0, w, 0, 0, w, h)
+            for (i in pixels.indices) {
+                val c = pixels[i]
+                pixels[i] = Color.rgb(
+                    255 - Color.red(c),
+                    255 - Color.green(c),
+                    255 - Color.blue(c)
+                )
+            }
+            Bitmap.createBitmap(pixels, w, h, Bitmap.Config.ARGB_8888)
         } catch (_: Exception) {
             null
         }
@@ -850,9 +880,11 @@ class NidProcessorFeature(
 
     private fun addQuietZoneBorder(source: Bitmap, borderPx: Int): Bitmap? {
         return try {
-            val outW = source.width + borderPx * 2
-            val outH = source.height + borderPx * 2
-            val out = Bitmap.createBitmap(outW, outH, Bitmap.Config.ARGB_8888)
+            val out = Bitmap.createBitmap(
+                source.width + borderPx * 2,
+                source.height + borderPx * 2,
+                Bitmap.Config.ARGB_8888
+            )
             val canvas = Canvas(out)
             canvas.drawColor(Color.WHITE)
             canvas.drawBitmap(source, borderPx.toFloat(), borderPx.toFloat(), null)
@@ -879,76 +911,20 @@ class NidProcessorFeature(
             val ch = bottom - top
             if (cw < 80 || ch < 30) return null
 
-            val out = Bitmap.createBitmap(cw + quietZonePx * 2, ch + quietZonePx * 2, Bitmap.Config.ARGB_8888)
+            val out = Bitmap.createBitmap(
+                cw + quietZonePx * 2,
+                ch + quietZonePx * 2,
+                Bitmap.Config.ARGB_8888
+            )
             val canvas = Canvas(out)
             canvas.drawColor(Color.WHITE)
             canvas.drawBitmap(
                 source,
-                android.graphics.Rect(left, top, right, bottom),
-                android.graphics.Rect(quietZonePx, quietZonePx, quietZonePx + cw, quietZonePx + ch),
+                Rect(left, top, right, bottom),
+                Rect(quietZonePx, quietZonePx, quietZonePx + cw, quietZonePx + ch),
                 null
             )
             out
-        } catch (_: Exception) {
-            null
-        }
-    }
-
-    /**
-     * Bradley-Roth Integral Image Adaptive Thresholding:
-     * কার্ডের ওপর ছায়া বা অসম আলো থাকলেও PDF417-এর বারগুলো নিখুঁত সাদা-কালো করে।
-     */
-    private fun applyAdaptiveThreshold(source: Bitmap): Bitmap? {
-        return try {
-            val w = source.width
-            val h = source.height
-            if (w < 40 || h < 20) return null
-
-            val pixels = IntArray(w * h)
-            source.getPixels(pixels, 0, w, 0, 0, w, h)
-
-            val gray = IntArray(w * h)
-            for (i in pixels.indices) {
-                val c = pixels[i]
-                gray[i] = (Color.red(c) * 77 + Color.green(c) * 150 + Color.blue(c) * 29) shr 8
-            }
-
-            val integral = LongArray(w * h)
-            for (y in 0 until h) {
-                var rowSum = 0L
-                val rowOffset = y * w
-                for (x in 0 until w) {
-                    rowSum += gray[rowOffset + x]
-                    integral[rowOffset + x] = if (y == 0) rowSum else integral[(y - 1) * w + x] + rowSum
-                }
-            }
-
-            val s = max(16, w / 24)
-            val s2 = s / 2
-            val thresholdRatio = 0.86f
-            val outPixels = IntArray(w * h)
-
-            for (y in 0 until h) {
-                val y1 = max(0, y - s2)
-                val y2 = min(h - 1, y + s2)
-                val rowOffset = y * w
-                for (x in 0 until w) {
-                    val x1 = max(0, x - s2)
-                    val x2 = min(w - 1, x + s2)
-                    val count = (x2 - x1 + 1) * (y2 - y1 + 1)
-
-                    val a = if (x1 > 0 && y1 > 0) integral[(y1 - 1) * w + (x1 - 1)] else 0L
-                    val b = if (y1 > 0) integral[(y1 - 1) * w + x2] else 0L
-                    val c = if (x1 > 0) integral[y2 * w + (x1 - 1)] else 0L
-                    val d = integral[y2 * w + x2]
-
-                    val sum = d - b - c + a
-                    val isDark = (gray[rowOffset + x] * count) < (sum * thresholdRatio)
-                    outPixels[rowOffset + x] = if (isDark) Color.BLACK else Color.WHITE
-                }
-            }
-
-            Bitmap.createBitmap(outPixels, w, h, Bitmap.Config.ARGB_8888)
         } catch (_: Exception) {
             null
         }
@@ -1087,8 +1063,9 @@ class NidProcessorFeature(
         } catch (_: Exception) {
         }
 
+        // <pin>19945611076000418</pin><name>SHEK TARIKUZZAMAN UZZAL</name><DOB>02 Feb 1994</DOB>...
         val tagRegex = Regex(
-            "<([A-Za-z][A-Za-z0-9_ -]{0,30})>\\s*([^<>]{1,160})\\s*</\\1>",
+            "<([A-Za-z][A-Za-z0-9_ -]{0,30})>\\s*([^<>]{1,220}?)\\s*</\\1>",
             RegexOption.IGNORE_CASE
         )
         tagRegex.findAll(text).forEach { match ->
