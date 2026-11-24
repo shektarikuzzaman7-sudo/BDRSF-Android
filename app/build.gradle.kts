@@ -42,6 +42,9 @@ dependencies {
     implementation("com.google.android.material:material:1.12.0")
     implementation("androidx.exifinterface:exifinterface:1.3.7")
 
+    // Google Play Services Tasks (Tasks.await সাপোর্টের জন্য)
+    implementation("com.google.android.gms:play-services-tasks:18.2.0")
+
     // Launcher icon unread badge / dot support
     implementation("me.leolin:ShortcutBadger:1.1.22@aar")
 
