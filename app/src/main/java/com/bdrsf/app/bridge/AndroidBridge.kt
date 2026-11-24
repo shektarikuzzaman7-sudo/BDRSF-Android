@@ -42,9 +42,6 @@ class AndroidBridge(
         fun onCustomActionRequested(action: String, payload: JSONObject, callback: String?)
     }
 
-    /**
-     * bdrsf-bridge.js এর মূল ইউনিভার্সাল এক্সিকিউশন মেথড
-     */
     @JavascriptInterface
     fun executeFeature(actionName: String?, payloadJson: String?, callbackName: String?) {
         if (actionName.isNullOrBlank()) return
@@ -86,14 +83,10 @@ class AndroidBridge(
                     val type = payload.optString("type", "light")
                     actionHandler.onTriggerHapticRequested(type)
                 }
-                else -> actionHandler.onCustomActionRequested(actionName, payload, cb)
+                else -> actionHandler.onCustomActionRequested(actionName.trim(), payload, cb)
             }
         }
     }
-
-    // ---------------------------------------------------------------------------------------------
-    // bdrsf-bridge.js এর সরাসরি ফলব্যাক, FCM টোকেন ও ব্যাজ সিঙ্ক মেথডসমূহ
-    // ---------------------------------------------------------------------------------------------
 
     @JavascriptInterface
     fun getFcmToken(): String {
@@ -122,6 +115,30 @@ class AndroidBridge(
     @JavascriptInterface
     fun startNativeGalleryPicker() {
         executeFeature(Actions.PICK_GALLERY_QR, "{}", "processScannedData")
+    }
+
+    @JavascriptInterface
+    fun startKyc(documentType: String?) {
+        val raw = (documentType ?: "NID_FRONT").trim()
+        val payload = JSONObject().apply {
+            put("documentType", raw)
+            put("docType", raw)
+            put("mode", raw.lowercase())
+        }
+        executeFeature(Actions.START_KYC, payload.toString(), "onDocumentValidated")
+    }
+
+    @JavascriptInterface
+    fun pickNidGallery(slot: String?) {
+        val payload = JSONObject().apply {
+            put("slot", (slot ?: "nid_front").trim())
+        }
+        executeFeature("PICK_NID_GALLERY", payload.toString(), "onDocumentValidated")
+    }
+
+    @JavascriptInterface
+    fun pickPassportGallery() {
+        executeFeature("PICK_PASSPORT_GALLERY", "{}", "onDocumentValidated")
     }
 
     @JavascriptInterface
@@ -174,10 +191,6 @@ class AndroidBridge(
             "{}"
         }
     }
-
-    // ---------------------------------------------------------------------------------------------
-    // ওয়েবভিউতে নিরাপদ ডাটা ডেলিভারি
-    // ---------------------------------------------------------------------------------------------
 
     fun sendResponseToWeb(response: BridgeResponse, callbackFunction: String?) {
         if (callbackFunction.isNullOrBlank()) return
