@@ -14,7 +14,14 @@ import com.bdrsf.app.bridge.AndroidBridge
 import com.bdrsf.app.bridge.WebBridgeContract.Actions
 import com.bdrsf.app.bridge.WebBridgeContract.BridgeResponse
 import com.bdrsf.app.bridge.WebBridgeContract.Status
+import com.bdrsf.app.features.face.FaceVerificationFeature
+import com.google.android.gms.tasks.Tasks
+import com.google.mlkit.vision.barcode.BarcodeScannerOptions
+import com.google.mlkit.vision.barcode.BarcodeScanning
+import com.google.mlkit.vision.barcode.common.Barcode
 import com.google.mlkit.vision.common.InputImage
+import com.google.mlkit.vision.face.FaceDetection
+import com.google.mlkit.vision.face.FaceDetectorOptions
 import com.google.mlkit.vision.text.Text
 import com.google.mlkit.vision.text.TextRecognition
 import com.google.mlkit.vision.text.TextRecognizer
@@ -24,24 +31,27 @@ import org.json.JSONObject
 import java.io.ByteArrayOutputStream
 import java.io.File
 import java.io.FileOutputStream
+import java.nio.charset.StandardCharsets
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
+import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 import kotlin.math.max
 
 class PassportProcessorFeature(
     private val activity: Activity,
     private val bridge: AndroidBridge,
-    private val webView: WebView
+    private val webView: WebView,
+    private val faceVerificationFeature: FaceVerificationFeature? = null
 ) {
 
     companion object {
         const val RC_PICK_PASSPORT_GALLERY = 6012
         private const val MAX_IMAGE_DIMENSION = 1280
-        private const val OCR_IMAGE_QUALITY = 82
+        private const val OCR_IMAGE_QUALITY = 85
     }
 
     private val bgExecutor: ExecutorService = Executors.newSingleThreadExecutor()
@@ -62,6 +72,26 @@ class PassportProcessorFeature(
     private val textRecognizer: TextRecognizer
         get() = textRecognizerDelegate.value
 
+    private val faceDetector by lazy {
+        val options = FaceDetectorOptions.Builder()
+            .setPerformanceMode(FaceDetectorOptions.PERFORMANCE_MODE_ACCURATE)
+            .build()
+        FaceDetection.getClient(options)
+    }
+
+    private val barcodeScanner by lazy {
+        val options = BarcodeScannerOptions.Builder()
+            .setBarcodeFormats(
+                Barcode.FORMAT_QR_CODE,
+                Barcode.FORMAT_PDF417,
+                Barcode.FORMAT_DATA_MATRIX,
+                Barcode.FORMAT_AZTEC,
+                Barcode.FORMAT_CODE_128
+            )
+            .build()
+        BarcodeScanning.getClient(options)
+    }
+
     fun updatePolicy(policyPayload: JSONObject?) {
         activePolicy = copyJson(policyPayload ?: JSONObject())
     }
@@ -70,20 +100,14 @@ class PassportProcessorFeature(
         return JSONObject(source.toString())
     }
 
-    fun openGalleryPicker(
-        policyPayload: JSONObject,
-        callback: String?
-    ) {
+    fun openGalleryPicker(policyPayload: JSONObject, callback: String?) {
         if (destroyed) {
             notifyError("Passport Processor বন্ধ রয়েছে", callback)
             return
         }
         updatePolicy(policyPayload)
         pendingCallback = callback
-        val intent = Intent(
-            Intent.ACTION_PICK,
-            MediaStore.Images.Media.EXTERNAL_CONTENT_URI
-        ).apply {
+        val intent = Intent(Intent.ACTION_PICK, MediaStore.Images.Media.EXTERNAL_CONTENT_URI).apply {
             type = "image/*"
         }
         try {
@@ -95,14 +119,8 @@ class PassportProcessorFeature(
         }
     }
 
-    fun handleActivityResult(
-        requestCode: Int,
-        resultCode: Int,
-        data: Intent?
-    ): Boolean {
-        if (requestCode != RC_PICK_PASSPORT_GALLERY) {
-            return false
-        }
+    fun handleActivityResult(requestCode: Int, resultCode: Int, data: Intent?): Boolean {
+        if (requestCode != RC_PICK_PASSPORT_GALLERY) return false
         val callback = pendingCallback
         pendingCallback = null
         if (destroyed) return true
@@ -120,9 +138,7 @@ class PassportProcessorFeature(
             val input = activity.contentResolver.openInputStream(uri)
                 ?: throw IllegalStateException("ছবি পড়া সম্ভব হয়নি")
             input.use { source ->
-                FileOutputStream(tempFile).use { output ->
-                    source.copyTo(output)
-                }
+                FileOutputStream(tempFile).use { output -> source.copyTo(output) }
             }
             processPassportFile(tempFile, copyJson(activePolicy), callback)
         } catch (e: Exception) {
@@ -131,11 +147,7 @@ class PassportProcessorFeature(
         return true
     }
 
-    fun processPassportFile(
-        file: File,
-        policyPayload: JSONObject? = null,
-        callback: String? = null
-    ) {
+    fun processPassportFile(file: File, policyPayload: JSONObject? = null, callback: String? = null) {
         if (destroyed) {
             notifyError("Passport Processor বন্ধ রয়েছে", callback)
             return
@@ -152,16 +164,11 @@ class PassportProcessorFeature(
                 val bitmapRecycled = AtomicBoolean(false)
                 fun recycleBitmap() {
                     if (bitmapRecycled.compareAndSet(false, true)) {
-                        processedBitmap?.let {
-                            if (!it.isRecycled) it.recycle()
-                        }
+                        processedBitmap?.let { if (!it.isRecycled) it.recycle() }
                     }
                 }
                 try {
-                    // ১. ছবি সোজা করা (Fix EXIF Orientation)
                     fixExifOrientation(file)
-
-                    // ২. সাইজ অপ্টিমাইজ ও Base64 রূপান্তর (Optimize & Compress)
                     val imageResult = optimizeAndCompress(file)
                     processedBitmap = imageResult.first
                     val fullPageBase64 = imageResult.second
@@ -177,8 +184,10 @@ class PassportProcessorFeature(
                         return@execute
                     }
 
-                    // ৩. Google ML Kit Text Recognition (স্ক্যান, পলিসি যাচাই ও ফিল্ড পার্সিং)
                     val inputImage = InputImage.fromBitmap(bitmap, 0)
+                    val docFaceBase64 = extractFaceFromBitmap(bitmap)
+                    val decodedCodes = scanPassportCodes(inputImage)
+
                     textRecognizer.process(inputImage)
                         .addOnSuccessListener { visionText ->
                             try {
@@ -189,7 +198,14 @@ class PassportProcessorFeature(
                                     notifyError(validationError, callback)
                                     return@addOnSuccessListener
                                 }
-                                val fields = extractAllEnglishPassportFields(visionText)
+                                val fields = extractAllEnglishPassportFields(visionText).toMutableMap()
+                                if (decodedCodes.first.isNotBlank()) {
+                                    fields["qrCodeData"] = decodedCodes.first
+                                }
+                                if (decodedCodes.second.isNotBlank()) {
+                                    fields["barcodeData"] = decodedCodes.second
+                                }
+
                                 if (!isPassportDocument(rawText, fields)) {
                                     notifyError(
                                         "পাসপোর্টের প্রয়োজনীয় তথ্য পাওয়া যায়নি। পাসপোর্টের তথ্যের পাতার পরিষ্কার ছবি দিন।",
@@ -197,10 +213,17 @@ class PassportProcessorFeature(
                                     )
                                     return@addOnSuccessListener
                                 }
+
+                                if (docFaceBase64.isNotBlank()) {
+                                    faceVerificationFeature?.setReferenceDocumentFace(docFaceBase64)
+                                }
+
                                 dispatchPassportSuccess(
                                     fullPageBase64 = fullPageBase64,
+                                    docFaceBase64 = docFaceBase64,
                                     fields = fields,
-                                    rawText = rawText,
+                                    qrProcessed = decodedCodes.first.isNotBlank(),
+                                    barcodeProcessed = decodedCodes.second.isNotBlank(),
                                     callback = callback
                                 )
                             } catch (e: Exception) {
@@ -211,10 +234,7 @@ class PassportProcessorFeature(
                         }
                         .addOnFailureListener { error ->
                             recycleBitmap()
-                            notifyError(
-                                "পাসপোর্টের লেখা পড়া যায়নি। পরিষ্কার ছবি দিন। ${error.localizedMessage ?: ""}",
-                                callback
-                            )
+                            notifyError("পাসপোর্টের লেখা পড়া যায়নি। পরিষ্কার ছবি দিন। ${error.localizedMessage ?: ""}", callback)
                         }
                 } catch (e: Exception) {
                     recycleBitmap()
@@ -226,10 +246,50 @@ class PassportProcessorFeature(
         }
     }
 
-    private fun isPassportDocument(
-        rawText: String,
-        fields: Map<String, String>
-    ): Boolean {
+    private fun scanPassportCodes(inputImage: InputImage): Pair<String, String> {
+        return try {
+            val barcodes = Tasks.await(barcodeScanner.process(inputImage), 3, TimeUnit.SECONDS)
+            val qrList = mutableListOf<String>()
+            val barList = mutableListOf<String>()
+            for (b in barcodes) {
+                val raw = b.rawBytes?.let {
+                    try { String(it, StandardCharsets.UTF_8) } catch (_: Exception) { b.rawValue ?: "" }
+                } ?: (b.rawValue ?: "")
+                if (raw.isBlank()) continue
+                if (b.format == Barcode.FORMAT_QR_CODE) qrList.add(raw) else barList.add(raw)
+            }
+            Pair(qrList.joinToString(" | "), barList.joinToString(" | "))
+        } catch (_: Exception) {
+            Pair("", "")
+        }
+    }
+
+    private fun extractFaceFromBitmap(bitmap: Bitmap): String {
+        return try {
+            val faces = Tasks.await(faceDetector.process(InputImage.fromBitmap(bitmap, 0)), 3, TimeUnit.SECONDS)
+            if (!faces.isNullOrEmpty()) {
+                val box = faces[0].boundingBox
+                val padX = (box.width() * 0.25f).toInt()
+                val padY = (box.height() * 0.35f).toInt()
+                val x = (box.left - padX).coerceIn(0, bitmap.width - 1)
+                val y = (box.top - padY).coerceIn(0, bitmap.height - 1)
+                val w = (box.width() + padX * 2).coerceAtMost(bitmap.width - x)
+                val h = (box.height() + padY * 2).coerceAtMost(bitmap.height - y)
+                if (w > 30 && h > 30) {
+                    val out = ByteArrayOutputStream()
+                    val faceBmp = Bitmap.createBitmap(bitmap, x, y, w, h)
+                    faceBmp.compress(Bitmap.CompressFormat.JPEG, 92, out)
+                    faceBmp.recycle()
+                    return "data:image/jpeg;base64," + Base64.encodeToString(out.toByteArray(), Base64.NO_WRAP)
+                }
+            }
+            ""
+        } catch (_: Exception) {
+            ""
+        }
+    }
+
+    private fun isPassportDocument(rawText: String, fields: Map<String, String>): Boolean {
         val upper = rawText.uppercase(Locale.ROOT)
         val hasPassportWord = upper.contains("PASSPORT") ||
             upper.contains("PEOPLE'S REPUBLIC OF") ||
@@ -246,10 +306,7 @@ class PassportProcessorFeature(
         return hasPassportWord && indicators >= 2
     }
 
-    private fun validateAgainstPhpPolicy(
-        rawText: String,
-        policy: JSONObject
-    ): String? {
+    private fun validateAgainstPhpPolicy(rawText: String, policy: JSONObject): String? {
         val upper = rawText.uppercase(Locale.ROOT)
         val rejectList = jsonArrayToList(policy.optJSONArray("rejectIfContains")).ifEmpty {
             listOf("NATIONAL ID", "NID NO", "জাতীয় পরিচয়")
@@ -261,9 +318,7 @@ class PassportProcessorFeature(
         }
         val required = jsonArrayToList(policy.optJSONArray("mustContainAny"))
         if (required.isNotEmpty()) {
-            val matched = required.any { keyword ->
-                upper.contains(keyword.uppercase(Locale.ROOT))
-            }
+            val matched = required.any { keyword -> upper.contains(keyword.uppercase(Locale.ROOT)) }
             if (!matched) {
                 return policy.optString("invalidMessage", "এটি গ্রহণযোগ্য পাসপোর্টের ছবি নয়।")
             }
@@ -276,46 +331,30 @@ class PassportProcessorFeature(
         val result = mutableListOf<String>()
         for (i in 0 until array.length()) {
             val value = array.optString(i, "").trim()
-            if (value.isNotEmpty()) {
-                result.add(value)
-            }
+            if (value.isNotEmpty()) result.add(value)
         }
         return result
     }
 
-    private fun normalizeLine(value: String): String {
-        return value.replace('\u00A0', ' ').replace(Regex("\\s+"), " ").trim()
-    }
+    private fun normalizeLine(value: String): String = value.replace('\u00A0', ' ').replace(Regex("\\s+"), " ").trim()
 
-    private fun cleanValue(value: String): String {
-        return normalizeLine(value)
-            .replace(Regex("^[/\\\\|]+"), "")
-            .trim(':', '-', ' ', '.', ';', '/')
-    }
+    private fun cleanValue(value: String): String = normalizeLine(value).replace(Regex("^[/\\\\|]+"), "").trim(':', '-', ' ', '.', ';', '/')
 
     private fun getOcrLines(visionText: Text): List<String> {
         val result = mutableListOf<String>()
         for (block in visionText.textBlocks) {
             for (line in block.lines) {
                 val value = normalizeLine(line.text)
-                if (value.isNotEmpty()) {
-                    result.add(value)
-                }
+                if (value.isNotEmpty()) result.add(value)
             }
         }
         if (result.isEmpty()) {
-            result.addAll(
-                visionText.text.lines().map { normalizeLine(it) }.filter { it.isNotEmpty() }
-            )
+            result.addAll(visionText.text.lines().map { normalizeLine(it) }.filter { it.isNotEmpty() })
         }
         return result
     }
 
-    private fun extractLabelValue(
-        lines: List<String>,
-        labels: List<String>,
-        nextLines: Int = 1
-    ): String {
+    private fun extractLabelValue(lines: List<String>, labels: List<String>, nextLines: Int = 1): String {
         val sortedLabels = labels.sortedByDescending { it.length }
         for (i in lines.indices) {
             val line = lines[i]
@@ -325,25 +364,17 @@ class PassportProcessorFeature(
                 val index = upper.indexOf(labelUpper)
                 if (index < 0) continue
                 val after = cleanValue(line.substring(index + label.length))
-                if (after.isNotBlank() && !isKnownLabelLine(after)) {
-                    return after
-                }
+                if (after.isNotBlank() && !isKnownLabelLine(after)) return after
                 for (offset in 1..nextLines) {
                     val next = lines.getOrNull(i + offset).orEmpty()
-                    if (next.isNotBlank() && !isKnownLabelLine(next)) {
-                        return cleanValue(next)
-                    }
+                    if (next.isNotBlank() && !isKnownLabelLine(next)) return cleanValue(next)
                 }
             }
         }
         return ""
     }
 
-    private fun extractMultilineValue(
-        lines: List<String>,
-        labels: List<String>,
-        maxNextLines: Int = 2
-    ): String {
+    private fun extractMultilineValue(lines: List<String>, labels: List<String>, maxNextLines: Int = 2): String {
         val sortedLabels = labels.sortedByDescending { it.length }
         for (i in lines.indices) {
             val line = lines[i]
@@ -353,14 +384,10 @@ class PassportProcessorFeature(
                 if (index < 0) continue
                 val parts = mutableListOf<String>()
                 val firstValue = cleanValue(line.substring(index + label.length))
-                if (firstValue.isNotBlank() && !isKnownLabelLine(firstValue)) {
-                    parts.add(firstValue)
-                }
+                if (firstValue.isNotBlank() && !isKnownLabelLine(firstValue)) parts.add(firstValue)
                 for (offset in 1..maxNextLines) {
                     val next = lines.getOrNull(i + offset).orEmpty()
-                    if (next.isBlank() || isKnownLabelLine(next)) {
-                        break
-                    }
+                    if (next.isBlank() || isKnownLabelLine(next)) break
                     parts.add(cleanValue(next))
                 }
                 return parts.joinToString(" ").trim()
@@ -383,10 +410,7 @@ class PassportProcessorFeature(
         return labels.any { upper.contains(it) }
     }
 
-    private fun findDateNearLabel(
-        lines: List<String>,
-        labels: List<String>
-    ): String {
+    private fun findDateNearLabel(lines: List<String>, labels: List<String>): String {
         val dateRegex = Regex(
             "\\b(\\d{1,2}\\s+(?:JAN|FEB|MAR|APR|MAY|JUN|JUL|AUG|SEP|OCT|NOV|DEC)[A-Z]*\\s+\\d{4}" +
                 "|\\d{1,2}/\\d{1,2}/\\d{4}" +
@@ -397,15 +421,9 @@ class PassportProcessorFeature(
         for (i in lines.indices) {
             val upper = lines[i].uppercase(Locale.ROOT)
             if (labels.any { upper.contains(it.uppercase(Locale.ROOT)) }) {
-                val searchText = buildString {
-                    append(lines[i])
-                    append(" ")
-                    append(lines.getOrNull(i + 1).orEmpty())
-                }
+                val searchText = "${lines[i]} ${lines.getOrNull(i + 1).orEmpty()}"
                 val match = dateRegex.find(searchText)
-                if (match != null) {
-                    return normalizeDate(match.groupValues[1])
-                }
+                if (match != null) return normalizeDate(match.groupValues[1])
             }
         }
         return ""
@@ -418,21 +436,15 @@ class PassportProcessorFeature(
         )
         for (format in formats) {
             try {
-                val parser = SimpleDateFormat(format, Locale.US).apply {
-                    isLenient = false
-                }
+                val parser = SimpleDateFormat(format, Locale.US).apply { isLenient = false }
                 val date: Date = parser.parse(value.trim()) ?: continue
                 return SimpleDateFormat("yyyy-MM-dd", Locale.US).format(date)
-            } catch (_: Exception) {
-            }
+            } catch (_: Exception) {}
         }
         return value.trim()
     }
 
-    private fun parseMrzFallback(
-        lines: List<String>,
-        result: MutableMap<String, String>
-    ) {
+    private fun parseMrzFallback(lines: List<String>, result: MutableMap<String, String>) {
         val mrzCandidates = lines.map { it.replace(" ", "").uppercase(Locale.ROOT) }
             .filter { it.length >= 30 && it.contains("<") }
         if (mrzCandidates.isEmpty()) return
@@ -442,42 +454,26 @@ class PassportProcessorFeature(
 
         if (line1 != null && line1.length >= 6) {
             val country = line1.substring(2, 5).replace("<", "")
-            if (result["countryCode"].isNullOrBlank() && country.length == 3) {
-                result["countryCode"] = country
-            }
+            if (result["countryCode"].isNullOrBlank() && country.length == 3) result["countryCode"] = country
             val namesPart = line1.substring(5)
             val nameSections = namesPart.split("<<")
             val mrzSurname = nameSections.getOrNull(0)?.replace("<", " ")?.trim().orEmpty()
             val mrzGiven = nameSections.getOrNull(1)?.replace("<", " ")?.trim().orEmpty()
-            if (result["surname"].isNullOrBlank() && mrzSurname.isNotBlank()) {
-                result["surname"] = mrzSurname
-            }
-            if (result["givenNames"].isNullOrBlank() && mrzGiven.isNotBlank()) {
-                result["givenNames"] = mrzGiven
-            }
+            if (result["surname"].isNullOrBlank() && mrzSurname.isNotBlank()) result["surname"] = mrzSurname
+            if (result["givenNames"].isNullOrBlank() && mrzGiven.isNotBlank()) result["givenNames"] = mrzGiven
         }
 
         if (line2 != null && line2.length >= 28) {
             val rawPass = line2.substring(0, 9).replace("<", "").trim()
-            if (result["passportNo"].isNullOrBlank() && rawPass.matches(Regex("[A-Z0-9]{7,9}"))) {
-                result["passportNo"] = rawPass
-            }
+            if (result["passportNo"].isNullOrBlank() && rawPass.matches(Regex("[A-Z0-9]{7,9}"))) result["passportNo"] = rawPass
             val nat = line2.substring(10, 13).replace("<", "").trim()
-            if (result["nationality"].isNullOrBlank() && nat == "BGD") {
-                result["nationality"] = "BANGLADESHI"
-            }
+            if (result["nationality"].isNullOrBlank() && nat == "BGD") result["nationality"] = "BANGLADESHI"
             val dobRaw = line2.substring(13, 19)
-            if (result["dob"].isNullOrBlank() && dobRaw.all { it.isDigit() }) {
-                result["dob"] = parseMrzDate(dobRaw, isExpiry = false)
-            }
+            if (result["dob"].isNullOrBlank() && dobRaw.all { it.isDigit() }) result["dob"] = parseMrzDate(dobRaw, isExpiry = false)
             val sex = line2.substring(20, 21)
-            if (result["gender"].isNullOrBlank() && (sex == "M" || sex == "F")) {
-                result["gender"] = sex
-            }
+            if (result["gender"].isNullOrBlank() && (sex == "M" || sex == "F")) result["gender"] = sex
             val expRaw = line2.substring(21, 27)
-            if (result["expiryDate"].isNullOrBlank() && expRaw.all { it.isDigit() }) {
-                result["expiryDate"] = parseMrzDate(expRaw, isExpiry = true)
-            }
+            if (result["expiryDate"].isNullOrBlank() && expRaw.all { it.isDigit() }) result["expiryDate"] = parseMrzDate(expRaw, isExpiry = true)
         }
     }
 
@@ -486,17 +482,11 @@ class PassportProcessorFeature(
         val yy = yyMMdd.substring(0, 2).toIntOrNull() ?: return ""
         val mm = yyMMdd.substring(2, 4)
         val dd = yyMMdd.substring(4, 6)
-        val century = if (isExpiry) {
-            "20"
-        } else {
-            if (yy > 30) "19" else "20"
-        }
+        val century = if (isExpiry) "20" else if (yy > 30) "19" else "20"
         return "$century${yyMMdd.substring(0, 2)}-$mm-$dd"
     }
 
-    fun extractAllEnglishPassportFields(
-        visionText: Text
-    ): Map<String, String> {
+    fun extractAllEnglishPassportFields(visionText: Text): Map<String, String> {
         val result = mutableMapOf<String, String>()
         val lines = getOcrLines(visionText)
         val rawText = visionText.text
@@ -515,7 +505,6 @@ class PassportProcessorFeature(
         result["personalNo"] = extractLabelValue(lines, listOf("PERSONAL NO.", "PERSONAL NO", "PERSONAL NUMBER"))
         result["issuingAuthority"] = extractLabelValue(lines, listOf("ISSUING AUTHORITY", "AUTHORITY"))
         result["placeOfIssue"] = extractLabelValue(lines, listOf("PLACE OF ISSUE"))
-
         result["nameEn"] = extractLabelValue(lines, listOf("NAME"))
         result["fatherName"] = extractLabelValue(lines, listOf("FATHER'S NAME", "FATHERS NAME", "FATHER NAME"))
         result["motherName"] = extractLabelValue(lines, listOf("MOTHER'S NAME", "MOTHERS NAME", "MOTHER NAME"))
@@ -525,7 +514,6 @@ class PassportProcessorFeature(
         result["emergencyContactRelation"] = extractLabelValue(lines, listOf("RELATIONSHIP", "RELATION"))
         result["emergencyContactAddress"] = extractMultilineValue(lines, listOf("EMERGENCY CONTACT ADDRESS", "ADDRESS"), 2)
 
-        // MRZ থেকে মিসিং তথ্য পূরণ করা
         parseMrzFallback(lines, result)
 
         val allText = lines.joinToString(" ")
@@ -558,10 +546,7 @@ class PassportProcessorFeature(
     private fun fixExifOrientation(file: File) {
         try {
             val exif = ExifInterface(file.absolutePath)
-            val orientation = exif.getAttributeInt(
-                ExifInterface.TAG_ORIENTATION,
-                ExifInterface.ORIENTATION_NORMAL
-            )
+            val orientation = exif.getAttributeInt(ExifInterface.TAG_ORIENTATION, ExifInterface.ORIENTATION_NORMAL)
             val matrix = Matrix()
             when (orientation) {
                 ExifInterface.ORIENTATION_ROTATE_90 -> matrix.postRotate(90f)
@@ -569,47 +554,29 @@ class PassportProcessorFeature(
                 ExifInterface.ORIENTATION_ROTATE_270 -> matrix.postRotate(270f)
                 ExifInterface.ORIENTATION_FLIP_HORIZONTAL -> matrix.preScale(-1f, 1f)
                 ExifInterface.ORIENTATION_FLIP_VERTICAL -> matrix.preScale(1f, -1f)
-                ExifInterface.ORIENTATION_TRANSPOSE -> {
-                    matrix.postRotate(90f)
-                    matrix.preScale(-1f, 1f)
-                }
-                ExifInterface.ORIENTATION_TRANSVERSE -> {
-                    matrix.postRotate(270f)
-                    matrix.preScale(-1f, 1f)
-                }
+                ExifInterface.ORIENTATION_TRANSPOSE -> { matrix.postRotate(90f); matrix.preScale(-1f, 1f) }
+                ExifInterface.ORIENTATION_TRANSVERSE -> { matrix.postRotate(270f); matrix.preScale(-1f, 1f) }
                 else -> return
             }
             val original = BitmapFactory.decodeFile(file.absolutePath) ?: return
             val rotated = Bitmap.createBitmap(original, 0, 0, original.width, original.height, matrix, true)
-            if (rotated !== original && !original.isRecycled) {
-                original.recycle()
-            }
+            if (rotated !== original && !original.isRecycled) original.recycle()
             try {
-                FileOutputStream(file).use { output ->
-                    rotated.compress(Bitmap.CompressFormat.JPEG, 90, output)
-                    output.flush()
-                }
+                FileOutputStream(file).use { output -> rotated.compress(Bitmap.CompressFormat.JPEG, 90, output); output.flush() }
             } finally {
                 if (!rotated.isRecycled) rotated.recycle()
             }
-        } catch (_: Exception) {
-        }
+        } catch (_: Exception) {}
     }
 
     private fun optimizeAndCompress(file: File): Pair<Bitmap?, String> {
-        try {
-            val options = BitmapFactory.Options().apply {
-                inJustDecodeBounds = true
-            }
+        return try {
+            val options = BitmapFactory.Options().apply { inJustDecodeBounds = true }
             BitmapFactory.decodeFile(file.absolutePath, options)
-            if (options.outWidth <= 0 || options.outHeight <= 0) {
-                return Pair(null, "")
-            }
+            if (options.outWidth <= 0 || options.outHeight <= 0) return Pair(null, "")
             val maxDimension = max(options.outWidth, options.outHeight)
             var sampleSize = 1
-            while (maxDimension / sampleSize > MAX_IMAGE_DIMENSION) {
-                sampleSize *= 2
-            }
+            while (maxDimension / sampleSize > MAX_IMAGE_DIMENSION) sampleSize *= 2
             val bitmap = BitmapFactory.decodeFile(
                 file.absolutePath,
                 BitmapFactory.Options().apply {
@@ -619,20 +586,19 @@ class PassportProcessorFeature(
             ) ?: return Pair(null, "")
             val base64 = try {
                 ByteArrayOutputStream().use { stream ->
-                    val compressed = bitmap.compress(Bitmap.CompressFormat.JPEG, OCR_IMAGE_QUALITY, stream)
-                    if (!compressed) {
+                    if (!bitmap.compress(Bitmap.CompressFormat.JPEG, OCR_IMAGE_QUALITY, stream)) {
                         if (!bitmap.isRecycled) bitmap.recycle()
                         return Pair(null, "")
                     }
                     "data:image/jpeg;base64," + Base64.encodeToString(stream.toByteArray(), Base64.NO_WRAP)
                 }
-            } catch (e: Exception) {
+            } catch (_: Exception) {
                 if (!bitmap.isRecycled) bitmap.recycle()
                 return Pair(null, "")
             }
-            return Pair(bitmap, base64)
+            Pair(bitmap, base64)
         } catch (_: Exception) {
-            return Pair(null, "")
+            Pair(null, "")
         }
     }
 
@@ -640,31 +606,27 @@ class PassportProcessorFeature(
         if (destroyed) return
         activity.runOnUiThread {
             if (!destroyed) {
-                webView.evaluateJavascript(
-                    "if(window.onImageScanningStarted) {window.onImageScanningStarted('passport');}",
-                    null
-                )
+                webView.evaluateJavascript("if(window.onImageScanningStarted) {window.onImageScanningStarted('passport');}", null)
             }
         }
     }
 
     private fun dispatchPassportSuccess(
         fullPageBase64: String,
+        docFaceBase64: String,
         fields: Map<String, String>,
-        rawText: String,
+        qrProcessed: Boolean,
+        barcodeProcessed: Boolean,
         callback: String?
     ) {
         val nameEn = fields["nameEn"] ?: ""
         val passportNo = fields["passportNo"] ?: ""
         val dob = fields["dob"] ?: ""
 
-        // মেটা ডাটা পেলোড (Base64 ছাড়া হালকা JSON যাতে WebView IPC সীমা অতিক্রম না করে)
         val metaJson = JSONObject().apply {
             put("isPassportVerified", true)
             put("isPassportOcrSuccessful", true)
             put("documentTypeRecognized", "passport")
-            put("verificationLevel", "VISUAL_OCR_ONLY")
-            put("isGovernmentAuthenticityVerified", false)
             put("passportType", fields["passportType"] ?: "")
             put("countryCode", fields["countryCode"] ?: "")
             put("nationality", fields["nationality"] ?: "")
@@ -688,65 +650,44 @@ class PassportProcessorFeature(
             put("emergencyPhone", fields["emergencyPhone"] ?: "")
             put("issuingAuthority", fields["issuingAuthority"] ?: "")
             put("placeOfIssue", fields["placeOfIssue"] ?: "")
+            put("qrCodeData", fields["qrCodeData"] ?: "")
+            put("barcodeData", fields["barcodeData"] ?: "")
             put("mrzProcessed", true)
-            put("qrProcessed", false)
-            put("barcodeProcessed", false)
+            put("qrProcessed", qrProcessed)
+            put("barcodeProcessed", barcodeProcessed)
         }
 
         activity.runOnUiThread {
             if (destroyed) return@runOnUiThread
             Toast.makeText(activity, "✔ পাসপোর্ট OCR সম্পন্ন", Toast.LENGTH_SHORT).show()
 
-            // ১. প্রথমে ছবির প্রিভিউ এবং Base64 আলাদাভাবে পাঠানো হচ্ছে
             webView.evaluateJavascript(
                 "if(window.onDocumentValidated) {window.onDocumentValidated('passport', true, ${JSONObject.quote(fullPageBase64)});}",
                 null
             )
 
-            // ২. এরপর পার্স করা সব টেক্সট ফিল্ড হালকা পেলোডে পাঠানো হচ্ছে (কোনো ডুপ্লিকেট Base64 ছাড়া)
             webView.evaluateJavascript(
-                "if(window.onFullPassportParsed) {window.onFullPassportParsed(${JSONObject.quote(nameEn)}, ${JSONObject.quote(passportNo)}, '', ${JSONObject.quote(dob)}, ${JSONObject.quote(metaJson.toString())});}",
+                "if(window.onFullPassportParsed) {window.onFullPassportParsed(${JSONObject.quote(nameEn)}, ${JSONObject.quote(passportNo)}, ${JSONObject.quote(docFaceBase64)}, ${JSONObject.quote(dob)}, ${JSONObject.quote(metaJson.toString())});}",
                 null
             )
 
-            // ৩. ব্রিজ রেসপন্স পাঠানো হচ্ছে (কাস্টম callback ফাংশন ডাবল-কল এড়াতে null রাখা হয়েছে)
             val safeCallback = if (callback == "onFullPassportParsed" || callback == "onDocumentValidated") null else callback
             bridge.sendResponseToWeb(
-                response = BridgeResponse(
-                    action = Actions.START_KYC,
-                    status = Status.SUCCESS,
-                    data = JSONObject(metaJson.toString())
-                ),
+                response = BridgeResponse(action = Actions.START_KYC, status = Status.SUCCESS, data = JSONObject(metaJson.toString())),
                 callbackFunction = safeCallback
             )
         }
     }
 
-    private fun notifyError(
-        message: String,
-        callback: String?
-    ) {
+    private fun notifyError(message: String, callback: String?) {
         if (destroyed) return
         activity.runOnUiThread {
             if (destroyed) return@runOnUiThread
             Toast.makeText(activity, message, Toast.LENGTH_LONG).show()
-            webView.evaluateJavascript(
-                "if(window.onDocumentValidated) {window.onDocumentValidated('passport', false, '');}",
-                null
-            )
-            webView.evaluateJavascript(
-                "if(window.onDocumentValidationFailed) {window.onDocumentValidationFailed('passport', ${JSONObject.quote(message)});}",
-                null
-            )
+            webView.evaluateJavascript("if(window.onDocumentValidated) {window.onDocumentValidated('passport', false, '');}", null)
+            webView.evaluateJavascript("if(window.onDocumentValidationFailed) {window.onDocumentValidationFailed('passport', ${JSONObject.quote(message)});}", null)
             val safeCallback = if (callback == "onFullPassportParsed" || callback == "onDocumentValidated") null else callback
-            bridge.sendResponseToWeb(
-                response = BridgeResponse(
-                    action = Actions.START_KYC,
-                    status = Status.ERROR,
-                    message = message
-                ),
-                callbackFunction = safeCallback
-            )
+            bridge.sendResponseToWeb(BridgeResponse(action = Actions.START_KYC, status = Status.ERROR, message = message), callbackFunction = safeCallback)
         }
     }
 
@@ -756,14 +697,7 @@ class PassportProcessorFeature(
         activity.runOnUiThread {
             if (destroyed) return@runOnUiThread
             val safeCallback = if (callback == "onFullPassportParsed" || callback == "onDocumentValidated") null else callback
-            bridge.sendResponseToWeb(
-                response = BridgeResponse(
-                    action = Actions.START_KYC,
-                    status = Status.CANCELLED,
-                    message = message
-                ),
-                callbackFunction = safeCallback
-            )
+            bridge.sendResponseToWeb(BridgeResponse(action = Actions.START_KYC, status = Status.CANCELLED, message = message), callbackFunction = safeCallback)
         }
     }
 
@@ -771,17 +705,9 @@ class PassportProcessorFeature(
         if (destroyed) return
         destroyed = true
         pendingCallback = null
-        try {
-            if (!bgExecutor.isShutdown) {
-                bgExecutor.shutdownNow()
-            }
-        } catch (_: Exception) {
-        }
-        try {
-            if (textRecognizerDelegate.isInitialized()) {
-                textRecognizerDelegate.value.close()
-            }
-        } catch (_: Exception) {
-        }
+        try { if (!bgExecutor.isShutdown) bgExecutor.shutdownNow() } catch (_: Exception) {}
+        try { if (textRecognizerDelegate.isInitialized()) textRecognizerDelegate.value.close() } catch (_: Exception) {}
+        try { faceDetector.close() } catch (_: Exception) {}
+        try { barcodeScanner.close() } catch (_: Exception) {}
     }
 }
