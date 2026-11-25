@@ -14,6 +14,8 @@ import android.graphics.PorterDuff
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
+import android.os.Handler
+import android.os.Looper
 import android.os.PowerManager
 import android.provider.MediaStore
 import android.provider.Settings
@@ -22,6 +24,7 @@ import android.view.HapticFeedbackConstants
 import android.view.View
 import android.view.WindowManager
 import android.webkit.CookieManager
+import android.webkit.WebSettings
 import android.webkit.WebView
 import android.widget.FrameLayout
 import android.widget.ImageView
@@ -63,6 +66,8 @@ class MainActivity : AppCompatActivity(), AndroidBridge.BridgeActionHandler {
         private const val PREFS_BATTERY_PROMPT = "bdrsf_battery_prompt_prefs"
         private const val KEY_BATTERY_PROMPTED = "battery_exemption_prompted"
         private const val KEY_REMEMBERED_LOGIN_ID = "verified_login_id"
+        private const val LOADER_PAINT_BUFFER_MS = 400L
+        private const val LOADER_MAX_TIMEOUT_MS = 3000L
         private var isAppProcessActive = false
     }
 
@@ -79,6 +84,10 @@ class MainActivity : AppCompatActivity(), AndroidBridge.BridgeActionHandler {
     private lateinit var qrScannerFeature: QrScannerFeature
     private lateinit var kycOperatingEngine: KycOperatingEngine
     private lateinit var screenshotOcrFeature: ScreenshotOcrFeature
+
+    private val uiHandler = Handler(Looper.getMainLooper())
+    private var loaderSafetyRunnable: Runnable? = null
+    private var loaderHideRunnable: Runnable? = null
 
     private var pendingGalleryQrCallback: String? = null
     private var lastBackPressTime: Long = 0L
@@ -142,8 +151,81 @@ class MainActivity : AppCompatActivity(), AndroidBridge.BridgeActionHandler {
             clearSessionOnAppKill()
         } else {
             val initialUrl = extractNotificationTargetUrl(intent) ?: WebAppConfig.BASE_URL
+            showPremiumTransitionLoader()
             webView.loadUrl(initialUrl)
         }
+    }
+
+    private fun showPremiumTransitionLoader() {
+        if (!::splashLayout.isInitialized) return
+        runOnUiThread {
+            loaderHideRunnable?.let { uiHandler.removeCallbacks(it) }
+            loaderSafetyRunnable?.let { uiHandler.removeCallbacks(it) }
+
+            splashLayout.animate().cancel()
+            if (splashLayout.visibility != View.VISIBLE) {
+                splashLayout.alpha = 0f
+                splashLayout.visibility = View.VISIBLE
+                splashLayout.animate().alpha(1f).setDuration(140L).start()
+            } else {
+                splashLayout.alpha = 1f
+            }
+
+            // সর্বোচ্চ ৩ সেকেন্ডের সেফটি টাইমআউট যাতে কোনো কারণে লোডার আটকে না থাকে
+            val safetyTask = Runnable { hidePremiumTransitionLoader(immediate = false) }
+            loaderSafetyRunnable = safetyTask
+            uiHandler.postDelayed(safetyTask, LOADER_MAX_TIMEOUT_MS)
+        }
+    }
+
+    private fun hidePremiumTransitionLoader(immediate: Boolean = false) {
+        if (!::splashLayout.isInitialized) return
+        runOnUiThread {
+            loaderSafetyRunnable?.let { uiHandler.removeCallbacks(it) }
+            loaderHideRunnable?.let { uiHandler.removeCallbacks(it) }
+
+            val fadeOutTask = Runnable {
+                if (splashLayout.visibility == View.VISIBLE) {
+                    splashLayout.animate()
+                        .alpha(0f)
+                        .setDuration(260L)
+                        .withEndAction {
+                            splashLayout.visibility = View.GONE
+                        }
+                        .start()
+                }
+            }
+
+            if (immediate) {
+                fadeOutTask.run()
+            } else {
+                // ব্যাকগ্রাউন্ড ইমেজ ও থিম কালার পুরোপুরি পেইন্ট হওয়ার জন্য ৪০০ms বাফার
+                loaderHideRunnable = fadeOutTask
+                uiHandler.postDelayed(fadeOutTask, LOADER_PAINT_BUFFER_MS)
+            }
+        }
+    }
+
+    private fun injectPageTransitionHook() {
+        if (!::webView.isInitialized) return
+        val hookJs = """
+            (function() {
+                if (window.__bdrsfTransitionHookInstalled) return;
+                window.__bdrsfTransitionHookInstalled = true;
+                function notifyNativeLoader() {
+                    try {
+                        if (window.BDRSF_BRIDGE && typeof window.BDRSF_BRIDGE.executeFeature === 'function') {
+                            window.BDRSF_BRIDGE.executeFeature('SHOW_TRANSITION_LOADER', '{}', '');
+                        }
+                    } catch (e) {}
+                }
+                window.addEventListener('beforeunload', notifyNativeLoader);
+                window.addEventListener('pagehide', notifyNativeLoader);
+            })();
+        """.trimIndent()
+        try {
+            webView.evaluateJavascript(hookJs, null)
+        } catch (_: Exception) {}
     }
 
     private fun clearSessionOnAppKill() {
@@ -167,6 +249,7 @@ class MainActivity : AppCompatActivity(), AndroidBridge.BridgeActionHandler {
             cookieManager.flush()
         } catch (_: Exception) {}
 
+        showPremiumTransitionLoader()
         val baseClean = WebAppConfig.BASE_URL.substringBefore("?").trimEnd('/')
         webView.loadUrl("$baseClean/index.php?page=logout")
         webView.postDelayed({
@@ -182,6 +265,7 @@ class MainActivity : AppCompatActivity(), AndroidBridge.BridgeActionHandler {
         restorePersistedLauncherBadge()
         val targetUrl = extractNotificationTargetUrl(intent)
         if (!targetUrl.isNullOrBlank() && ::webView.isInitialized) {
+            showPremiumTransitionLoader()
             webView.loadUrl(targetUrl)
         } else if (::webView.isInitialized) {
             triggerWebViewLiveSync()
@@ -366,12 +450,15 @@ class MainActivity : AppCompatActivity(), AndroidBridge.BridgeActionHandler {
 
         webView = WebView(this).apply {
             layoutParams = RelativeLayout.LayoutParams(RelativeLayout.LayoutParams.MATCH_PARENT, RelativeLayout.LayoutParams.MATCH_PARENT)
+            setBackgroundColor(Color.parseColor("#04130F"))
         }
         mainLayout.addView(webView)
 
         splashLayout = FrameLayout(this).apply {
             layoutParams = FrameLayout.LayoutParams(RelativeLayout.LayoutParams.MATCH_PARENT, RelativeLayout.LayoutParams.MATCH_PARENT)
             setBackgroundColor(Color.parseColor("#0A2F1D"))
+            isClickable = true
+            isFocusable = true
         }
 
         val density = resources.displayMetrics.density
@@ -410,11 +497,8 @@ class MainActivity : AppCompatActivity(), AndroidBridge.BridgeActionHandler {
             activity = this,
             onPageFinishedListener = {
                 runOnUiThread {
-                    if (splashLayout.visibility == View.VISIBLE) {
-                        splashLayout.animate().alpha(0f).setDuration(400).withEndAction {
-                            splashLayout.visibility = View.GONE
-                        }
-                    }
+                    injectPageTransitionHook()
+                    hidePremiumTransitionLoader(immediate = false)
                     WebAppConfig.syncCookies()
                     restorePersistedLauncherBadge()
                     val token = BdrsfFirebaseMessagingService.getSavedToken(applicationContext)
@@ -431,6 +515,8 @@ class MainActivity : AppCompatActivity(), AndroidBridge.BridgeActionHandler {
 
     private fun setupWebView() {
         WebAppConfig.applyDefaultSettings(this, webView)
+        webView.settings.cacheMode = WebSettings.LOAD_DEFAULT
+        webView.settings.domStorageEnabled = true
         webView.addJavascriptInterface(androidBridge, WebAppConfig.JS_BRIDGE_NAME)
         webView.webViewClient = webViewClient
         webView.webChromeClient = webChromeClient
@@ -457,8 +543,10 @@ class MainActivity : AppCompatActivity(), AndroidBridge.BridgeActionHandler {
                                     if (WebAppConfig.isHomeOrDashboard(currentUrl)) {
                                         onHandleBackPressRequested()
                                     } else if (webView.canGoBack()) {
+                                        showPremiumTransitionLoader()
                                         webView.goBack()
                                     } else {
+                                        showPremiumTransitionLoader()
                                         webView.loadUrl(WebAppConfig.BASE_URL)
                                     }
                                 }
@@ -580,7 +668,7 @@ class MainActivity : AppCompatActivity(), AndroidBridge.BridgeActionHandler {
             showExitConfirmationDialog()
         } else {
             lastBackPressTime = currentTime
-            Toast.makeText(this, "রিফ্রেশ হচ্ছে...", Toast.LENGTH_SHORT).show()
+            showPremiumTransitionLoader()
             WebAppConfig.forceRefreshWithCacheBypass(webView)
         }
     }
@@ -631,8 +719,13 @@ class MainActivity : AppCompatActivity(), AndroidBridge.BridgeActionHandler {
 
     override fun onCustomActionRequested(action: String, payload: JSONObject, callback: String?) {
         when (action) {
+            "SHOW_TRANSITION_LOADER" -> showPremiumTransitionLoader()
+            "HIDE_TRANSITION_LOADER" -> hidePremiumTransitionLoader(immediate = false)
             "PICK_CONTACT" -> contactPickerFeature.pickContact(callback)
-            "FORCE_REFRESH" -> WebAppConfig.forceRefreshWithCacheBypass(webView)
+            "FORCE_REFRESH" -> {
+                showPremiumTransitionLoader()
+                WebAppConfig.forceRefreshWithCacheBypass(webView)
+            }
             "SCAN_SCREENSHOT_OCR" -> {
                 val base64Img = payload.optString("image_base64", "")
                 if (base64Img.isNotBlank()) {
@@ -681,6 +774,9 @@ class MainActivity : AppCompatActivity(), AndroidBridge.BridgeActionHandler {
 
     override fun onDestroy() {
         super.onDestroy()
+        loaderSafetyRunnable?.let { uiHandler.removeCallbacks(it) }
+        loaderHideRunnable?.let { uiHandler.removeCallbacks(it) }
+
         if (isTokenReceiverRegistered) {
             try {
                 unregisterReceiver(newTokenReceiver)
