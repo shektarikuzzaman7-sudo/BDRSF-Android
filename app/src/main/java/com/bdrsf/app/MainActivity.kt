@@ -62,6 +62,7 @@ class MainActivity : AppCompatActivity(), AndroidBridge.BridgeActionHandler {
         private const val RC_GALLERY_QR = 6001
         private const val PREFS_BATTERY_PROMPT = "bdrsf_battery_prompt_prefs"
         private const val KEY_BATTERY_PROMPTED = "battery_exemption_prompted"
+        private const val KEY_REMEMBERED_LOGIN_ID = "verified_login_id"
         private var isAppProcessActive = false
     }
 
@@ -147,9 +148,23 @@ class MainActivity : AppCompatActivity(), AndroidBridge.BridgeActionHandler {
 
     private fun clearSessionOnAppKill() {
         try {
-            CookieManager.getInstance().removeSessionCookies(null)
-            CookieManager.getInstance().removeAllCookies(null)
-            CookieManager.getInstance().flush()
+            val cookieManager = CookieManager.getInstance()
+            val urlForCookies = WebAppConfig.BASE_URL
+            val existingCookieStr = cookieManager.getCookie(urlForCookies).orEmpty()
+            val preservedLoginId = existingCookieStr.split(";")
+                .map { it.trim() }
+                .firstOrNull { it.startsWith("$KEY_REMEMBERED_LOGIN_ID=") }
+                ?.substringAfter("=")
+                ?.trim()
+
+            cookieManager.removeSessionCookies(null)
+            if (!preservedLoginId.isNullOrBlank()) {
+                cookieManager.setCookie(
+                    urlForCookies,
+                    "$KEY_REMEMBERED_LOGIN_ID=$preservedLoginId; path=/; SameSite=Lax"
+                )
+            }
+            cookieManager.flush()
         } catch (_: Exception) {}
 
         val baseClean = WebAppConfig.BASE_URL.substringBefore("?").trimEnd('/')
