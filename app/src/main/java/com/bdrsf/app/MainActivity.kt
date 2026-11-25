@@ -11,6 +11,10 @@ import android.content.pm.ActivityInfo
 import android.content.pm.PackageManager
 import android.graphics.Color
 import android.graphics.PorterDuff
+import android.graphics.Typeface
+import android.graphics.drawable.GradientDrawable
+import android.net.ConnectivityManager
+import android.net.NetworkCapabilities
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
@@ -19,6 +23,7 @@ import android.os.Looper
 import android.os.PowerManager
 import android.provider.MediaStore
 import android.provider.Settings
+import android.util.TypedValue
 import android.view.Gravity
 import android.view.HapticFeedbackConstants
 import android.view.View
@@ -26,10 +31,13 @@ import android.view.WindowManager
 import android.webkit.CookieManager
 import android.webkit.WebSettings
 import android.webkit.WebView
+import android.widget.Button
 import android.widget.FrameLayout
 import android.widget.ImageView
+import android.widget.LinearLayout
 import android.widget.ProgressBar
 import android.widget.RelativeLayout
+import android.widget.TextView
 import android.widget.Toast
 import androidx.activity.OnBackPressedCallback
 import androidx.activity.result.contract.ActivityResultContracts
@@ -73,6 +81,8 @@ class MainActivity : AppCompatActivity(), AndroidBridge.BridgeActionHandler {
 
     private lateinit var mainLayout: RelativeLayout
     private lateinit var splashLayout: FrameLayout
+    private lateinit var networkErrorLayout: FrameLayout
+    private lateinit var errorSubtitleText: TextView
     private lateinit var webView: WebView
 
     private lateinit var androidBridge: AndroidBridge
@@ -89,6 +99,8 @@ class MainActivity : AppCompatActivity(), AndroidBridge.BridgeActionHandler {
     private var loaderSafetyRunnable: Runnable? = null
     private var loaderHideRunnable: Runnable? = null
 
+    private var lastLoadedOrFailedUrl: String = WebAppConfig.BASE_URL
+    private var hasMainFrameError: Boolean = false
     private var pendingGalleryQrCallback: String? = null
     private var lastBackPressTime: Long = 0L
     private var isTokenReceiverRegistered = false
@@ -151,8 +163,65 @@ class MainActivity : AppCompatActivity(), AndroidBridge.BridgeActionHandler {
             clearSessionOnAppKill()
         } else {
             val initialUrl = extractNotificationTargetUrl(intent) ?: WebAppConfig.BASE_URL
-            showPremiumTransitionLoader()
-            webView.loadUrl(initialUrl)
+            loadUrlWithNetworkGuard(initialUrl)
+        }
+    }
+
+    private fun isInternetAvailable(): Boolean {
+        return try {
+            val cm = getSystemService(Context.CONNECTIVITY_SERVICE) as? ConnectivityManager ?: return true
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+                val network = cm.activeNetwork ?: return false
+                val caps = cm.getNetworkCapabilities(network) ?: return false
+                caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
+            } else {
+                @Suppress("DEPRECATION")
+                cm.activeNetworkInfo?.isConnected == true
+            }
+        } catch (_: Exception) {
+            true
+        }
+    }
+
+    private fun loadUrlWithNetworkGuard(targetUrl: String) {
+        lastLoadedOrFailedUrl = targetUrl
+        if (!isInternetAvailable()) {
+            showNetworkErrorScreen(
+                "আপনার ডিভাইসে ইন্টারনেট সংযোগ নেই। অনুগ্রহ করে Wi-Fi বা মোবাইল ডাটা চালু করে পুনরায় চেষ্টা করুন।",
+                targetUrl
+            )
+            return
+        }
+        hideNetworkErrorScreen()
+        showPremiumTransitionLoader()
+        webView.loadUrl(targetUrl)
+    }
+
+    private fun showNetworkErrorScreen(reason: String, failingUrl: String) {
+        if (!::networkErrorLayout.isInitialized) return
+        runOnUiThread {
+            hasMainFrameError = true
+            if (failingUrl.isNotBlank() && failingUrl != "about:blank") {
+                lastLoadedOrFailedUrl = failingUrl
+            }
+            hidePremiumTransitionLoader(immediate = true)
+            errorSubtitleText.text = reason.ifBlank {
+                "ইন্টারনেট সংযোগ অথবা সার্ভারের সাথে যোগাযোগ বিচ্ছিন্ন হয়েছে। অনুগ্রহ করে আবার চেষ্টা করুন।"
+            }
+            if (networkErrorLayout.visibility != View.VISIBLE) {
+                networkErrorLayout.alpha = 0f
+                networkErrorLayout.visibility = View.VISIBLE
+                networkErrorLayout.animate().alpha(1f).setDuration(220L).start()
+            }
+        }
+    }
+
+    private fun hideNetworkErrorScreen() {
+        if (!::networkErrorLayout.isInitialized) return
+        runOnUiThread {
+            hasMainFrameError = false
+            networkErrorLayout.animate().cancel()
+            networkErrorLayout.visibility = View.GONE
         }
     }
 
@@ -166,12 +235,12 @@ class MainActivity : AppCompatActivity(), AndroidBridge.BridgeActionHandler {
             if (splashLayout.visibility != View.VISIBLE) {
                 splashLayout.alpha = 0f
                 splashLayout.visibility = View.VISIBLE
-                splashLayout.animate().alpha(1f).setDuration(140L).start()
+                splashLayout.animate().alpha(1f).setDuration(130L).start()
             } else {
                 splashLayout.alpha = 1f
             }
 
-            // সর্বোচ্চ ৩ সেকেন্ডের সেফটি টাইমআউট যাতে কোনো কারণে লোডার আটকে না থাকে
+            // সর্বোচ্চ ৩ সেকেন্ডের সেফটি টাইমআউট যাতে স্লো নেটওয়ার্কেও স্ক্রিন আটকে না থাকে
             val safetyTask = Runnable { hidePremiumTransitionLoader(immediate = false) }
             loaderSafetyRunnable = safetyTask
             uiHandler.postDelayed(safetyTask, LOADER_MAX_TIMEOUT_MS)
@@ -199,7 +268,7 @@ class MainActivity : AppCompatActivity(), AndroidBridge.BridgeActionHandler {
             if (immediate) {
                 fadeOutTask.run()
             } else {
-                // ব্যাকগ্রাউন্ড ইমেজ ও থিম কালার পুরোপুরি পেইন্ট হওয়ার জন্য ৪০০ms বাফার
+                // ব্যাকগ্রাউন্ড ইমেজ ও থিম কালার পেইন্ট হওয়ার জন্য ৪০০ms স্মুথ বাফার
                 loaderHideRunnable = fadeOutTask
                 uiHandler.postDelayed(fadeOutTask, LOADER_PAINT_BUFFER_MS)
             }
@@ -249,12 +318,20 @@ class MainActivity : AppCompatActivity(), AndroidBridge.BridgeActionHandler {
             cookieManager.flush()
         } catch (_: Exception) {}
 
+        if (!isInternetAvailable()) {
+            showNetworkErrorScreen(
+                "আপনার ডিভাইসে ইন্টারনেট সংযোগ নেই। অনুগ্রহ করে ইন্টারনেট চালু করে পুনরায় চেষ্টা করুন।",
+                WebAppConfig.BASE_URL
+            )
+            return
+        }
+
         showPremiumTransitionLoader()
         val baseClean = WebAppConfig.BASE_URL.substringBefore("?").trimEnd('/')
         webView.loadUrl("$baseClean/index.php?page=logout")
         webView.postDelayed({
             if (::webView.isInitialized) {
-                webView.loadUrl(WebAppConfig.BASE_URL)
+                loadUrlWithNetworkGuard(WebAppConfig.BASE_URL)
             }
         }, 300L)
     }
@@ -265,8 +342,7 @@ class MainActivity : AppCompatActivity(), AndroidBridge.BridgeActionHandler {
         restorePersistedLauncherBadge()
         val targetUrl = extractNotificationTargetUrl(intent)
         if (!targetUrl.isNullOrBlank() && ::webView.isInitialized) {
-            showPremiumTransitionLoader()
-            webView.loadUrl(targetUrl)
+            loadUrlWithNetworkGuard(targetUrl)
         } else if (::webView.isInitialized) {
             triggerWebViewLiveSync()
         }
@@ -433,6 +509,8 @@ class MainActivity : AppCompatActivity(), AndroidBridge.BridgeActionHandler {
     }
 
     private fun initViews() {
+        val density = resources.displayMetrics.density
+
         mainLayout = RelativeLayout(this).apply {
             layoutParams = RelativeLayout.LayoutParams(RelativeLayout.LayoutParams.MATCH_PARENT, RelativeLayout.LayoutParams.MATCH_PARENT)
             setBackgroundColor(Color.parseColor("#0A2F1D"))
@@ -448,20 +526,25 @@ class MainActivity : AppCompatActivity(), AndroidBridge.BridgeActionHandler {
             WindowInsetsCompat.CONSUMED
         }
 
+        // ১. মেইন ওয়েবভিউ লেয়ার
         webView = WebView(this).apply {
             layoutParams = RelativeLayout.LayoutParams(RelativeLayout.LayoutParams.MATCH_PARENT, RelativeLayout.LayoutParams.MATCH_PARENT)
             setBackgroundColor(Color.parseColor("#04130F"))
         }
         mainLayout.addView(webView)
 
+        // ২. প্রিমিয়াম নেটওয়ার্ক এরর স্ক্রিন (Sovereign Emerald & Gold Glass Card + Try Again বাটন)
+        networkErrorLayout = buildPremiumNetworkErrorView(density)
+        mainLayout.addView(networkErrorLayout)
+
+        // ৩. প্রিমিয়াম লোগো + গোল্ডেন সার্কুলার ট্রানজিশন লোডার
         splashLayout = FrameLayout(this).apply {
             layoutParams = FrameLayout.LayoutParams(RelativeLayout.LayoutParams.MATCH_PARENT, RelativeLayout.LayoutParams.MATCH_PARENT)
-            setBackgroundColor(Color.parseColor("#0A2F1D"))
+            setBackgroundColor(Color.parseColor("#04130F"))
             isClickable = true
             isFocusable = true
         }
 
-        val density = resources.displayMetrics.density
         val loaderSizePx = (155 * density).toInt()
         val circularProgressBar = ProgressBar(this, null, android.R.attr.progressBarStyleLarge).apply {
             layoutParams = FrameLayout.LayoutParams(loaderSizePx, loaderSizePx).apply { gravity = Gravity.CENTER }
@@ -484,6 +567,129 @@ class MainActivity : AppCompatActivity(), AndroidBridge.BridgeActionHandler {
         setContentView(mainLayout)
     }
 
+    private fun buildPremiumNetworkErrorView(density: Float): FrameLayout {
+        val rootOverlay = FrameLayout(this).apply {
+            layoutParams = RelativeLayout.LayoutParams(
+                RelativeLayout.LayoutParams.MATCH_PARENT,
+                RelativeLayout.LayoutParams.MATCH_PARENT
+            )
+            background = GradientDrawable(
+                GradientDrawable.Orientation.TOP_BOTTOM,
+                intArrayOf(Color.parseColor("#06231B"), Color.parseColor("#03100C"))
+            )
+            visibility = View.GONE
+            isClickable = true
+            isFocusable = true
+        }
+
+        val cardBox = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            gravity = Gravity.CENTER_HORIZONTAL
+            val padH = (24 * density).toInt()
+            val padV = (28 * density).toInt()
+            setPadding(padH, padV, padH, padV)
+            background = GradientDrawable(
+                GradientDrawable.Orientation.TL_BR,
+                intArrayOf(Color.parseColor("#0C352A"), Color.parseColor("#051A14"))
+            ).apply {
+                cornerRadius = 26f * density
+                setStroke((1.5f * density).toInt(), Color.parseColor("#34D399"))
+            }
+            layoutParams = FrameLayout.LayoutParams(
+                FrameLayout.LayoutParams.MATCH_PARENT,
+                FrameLayout.LayoutParams.WRAP_CONTENT
+            ).apply {
+                gravity = Gravity.CENTER
+                val margin = (24 * density).toInt()
+                setMargins(margin, 0, margin, 0)
+            }
+        }
+
+        // আইকন ব্যাজ
+        val iconCircleSize = (76 * density).toInt()
+        val iconChamber = FrameLayout(this).apply {
+            layoutParams = LinearLayout.LayoutParams(iconCircleSize, iconCircleSize).apply {
+                bottomMargin = (18 * density).toInt()
+            }
+            background = GradientDrawable().apply {
+                shape = GradientDrawable.OVAL
+                setColor(Color.parseColor("#1A3B31"))
+                setStroke((2f * density).toInt(), Color.parseColor("#FACC15"))
+            }
+        }
+
+        val statusIcon = ImageView(this).apply {
+            val iconSize = (38 * density).toInt()
+            layoutParams = FrameLayout.LayoutParams(iconSize, iconSize).apply {
+                gravity = Gravity.CENTER
+            }
+            setImageResource(android.R.drawable.stat_sys_warning)
+            setColorFilter(Color.parseColor("#FACC15"), PorterDuff.Mode.SRC_IN)
+        }
+        iconChamber.addView(statusIcon)
+        cardBox.addView(iconChamber)
+
+        // মেইন টাইটেল
+        val titleView = TextView(this).apply {
+            text = "নেটওয়ার্ক সংযোগ বিচ্ছিন্ন!"
+            setTextColor(Color.WHITE)
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 19f)
+            setTypeface(null, Typeface.BOLD)
+            gravity = Gravity.CENTER
+            layoutParams = LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.WRAP_CONTENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT
+            ).apply {
+                bottomMargin = (8 * density).toInt()
+            }
+        }
+        cardBox.addView(titleView)
+
+        // সাব-টাইটেল / এরর বিবরণ
+        errorSubtitleText = TextView(this).apply {
+            text = "আপনার ইন্টারনেট সংযোগ অথবা সার্ভারের সাথে যোগাযোগ করা যাচ্ছে না। অনুগ্রহ করে সংযোগ পরীক্ষা করে আবার চেষ্টা করুন।"
+            setTextColor(Color.parseColor("#CBD5E1"))
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 13.5f)
+            gravity = Gravity.CENTER
+            setLineSpacing(4f * density, 1f)
+            layoutParams = LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT
+            ).apply {
+                bottomMargin = (24 * density).toInt()
+            }
+        }
+        cardBox.addView(errorSubtitleText)
+
+        // প্রিমিয়াম গোল্ডেন Try Again বাটন
+        val retryButton = Button(this).apply {
+            text = "পুনরায় চেষ্টা করুন  •  TRY AGAIN"
+            isAllCaps = false
+            setTextColor(Color.parseColor("#04130F"))
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 14f)
+            setTypeface(null, Typeface.BOLD)
+            background = GradientDrawable(
+                GradientDrawable.Orientation.LEFT_RIGHT,
+                intArrayOf(Color.parseColor("#FDE68A"), Color.parseColor("#F59E0B"))
+            ).apply {
+                cornerRadius = 14f * density
+            }
+            layoutParams = LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                (48 * density).toInt()
+            )
+            setOnClickListener {
+                onTriggerHapticRequested("medium")
+                val retryTarget = lastLoadedOrFailedUrl.ifBlank { WebAppConfig.BASE_URL }
+                loadUrlWithNetworkGuard(retryTarget)
+            }
+        }
+        cardBox.addView(retryButton)
+
+        rootOverlay.addView(cardBox)
+        return rootOverlay
+    }
+
     private fun initFeatures() {
         androidBridge = AndroidBridge(this, webView, this)
         downloadFeature = DownloadFeature(this)
@@ -495,8 +701,15 @@ class MainActivity : AppCompatActivity(), AndroidBridge.BridgeActionHandler {
 
         webViewClient = NativeWebViewClient(
             activity = this,
+            onPageStartedListener = {
+                hasMainFrameError = false
+                showPremiumTransitionLoader()
+            },
             onPageFinishedListener = {
                 runOnUiThread {
+                    if (!hasMainFrameError) {
+                        hideNetworkErrorScreen()
+                    }
                     injectPageTransitionHook()
                     hidePremiumTransitionLoader(immediate = false)
                     WebAppConfig.syncCookies()
@@ -507,6 +720,9 @@ class MainActivity : AppCompatActivity(), AndroidBridge.BridgeActionHandler {
                     }
                     triggerWebViewLiveSync()
                 }
+            },
+            onErrorReceivedListener = { _, description, failingUrl ->
+                showNetworkErrorScreen(description, failingUrl)
             }
         )
 
@@ -530,6 +746,13 @@ class MainActivity : AppCompatActivity(), AndroidBridge.BridgeActionHandler {
         onBackPressedDispatcher.addCallback(this, object : OnBackPressedCallback(true) {
             override fun handleOnBackPressed() {
                 when {
+                    networkErrorLayout.visibility == View.VISIBLE -> {
+                        if (isInternetAvailable()) {
+                            loadUrlWithNetworkGuard(WebAppConfig.BASE_URL)
+                        } else {
+                            onHandleBackPressRequested()
+                        }
+                    }
                     qrScannerFeature.isScanningActive -> qrScannerFeature.stopScanner(isCancelled = true)
                     kycOperatingEngine.handleBackPressed() -> Unit
                     else -> {
@@ -546,8 +769,7 @@ class MainActivity : AppCompatActivity(), AndroidBridge.BridgeActionHandler {
                                         showPremiumTransitionLoader()
                                         webView.goBack()
                                     } else {
-                                        showPremiumTransitionLoader()
-                                        webView.loadUrl(WebAppConfig.BASE_URL)
+                                        loadUrlWithNetworkGuard(WebAppConfig.BASE_URL)
                                     }
                                 }
                             }
@@ -668,8 +890,15 @@ class MainActivity : AppCompatActivity(), AndroidBridge.BridgeActionHandler {
             showExitConfirmationDialog()
         } else {
             lastBackPressTime = currentTime
-            showPremiumTransitionLoader()
-            WebAppConfig.forceRefreshWithCacheBypass(webView)
+            if (!isInternetAvailable()) {
+                showNetworkErrorScreen(
+                    "আপনার ডিভাইসে ইন্টারনেট সংযোগ নেই। অনুগ্রহ করে ইন্টারনেট চালু করে পুনরায় চেষ্টা করুন।",
+                    webView.url ?: WebAppConfig.BASE_URL
+                )
+            } else {
+                showPremiumTransitionLoader()
+                WebAppConfig.forceRefreshWithCacheBypass(webView)
+            }
         }
     }
 
