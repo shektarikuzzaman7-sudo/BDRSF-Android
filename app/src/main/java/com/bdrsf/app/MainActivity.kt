@@ -21,6 +21,7 @@ import android.view.Gravity
 import android.view.HapticFeedbackConstants
 import android.view.View
 import android.view.WindowManager
+import android.webkit.CookieManager
 import android.webkit.WebView
 import android.widget.FrameLayout
 import android.widget.ImageView
@@ -45,6 +46,7 @@ import com.bdrsf.app.config.WebAppConfig
 import com.bdrsf.app.features.contact.ContactPickerFeature
 import com.bdrsf.app.features.download.DownloadFeature
 import com.bdrsf.app.features.kyc.KycOperatingEngine
+import com.bdrsf.app.features.ocr.ScreenshotOcrFeature
 import com.bdrsf.app.features.qr.QrScannerFeature
 import com.bdrsf.app.features.share.ShareFeature
 import com.bdrsf.app.services.BdrsfFirebaseMessagingService
@@ -60,6 +62,7 @@ class MainActivity : AppCompatActivity(), AndroidBridge.BridgeActionHandler {
         private const val RC_GALLERY_QR = 6001
         private const val PREFS_BATTERY_PROMPT = "bdrsf_battery_prompt_prefs"
         private const val KEY_BATTERY_PROMPTED = "battery_exemption_prompted"
+        private var isAppProcessActive = false
     }
 
     private lateinit var mainLayout: RelativeLayout
@@ -74,6 +77,7 @@ class MainActivity : AppCompatActivity(), AndroidBridge.BridgeActionHandler {
     private lateinit var contactPickerFeature: ContactPickerFeature
     private lateinit var qrScannerFeature: QrScannerFeature
     private lateinit var kycOperatingEngine: KycOperatingEngine
+    private lateinit var screenshotOcrFeature: ScreenshotOcrFeature
 
     private var pendingGalleryQrCallback: String? = null
     private var lastBackPressTime: Long = 0L
@@ -119,6 +123,9 @@ class MainActivity : AppCompatActivity(), AndroidBridge.BridgeActionHandler {
         supportActionBar?.hide()
         requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_PORTRAIT
 
+        val isColdStartAfterKill = !isAppProcessActive
+        isAppProcessActive = true
+
         setupSystemWindows()
         initViews()
         initFeatures()
@@ -130,8 +137,28 @@ class MainActivity : AppCompatActivity(), AndroidBridge.BridgeActionHandler {
         PermissionHelper.requestAllInitialPermissions(this)
         requestNotificationPermissionIfNeeded()
 
-        val initialUrl = extractNotificationTargetUrl(intent) ?: WebAppConfig.BASE_URL
-        webView.loadUrl(initialUrl)
+        if (isColdStartAfterKill) {
+            clearSessionOnAppKill()
+        } else {
+            val initialUrl = extractNotificationTargetUrl(intent) ?: WebAppConfig.BASE_URL
+            webView.loadUrl(initialUrl)
+        }
+    }
+
+    private fun clearSessionOnAppKill() {
+        try {
+            CookieManager.getInstance().removeSessionCookies(null)
+            CookieManager.getInstance().removeAllCookies(null)
+            CookieManager.getInstance().flush()
+        } catch (_: Exception) {}
+
+        val baseClean = WebAppConfig.BASE_URL.substringBefore("?").trimEnd('/')
+        webView.loadUrl("$baseClean/index.php?page=logout")
+        webView.postDelayed({
+            if (::webView.isInitialized) {
+                webView.loadUrl(WebAppConfig.BASE_URL)
+            }
+        }, 300L)
     }
 
     override fun onNewIntent(intent: Intent) {
@@ -362,6 +389,7 @@ class MainActivity : AppCompatActivity(), AndroidBridge.BridgeActionHandler {
         contactPickerFeature = ContactPickerFeature(this, androidBridge)
         qrScannerFeature = QrScannerFeature(this, mainLayout, androidBridge)
         kycOperatingEngine = KycOperatingEngine(this, mainLayout, androidBridge, webView)
+        screenshotOcrFeature = ScreenshotOcrFeature(this, androidBridge)
 
         webViewClient = NativeWebViewClient(
             activity = this,
@@ -590,6 +618,17 @@ class MainActivity : AppCompatActivity(), AndroidBridge.BridgeActionHandler {
         when (action) {
             "PICK_CONTACT" -> contactPickerFeature.pickContact(callback)
             "FORCE_REFRESH" -> WebAppConfig.forceRefreshWithCacheBypass(webView)
+            "SCAN_SCREENSHOT_OCR" -> {
+                val base64Img = payload.optString("image_base64", "")
+                if (base64Img.isNotBlank()) {
+                    screenshotOcrFeature.scanBase64Image(base64Img, callback)
+                } else {
+                    androidBridge.sendResponseToWeb(
+                        BridgeResponse(action = action, status = Status.ERROR, message = "Empty screenshot data"),
+                        callback
+                    )
+                }
+            }
             "START_HD_FACE_CAMERA", "FACE_VERIFICATION", "START_FACE_LIVENESS" -> {
                 kycOperatingEngine.startHdFaceCamera(callback)
             }
