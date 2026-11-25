@@ -83,9 +83,23 @@ class AndroidBridge(
                     val type = payload.optString("type", "light")
                     actionHandler.onTriggerHapticRequested(type)
                 }
+                "SCAN_SCREENSHOT_OCR" -> {
+                    actionHandler.onCustomActionRequested("SCAN_SCREENSHOT_OCR", payload, cb)
+                }
                 else -> actionHandler.onCustomActionRequested(actionName.trim(), payload, cb)
             }
         }
+    }
+
+    @JavascriptInterface
+    fun scanScreenshotOcr(imageBase64: String?, callbackName: String?) {
+        val cleanImg = (imageBase64 ?: "").trim()
+        if (cleanImg.isEmpty()) return
+        val payload = JSONObject().apply {
+            put("image_base64", cleanImg)
+        }
+        val cb = callbackName?.takeIf { it.isNotBlank() } ?: "onScreenshotOcrResult"
+        executeFeature("SCAN_SCREENSHOT_OCR", payload.toString(), cb)
     }
 
     @JavascriptInterface
