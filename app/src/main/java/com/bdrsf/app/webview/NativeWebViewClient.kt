@@ -21,13 +21,13 @@ import java.net.URISyntaxException
 
 /**
  * BDRSF নেটিভ ওয়েবভিউ ক্লায়েন্ট।
- * সুরক্ষিত URL রাউটিং, পেমেন্ট গেটওয়ে, থার্ড-পার্টি অ্যাপ স্কিম এবং ব্রাউজার নেভিগেশন নিয়ন্ত্রণ করে।
+ * সুরক্ষিত URL রাউটিং, পেমেন্ট গেটওয়ে, থার্ড-পার্টি অ্যাপ স্কিম এবং মেইন-ফ্রেম এরর হ্যান্ডলিং নিয়ন্ত্রণ করে।
  */
 class NativeWebViewClient(
     private val activity: Activity,
     private val onPageStartedListener: (() -> Unit)? = null,
     private val onPageFinishedListener: (() -> Unit)? = null,
-    private val onErrorReceivedListener: ((errorCode: Int, description: String) -> Unit)? = null
+    private val onErrorReceivedListener: ((errorCode: Int, description: String, failingUrl: String) -> Unit)? = null
 ) : WebViewClient() {
 
     companion object {
@@ -68,7 +68,7 @@ class NativeWebViewClient(
             return false
         }
 
-        // ৩. Android Intent Scheme হ্যান্ডলিং (যেমন: বিকাশ, নগদ বা ব্যাংকিং অ্যাপ সরাসরি ওপেন হওয়া)
+        // ৩. Android Intent Scheme হ্যান্ডলিং (বিকাশ, নগদ বা ব্যাংকিং অ্যাপ সরাসরি ওপেন হওয়া)
         if (scheme == "intent") {
             return try {
                 val intent = Intent.parseUri(url, Intent.URI_INTENT_SCHEME)
@@ -79,12 +79,10 @@ class NativeWebViewClient(
                     if (resolveInfo != null) {
                         activity.startActivity(intent)
                     } else {
-                        // ডিভাইসে সংশ্লিষ্ট অ্যাপ না থাকলে ব্রাউজার ফলব্যাক URL চেষ্টা করবে
                         val fallbackUrl = intent.getStringExtra("browser_fallback_url")
                         if (!fallbackUrl.isNullOrBlank()) {
                             view?.loadUrl(fallbackUrl)
                         } else {
-                            // প্লে স্টোর থেকে অ্যাপ ইনস্টল করার পেজ ওপেন করবে
                             val appPackage = intent.`package`
                             if (!appPackage.isNullOrBlank()) {
                                 openGooglePlayStore(appPackage)
@@ -153,7 +151,9 @@ class NativeWebViewClient(
 
     override fun onPageStarted(view: WebView?, url: String?, favicon: Bitmap?) {
         super.onPageStarted(view, url, favicon)
-        onPageStartedListener?.invoke()
+        if (!url.isNullOrBlank() && url != "about:blank") {
+            onPageStartedListener?.invoke()
+        }
     }
 
     override fun onPageFinished(view: WebView?, url: String?) {
@@ -169,21 +169,30 @@ class NativeWebViewClient(
             } else {
                 -1
             }
+            // পেজ পরিবর্তনজনিত সাধারণ abort (-1 / ERR_ABORTED) বাদে প্রকৃত নেটওয়ার্ক এরর হ্যান্ডেল করা
+            if (errorCode == ERROR_UNSUPPORTED_SCHEME) return
+
             val errorDescription = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
-                error?.description?.toString() ?: "Unknown Network Error"
+                error?.description?.toString() ?: "ইন্টারনেট সংযোগ বিচ্ছিন্ন রয়েছে"
             } else {
-                "Network connection error"
+                "নেটওয়ার্ক সংযোগে ত্রুটি ঘটেছে"
             }
-            Log.e(TAG, "MainFrame Error: [$errorCode] $errorDescription")
-            onErrorReceivedListener?.invoke(errorCode, errorDescription)
+            val failingUrl = request.url?.toString().orEmpty()
+            Log.e(TAG, "MainFrame Error: [$errorCode] $errorDescription on $failingUrl")
+            onErrorReceivedListener?.invoke(errorCode, errorDescription, failingUrl)
         }
     }
 
     @Suppress("DEPRECATION")
     override fun onReceivedError(view: WebView?, errorCode: Int, description: String?, failingUrl: String?) {
         super.onReceivedError(view, errorCode, description, failingUrl)
-        Log.e(TAG, "Legacy Web Error: [$errorCode] $description on $failingUrl")
-        onErrorReceivedListener?.invoke(errorCode, description ?: "Connection failure")
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.M) {
+            val currentUrl = view?.url.orEmpty()
+            if (failingUrl.isNullOrBlank() || failingUrl == currentUrl) {
+                Log.e(TAG, "Legacy Web Error: [$errorCode] $description on $failingUrl")
+                onErrorReceivedListener?.invoke(errorCode, description ?: "নেটওয়ার্ক সংযোগ ব্যর্থ হয়েছে", failingUrl.orEmpty())
+            }
+        }
     }
 
     override fun onReceivedHttpError(view: WebView?, request: WebResourceRequest?, errorResponse: WebResourceResponse?) {
@@ -191,11 +200,17 @@ class NativeWebViewClient(
         if (request?.isForMainFrame == true) {
             val statusCode = errorResponse?.statusCode ?: 0
             Log.e(TAG, "HTTP Error: $statusCode on ${request.url}")
+            if (statusCode >= 500) {
+                onErrorReceivedListener?.invoke(
+                    statusCode,
+                    "সার্ভার সাময়িকভাবে ব্যস্ত রয়েছে (HTTP $statusCode)",
+                    request.url?.toString().orEmpty()
+                )
+            }
         }
     }
 
     override fun onReceivedSslError(view: WebView?, handler: SslErrorHandler?, error: SslError?) {
-        // ম্যান-ইন-দ্য-মিডল (MITM) আক্রমণ রোধে ইনভ্যালিড এসএসএল হ্যান্ডলার সর্বদা ক্যানসেল করা হবে
         Log.e(TAG, "SSL Certificate Error: ${error?.primaryError}. Aborting connection.")
         handler?.cancel()
     }
