@@ -275,28 +275,6 @@ class MainActivity : AppCompatActivity(), AndroidBridge.BridgeActionHandler {
         }
     }
 
-    private fun injectPageTransitionHook() {
-        if (!::webView.isInitialized) return
-        val hookJs = """
-            (function() {
-                if (window.__bdrsfTransitionHookInstalled) return;
-                window.__bdrsfTransitionHookInstalled = true;
-                function notifyNativeLoader() {
-                    try {
-                        if (window.BDRSF_BRIDGE && typeof window.BDRSF_BRIDGE.executeFeature === 'function') {
-                            window.BDRSF_BRIDGE.executeFeature('SHOW_TRANSITION_LOADER', '{}', '');
-                        }
-                    } catch (e) {}
-                }
-                window.addEventListener('beforeunload', notifyNativeLoader);
-                window.addEventListener('pagehide', notifyNativeLoader);
-            })();
-        """.trimIndent()
-        try {
-            webView.evaluateJavascript(hookJs, null)
-        } catch (_: Exception) {}
-    }
-
     private fun clearSessionOnAppKill() {
         try {
             val cookieManager = CookieManager.getInstance()
@@ -485,14 +463,13 @@ class MainActivity : AppCompatActivity(), AndroidBridge.BridgeActionHandler {
 
     private fun setupSystemWindows() {
         try {
-            val themeColor = Color.parseColor("#0A2F1D")
             WindowCompat.setDecorFitsSystemWindows(window, false)
 
             @Suppress("DEPRECATION")
-            window.statusBarColor = themeColor
+            window.statusBarColor = Color.TRANSPARENT
 
             @Suppress("DEPRECATION")
-            window.navigationBarColor = themeColor
+            window.navigationBarColor = Color.TRANSPARENT
 
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
                 window.isNavigationBarContrastEnforced = false
@@ -513,27 +490,24 @@ class MainActivity : AppCompatActivity(), AndroidBridge.BridgeActionHandler {
 
         mainLayout = RelativeLayout(this).apply {
             layoutParams = RelativeLayout.LayoutParams(RelativeLayout.LayoutParams.MATCH_PARENT, RelativeLayout.LayoutParams.MATCH_PARENT)
-            setBackgroundColor(Color.parseColor("#0A2F1D"))
+            setBackgroundColor(Color.TRANSPARENT)
         }
 
+        // স্ট্যাটাস বার ও নেভিগেশন বার স্বচ্ছ রেখে ইনসেট ওয়েবভিউকে পাস করা (শুধুমাত্র কীবোর্ড খুললে নিচে প্যাডিং)
         ViewCompat.setOnApplyWindowInsetsListener(mainLayout) { view, insets ->
-            val statusBars = insets.getInsets(WindowInsetsCompat.Type.statusBars())
-            val navBars = insets.getInsets(WindowInsetsCompat.Type.navigationBars())
             val ime = insets.getInsets(WindowInsetsCompat.Type.ime())
-
-            val bottomInset = if (ime.bottom > 0) ime.bottom else navBars.bottom
-            view.setPadding(0, statusBars.top, 0, bottomInset)
-            WindowInsetsCompat.CONSUMED
+            view.setPadding(0, 0, 0, ime.bottom)
+            insets
         }
 
-        // ১. মেইন ওয়েবভিউ লেয়ার
+        // ১. মেইন ওয়েবভিউ লেয়ার (স্বচ্ছ সিস্টেম বারের নিচ দিয়ে ওয়েবসাইটের ব্যাকগ্রাউন্ড/থিম কালার দৃশ্যমান থাকবে)
         webView = WebView(this).apply {
             layoutParams = RelativeLayout.LayoutParams(RelativeLayout.LayoutParams.MATCH_PARENT, RelativeLayout.LayoutParams.MATCH_PARENT)
-            setBackgroundColor(Color.parseColor("#04130F"))
+            setBackgroundColor(Color.TRANSPARENT)
         }
         mainLayout.addView(webView)
 
-        // ২. প্রিমিয়াম নেটওয়ার্ক এরর স্ক্রিন (Sovereign Emerald & Gold Glass Card + Try Again বাটন)
+        // ২. প্রিমিয়াম নেটওয়ার্ক এরর স্ক্রিন
         networkErrorLayout = buildPremiumNetworkErrorView(density)
         mainLayout.addView(networkErrorLayout)
 
@@ -605,7 +579,6 @@ class MainActivity : AppCompatActivity(), AndroidBridge.BridgeActionHandler {
             }
         }
 
-        // আইকন ব্যাজ
         val iconCircleSize = (76 * density).toInt()
         val iconChamber = FrameLayout(this).apply {
             layoutParams = LinearLayout.LayoutParams(iconCircleSize, iconCircleSize).apply {
@@ -629,7 +602,6 @@ class MainActivity : AppCompatActivity(), AndroidBridge.BridgeActionHandler {
         iconChamber.addView(statusIcon)
         cardBox.addView(iconChamber)
 
-        // মেইন টাইটেল
         val titleView = TextView(this).apply {
             text = "নেটওয়ার্ক সংযোগ বিচ্ছিন্ন!"
             setTextColor(Color.WHITE)
@@ -645,7 +617,6 @@ class MainActivity : AppCompatActivity(), AndroidBridge.BridgeActionHandler {
         }
         cardBox.addView(titleView)
 
-        // সাব-টাইটেল / এরর বিবরণ
         errorSubtitleText = TextView(this).apply {
             text = "আপনার ইন্টারনেট সংযোগ অথবা সার্ভারের সাথে যোগাযোগ করা যাচ্ছে না। অনুগ্রহ করে সংযোগ পরীক্ষা করে আবার চেষ্টা করুন।"
             setTextColor(Color.parseColor("#CBD5E1"))
@@ -661,7 +632,6 @@ class MainActivity : AppCompatActivity(), AndroidBridge.BridgeActionHandler {
         }
         cardBox.addView(errorSubtitleText)
 
-        // প্রিমিয়াম গোল্ডেন Try Again বাটন
         val retryButton = Button(this).apply {
             text = "পুনরায় চেষ্টা করুন  •  TRY AGAIN"
             isAllCaps = false
@@ -710,7 +680,6 @@ class MainActivity : AppCompatActivity(), AndroidBridge.BridgeActionHandler {
                     if (!hasMainFrameError) {
                         hideNetworkErrorScreen()
                     }
-                    injectPageTransitionHook()
                     hidePremiumTransitionLoader(immediate = false)
                     WebAppConfig.syncCookies()
                     restorePersistedLauncherBadge()
@@ -917,11 +886,13 @@ class MainActivity : AppCompatActivity(), AndroidBridge.BridgeActionHandler {
 
     override fun onSetSystemBarsRequested(statusBarColor: String, navBarColor: String, lightIcons: Boolean) {
         try {
-            val sColor = Color.parseColor(statusBarColor)
-            val nColor = Color.parseColor(navBarColor)
-            window.statusBarColor = sColor
-            window.navigationBarColor = nColor
-            mainLayout.setBackgroundColor(sColor)
+            // হার্ডকোডেড কালার পরিহার করে কাচের মতো স্বচ্ছ সিস্টেম বার বজায় রাখা
+            @Suppress("DEPRECATION")
+            window.statusBarColor = Color.TRANSPARENT
+
+            @Suppress("DEPRECATION")
+            window.navigationBarColor = Color.TRANSPARENT
+
             val insetsController = WindowInsetsControllerCompat(window, window.decorView)
             insetsController.isAppearanceLightStatusBars = lightIcons
             insetsController.isAppearanceLightNavigationBars = lightIcons
@@ -949,7 +920,7 @@ class MainActivity : AppCompatActivity(), AndroidBridge.BridgeActionHandler {
     override fun onCustomActionRequested(action: String, payload: JSONObject, callback: String?) {
         when (action) {
             "SHOW_TRANSITION_LOADER" -> showPremiumTransitionLoader()
-            "HIDE_TRANSITION_LOADER" -> hidePremiumTransitionLoader(immediate = false)
+            "HIDE_TRANSITION_LOADER" -> hidePremiumTransitionLoader(immediate = true)
             "PICK_CONTACT" -> contactPickerFeature.pickContact(callback)
             "FORCE_REFRESH" -> {
                 showPremiumTransitionLoader()
