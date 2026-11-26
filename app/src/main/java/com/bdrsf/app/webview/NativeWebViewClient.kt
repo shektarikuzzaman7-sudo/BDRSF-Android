@@ -169,8 +169,8 @@ class NativeWebViewClient(
             } else {
                 -1
             }
-            // পেজ পরিবর্তনজনিত সাধারণ abort (-1 / ERR_ABORTED) বাদে প্রকৃত নেটওয়ার্ক এরর হ্যান্ডেল করা
-            if (errorCode == ERROR_UNSUPPORTED_SCHEME) return
+            // র‍্যাপিড রিডাইরেক্ট বা বাতিল হওয়া রিকোয়েস্ট (-1 / ERR_ABORTED) এবং আনসাপোর্টেড স্কিম বাদে প্রকৃত এরর হ্যান্ডলিং
+            if (errorCode == ERROR_UNSUPPORTED_SCHEME || errorCode == -1) return
 
             val errorDescription = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
                 error?.description?.toString() ?: "ইন্টারনেট সংযোগ বিচ্ছিন্ন রয়েছে"
@@ -187,6 +187,7 @@ class NativeWebViewClient(
     override fun onReceivedError(view: WebView?, errorCode: Int, description: String?, failingUrl: String?) {
         super.onReceivedError(view, errorCode, description, failingUrl)
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.M) {
+            if (errorCode == -1) return
             val currentUrl = view?.url.orEmpty()
             if (failingUrl.isNullOrBlank() || failingUrl == currentUrl) {
                 Log.e(TAG, "Legacy Web Error: [$errorCode] $description on $failingUrl")
